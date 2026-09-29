@@ -1125,7 +1125,6 @@
     }
 
     function stopCloneObserver() { if (cloneObserver) { cloneObserver.disconnect(); cloneObserver = null; } }
-    function stopSuggestionObserver() { if (suggestionObserver) { suggestionObserver.disconnect(); suggestionObserver = null; } }
 
     function destroy() {
         destroyed = true;
