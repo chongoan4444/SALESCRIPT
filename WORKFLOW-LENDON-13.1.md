@@ -1,6 +1,72 @@
-# Pancake hỗ trợ lên đơn 13.0 — bỏ UI lớn, giữ 1 nút TẠM DỪNG + 1 nút BẬT/TẮT, sửa logic tự điền Giảm giá
+# Pancake hỗ trợ lên đơn 13.1 — UI tối giản + tự điền Giảm giá chính xác
 
-File: `Pancake-LenDon-13.0.user.js` (thay thế bản 12.1 bạn đang chạy)
+File: `Pancake-LenDon-13.1.user.js` (thay thế bản 12.1 / 13.0 bạn đang chạy)
+
+---
+
+# PHẦN 1 — 13.1: sửa lỗi "script không thấy điền gì cả"
+
+Bản 13.0 **quá cứng** khi tìm khu form đơn (chỉ chịu cấu trúc `#customerCol` +
+`.swipeable-view-order` như trong `html*.txt`). Chỉ cần DOM thật khác một chút là
+script không tìm thấy form ⇒ **im lặng, không điền gì**. 13.1 sửa 5 điểm:
+
+### 1.1 Dò form đơn theo **4 tầng** (tầng nào ra kết quả dùng được thì lấy)
+1. Pane đang mở trong `#customerCol` (như 13.0, nhưng chọn theo điểm dấu hiệu).
+2. **Ứng viên bất kỳ đang hiện**: `form`, `.swipeable-view-order`,
+   `[class*="order" i]`, `[id*="order" i]`, `.ant-drawer-body`, `.ant-modal-content`
+   — chấm điểm theo ô tìm kiếm SP (3đ), `#shippingAddress` (3đ), ô nhập số (2đ).
+3. Đi từ **dòng có nhãn chính xác "Giảm giá"** lên tối đa 4 cấp để tìm khối thanh toán.
+4. Cuối cùng mới dò **vùng cuộn lớn** (đúng cách bản 12.1 vẫn làm).
+
+Nhờ tầng 2–4, form đơn nằm ở trang riêng, trong modal, hay ở cột khác đều nhận được.
+
+### 1.2 Lọc hiển thị ở **chính dòng/ô** cần dùng (quan trọng)
+Pane bị trượt ra ngoài thì **phần tử con thừa hưởng đúng vị trí đó** ⇒ mọi dòng tiền,
+ô nhập, ô tìm kiếm, ô địa chỉ… của pane ẩn đều bị loại (`shown()`), **kể cả khi khối
+cha vẫn nằm trong màn hình** (ví dụ `.react-swipeable-view-container` luôn đứng yên
+tại chỗ và chỉ con của nó bị dịch — đây chính là lỗi khiến bản 13.0 có thể ghi nhầm
+hoặc không ghi gì). Có test hồi quy riêng cho tình huống này.
+
+### 1.3 Tự điền mã SP **không cần bấm vào ô**
+13.0 (và 12.1) chỉ điền khi bạn click/focus ô tìm kiếm. 13.1 điền sẵn mỗi nhịp quét
+khi ô còn trống, vẫn **không đè** chữ bạn đang gõ.
+
+### 1.4 Nhận nhiều cách nói "tổng đơn" hơn
+`tổng 320k`, `chốt 320k`, `bill 320k`, `thanh toán 320k`, `còn lại 320k`,
+`160k + 160k`, `160k = 320k`, `320.000đ`, `1tr2`, `320` (đoán nghìn)…
+và nhãn `Thành tiền:` (có dấu hai chấm) vẫn nhận.
+Ngược lại **không** nhận: `ck 320k`, giờ/ngày (`08:14`, `25/09`), SĐT, `cân nặng`,
+`size M`, và các nhãn `Giảm giá theo combo / voucher / trên từng sản phẩm`.
+
+### 1.5 Bảng **chẩn đoán** — biết ngay script đang "thấy" gì
+`⚙ → Chẩn đoán` hoặc **Ctrl+Shift+D**. Bảng in ra: pane/cột phải, ứng viên form tốt
+nhất, khu form đơn dùng được, ô Giảm giá, Thành tiền, Tổng tiền hàng, Phí vận chuyển,
+ô tìm kiếm SP, ô địa chỉ, số nhãn "Giảm giá" tìm thấy, số dòng chat, tổng đơn nhận
+diện, size, mã SP, trạng thái. Có nút **Copy**.
+Nếu vẫn không điền, chỉ cần gửi 4 dòng: *Khu form đơn dùng được · ô Giảm giá ·
+Thành tiền · Tổng đơn*.
+
+### 1.6 Bớt chặn oan
+* Giới hạn "tổng đơn cũ" mặc định **200 dòng** (13.0 là 40 dòng → dễ chặn oan đơn
+  mà khách chốt rồi mới nhắn thêm), chỉnh được: 40 / 80 / 200 / **Không giới hạn**.
+* Không thấy dòng "Giảm giá" thì thử thêm `input[type=number]`,
+  `input[inputmode=numeric]`, `input[type=text]` **trong đúng dòng đó**.
+* Lỗi khởi tạo không còn làm script im lặng: có thử lại giao diện và log rõ.
+
+### 1.7 Thanh trạng thái nói rõ đang chờ gì
+`Chưa mở form đơn` · `Chưa có tổng đơn` · `Chưa thấy ô Giảm giá` ·
+`Chưa thấy Thành tiền` · `Chờ thêm SP · 160.000` · `Đang quan sát` ·
+`Ghi 60.000 → 260.000` · `260.000 ✓` · `Lệch 40.000` · `Tổng đơn đã cũ`…
+(rê chuột lên thanh để xem chi tiết + tổng đơn + mã SP + địa chỉ)
+
+### 1.8 Kiểm thử
+**117 test pass** (48 đọc tiền/nhãn + 25 bộ điều khiển + 30 DOM jsdom `html3.txt` +
+**14 test "UI đổi"**: form không có `#customerCol`, cấu trúc dòng tiền khác hẳn,
+pane bị đẩy ra ngoài, chưa có form).
+
+---
+
+# PHẦN 2 — 13.0: bỏ UI lớn, giữ 1 nút TẠM DỪNG + 1 nút BẬT/TẮT, sửa logic Giảm giá
 
 > ⚠️ **Tắt/gỡ script 12.1 cũ trước khi bật bản này.** Hai script cùng ghi vào ô
 > "Giảm giá" sẽ tranh nhau và vẫn ra số sai.
@@ -175,7 +241,7 @@ xem, không điền) — giữ code gọn và nhẹ, không quét `div` toàn tr
 
 ---
 
-## 6. Kiểm thử
+## 6. Kiểm thử (13.0)
 
 Bộ test chạy bằng Node (jsdom), không nằm trong repo:
 
@@ -190,7 +256,7 @@ Bộ test chạy bằng Node (jsdom), không nằm trong repo:
   + size `L`, địa chỉ, và một lượt chạy thật: đơn 320.000 + ship 30.000 → tự điền
   **30.000** → Thành tiền **320.000**, rồi đổi tổng đơn thành 300k → tự tính lại.
 
-Tổng: **92/92 pass**.
+Tổng: **92/92 pass** (13.0).
 
 ---
 
@@ -212,7 +278,7 @@ chữ** ("Giảm giá", "Thành tiền", "Phí vận chuyển"…) nên không c
 
 ## 8. Dùng nhanh
 
-1. Gỡ/tắt script 12.1 → cài `Pancake-LenDon-13.0.user.js`.
+1. Gỡ/tắt script 12.1 → cài `Pancake-LenDon-13.1.user.js`.
 2. Mở hội thoại → tab **Tạo đơn** (cột phải) → thêm sản phẩm (bấm ô tìm kiếm, mã tự điền).
 3. Chat có `tổng đơn / chốt đơn` ⇒ script tự tính và điền ô **Giảm giá**, thanh trạng thái
    hiện `260.000 ✓`.

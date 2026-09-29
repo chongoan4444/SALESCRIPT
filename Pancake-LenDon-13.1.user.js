@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         Pancake hỗ trợ lên đơn (13.0 - Tối giản + Giảm giá chính xác)
+// @name         Pancake hỗ trợ lên đơn (13.1 - Tối giản + Giảm giá chính xác)
 // @namespace    http://tampermonkey.net/
-// @version      13.0
-// @description  Tự động điền mã SP + size vào ô tìm kiếm, tự điền địa chỉ, tự tính & điền ô Giảm giá có VÒNG LẶP KIỂM CHỨNG (đọc lại Thành tiền để phát hiện sai và sửa). Giao diện tối giản: 1 nút BẬT/TẮT + 1 nút TẠM DỪNG.
+// @version      13.1
+// @description  Tự động điền mã SP + size, tự điền địa chỉ, tự tính & điền ô Giảm giá có VÒNG LẶP KIỂM CHỨNG (đọc lại Thành tiền để phát hiện sai và sửa). Dò form đơn 4 tầng (chịu được UI đổi), lọc theo vị trí thật để không đọc nhầm pane ẩn. Giao diện tối giản: 1 nút BẬT/TẮT + 1 nút TẠM DỪNG + bảng chẩn đoán (Ctrl+Shift+D).
 // @match        https://pancake.vn/*
 // @match        https://*.pancake.vn/*
 // @match        https://pages.fm/*
@@ -13,6 +13,19 @@
 
 (function () {
     'use strict';
+
+    // =================================================================
+    // 13.1 — sửa "script không thấy điền gì":
+    //   • Dò khu form đơn theo 4 tầng (pane đang mở → ứng viên bất kỳ → hộp
+    //     chứa ô Giảm giá → vùng cuộn), không bám cứng #customerCol nữa.
+    //   • Lọc HIỂN THỊ ở chính dòng/ô cần dùng (pane ẩn bị dịch ra ngoài nên
+    //     phần tử con thừa hưởng vị trí đó ⇒ tự bị loại).
+    //   • Tự điền mã SP khi ô tìm kiếm còn trống (không cần bấm vào ô).
+    //   • Nhận từ khoá tổng đơn rộng hơn: "tổng 320k", "chốt 320k", "bill 320k",
+    //     "thanh toán 320k"; nhãn "Thành tiền:" có dấu hai chấm vẫn nhận.
+    //   • Bảng chẩn đoán Ctrl+Shift+D + nút trong ⚙: biết script đang "thấy" gì.
+    // =================================================================
+
 
     // =================================================================
     // 0. CĂN CỨ DOM (đã đối chiếu kho nguồn trong repo)
@@ -86,7 +99,7 @@
         verifyMs: 420,              // chờ app nhận giá trị
         settleMs: 900,              // chờ Thành tiền cập nhật
         writeCooldown: 600,         // nghỉ tối thiểu giữa 2 lần ghi
-        maxRecentLines: 40          // tổng đơn cũ hơn ngần này dòng thì không tự ghi
+        maxRecentLines: 200         // tổng đơn cũ hơn ngần này dòng thì không tự ghi (0 = không giới hạn)
     };
 
     const DEFAULTS = {
@@ -96,6 +109,7 @@
         tolerance: 5000,     // sai số chấp nhận
         maxDiscount: 2000000,
         maxRatio: 70,        // % tối đa của giá trị đơn
+        maxAge: 200,         // bỏ qua tổng đơn cũ hơn N dòng (0 = không giới hạn)
         debug: false,
         left: null,
         top: null
@@ -133,7 +147,8 @@
         lastFilledCode: '',
         lastWriteAt: 0,
         lastTickAt: 0,
-        status: { code: 'off', text: 'Đang tắt', detail: '' }
+        status: { code: 'off', text: 'Đang tắt', detail: '' },
+        rootDesc: ''
     };
 
     const W = {                // chu trình ghi + kiểm chứng ô Giảm giá
@@ -400,7 +415,7 @@
 
     const PHONE_RE = /(?:0|\+84)(?:3[2-9]|5[689]|7[06-9]|8[1-589]|9[0-46-9])[\s.-]*\d{3}[\s.-]*\d{4}/;
     const ADDR_RE = /(ấp|thôn|xóm|bản|tổ\s*\d+|xã|phường|quận|huyện|tỉnh|tp\b|thành phố|đường|số nhà|khu phố|đối diện|gần\s*(?:chợ|cây xăng|trường)|ngõ|hẻm|kdc|chung cư)/i;
-    const ORDER_RE = /(tổng\s*đơn|chốt\s*đơn|tổng\s*tiền|chốt\s*tiền|tổng\s*thanh\s*toán|chốt\s*nhé|chốt\s*nha)/i;
+    const ORDER_RE = /(tổng|chốt|thành\s*tiền|thanh\s*toán|còn\s*lại|bill)/i;
 
     function isFeeContext(text, index) {
         const ctx = String(text).slice(Math.max(0, index - 16), index);
@@ -505,70 +520,207 @@
 
 
     // =================================================================
-    // 6. TÌM FORM ĐƠN (chỉ trong pane ĐANG MỞ)
+    // 6. TÌM FORM ĐƠN — nhiều tầng, chịu được UI đổi
+    // -----------------------------------------------------------------
+    // Bản 12.1 tìm ô tiền bằng cách tự dò <div> cuộn lớn nhất rồi quét chữ,
+    // nên chạy được cả khi khu "Tạo đơn" nằm ở nơi khác. Bản này phải làm
+    // được như vậy: dò theo nhiều tầng, tầng nào ra KẾT QUẢ DÙNG ĐƯỢC thì lấy.
     // =================================================================
 
     const FORM_MARK =
         'input[type="search"], input.ant-input-number-input, #shippingAddress';
 
+    function formInfoOf(el) {
+        if (!el) return null;
+        const search = el.querySelector('input[type="search"]');
+        const num = el.querySelector('input.ant-input-number-input, input[role="spinbutton"]');
+        const addr = el.querySelector('#shippingAddress');
+        const score = (search ? 3 : 0) + (addr ? 3 : 0) + (num ? 2 : 0);
+        if (!score) return null;
+        return { el: el, search: search, num: num, addr: addr, score: score };
+    }
+
     // Pane này có ĐANG ĐƯỢC NHÌN THẤY thật không?
     // Pane không mở vẫn có kích thước (chỉ bị dịch ra ngoài) nên phải kiểm tra:
     //   - giao với màn hình
     //   - nằm trong hộp #customerCol (pane bị cắt ra ngoài cột = pane ẩn)
-    function paneVisible(p) {
-        if (!isVisible(p)) return false;
-        const r = p.getBoundingClientRect();
-        const vw = window.innerWidth || document.documentElement.clientWidth || 0;
-        if (!(r.right > 8 && r.left < vw - 8)) return false;
-
-        const col = q(document, CONFIG.customerCol);
-        if (col) {
-            const c = col.getBoundingClientRect();
-            if (c.width > 20) {
-                const overlap = Math.min(r.right, c.right) - Math.max(r.left, c.left);
-                if (overlap < r.width * 0.6) return false;
+    function paneVisible(p, strict) {
+        if (isVisible(p)) {
+            const r = p.getBoundingClientRect();
+            const vw = window.innerWidth || document.documentElement.clientWidth || 0;
+            if (r.right > 8 && r.left < vw - 8) {
+                const col = q(document, CONFIG.customerCol);
+                if (col) {
+                    const c = col.getBoundingClientRect();
+                    if (c.width > 20) {
+                        const overlap = Math.min(r.right, c.right) - Math.max(r.left, c.left);
+                        if (overlap >= r.width * 0.6) return true;
+                    } else {
+                        return true;   // chưa đo được #customerCol -> không chặn
+                    }
+                } else {
+                    return true;       // không có #customerCol -> không chặn
+                }
             }
         }
-        return true;
+        return strict ? false : isOnScreen(p);
     }
 
-    // Chọn pane ĐANG MỞ có form đơn (pane "Thông tin" và pane đơn khác vẫn nằm trong DOM)
-    function findOrderPane() {
-        const panes = qa(document, CONFIG.swipePane);
+    // Khu đơn nằm TRONG cột phải mà bị trượt ra ngoài = khu ẩn -> không được ghi.
+    // Ngoài cột phải (modal / nơi khác) thì chỉ cần đang hiện.
+    function insideCustomerCol(el) {
+        const col = q(document, CONFIG.customerCol);
+        return !!(col && el && col.contains(el));
+    }
+
+    function usableRoot(el) {
+        if (!el) return false;
+        return insideCustomerCol(el) ? paneVisible(el, true) : paneVisible(el, false);
+    }
+
+    // Dùng cho MỌI phần tử con (dòng tiền, ô nhập, nút): pane ẩn bị dịch ra ngoài
+    // thì phần tử con thừa hưởng đúng vị trí đó -> tự bị loại.
+    function shown(el) {
+        return usableRoot(el);
+    }
+
+    // Tầng cuối: quét MỌI ứng viên trên trang, chọn cái ĐANG HIỆN và có nhiều
+    // dấu hiệu form đơn nhất. Không phụ thuộc #customerCol / .swipeable-view-order.
+    function pickVisibleCandidate(nodes) {
         let best = null;
-        for (let i = 0; i < panes.length; i++) {
-            const p = panes[i];
-            if (!paneVisible(p)) continue;
-            let score = 0;
-            if (p.querySelector('#shippingAddress')) score += 4;
-            if (p.querySelector('input.ant-input-number-input')) score += 4;
-            if (p.querySelector('input[type="search"]')) score += 2;
-            if (!score) continue;
-            if (!best || score > best.score) best = { pane: p, score };
+        for (let i = 0; i < nodes.length; i++) {
+            const el = nodes[i];
+            if (!el || !el.querySelector) continue;
+            if (document.getElementById('pld-bar') &&
+                (el.id === 'pld-bar' || el.id === 'pld-panel' ||
+                 el.closest('#pld-bar, #pld-panel'))) continue;
+            if (!usableRoot(el)) continue;
+            const info = formInfoOf(el);
+            if (!info) continue;
+            let score = info.score;
+            if (el.closest('#customerCol')) score += 2;
+            if (el.classList && el.classList.contains('swipeable-view-order')) score += 2;
+            if (score > (best ? best.score : -1)) best = { el, score, search: info.search, num: info.num, addr: info.addr };
         }
-        return best ? best.pane : null;
+        return best;
+    }
+
+    // Tầng 3: đi từ ô "Giảm giá" đang hiện lên tới khối chứa cả khu thanh toán
+    function boxTopFor(root) {
+        const row = q(root, CONFIG.paymentRow);
+        if (!row) return null;
+        return row.parentElement || row;
+    }
+
+    const boxCache = { at: 0, box: null };
+
+    function findPaymentBox() {
+        const now = Date.now();
+        if (now - boxCache.at < 300) return boxCache.box;
+
+        const rows = qa(document, CONFIG.paymentRow);
+        const readBox = (box) => {
+            if (!box) return null;
+            const f = readForm(box);
+            if (f.discount && f.discount.input) return box;
+            return null;
+        };
+
+        let box = null;
+        for (let i = 0; i < rows.length; i++) {
+            const cand = rows[i].parentElement;
+            if (!cand) continue;
+            if (!usableRoot(cand)) continue;
+            box = readBox(cand);
+            if (box) break;
+        }
+
+        // nhãn "Giảm giá" chính xác + input number trong cùng khối
+        if (!box) {
+            const leaves = qa(document, 'span, div, label, p, td, th').filter(el => !el.children.length);
+            for (let i = 0; i < leaves.length; i++) {
+                const m = labelMatches(leaves[i].textContent, CONFIG.labels.discount);
+                if (!m) continue;
+                let el = leaves[i];
+                for (let up = 0; up < 4 && el; up++) {
+                    el = el.parentElement;
+                    if (!el || !el.querySelector) continue;
+                    if (el.querySelector(CONFIG.inputNumber)) {
+                        const cand = el.parentElement || el;
+                        if (usableRoot(cand)) { box = readBox(cand); if (box) break; }
+                    }
+                }
+                if (box) break;
+            }
+        }
+
+        boxCache.at = now;
+        boxCache.box = box;
+        return box;
+    }
+
+    // Tầng 4 (chế độ dễ tính): tự dò vùng cuộn lớn như bản 12.1
+    let looseRoot = { at: 0, el: null };
+
+    function findLooseOrderRoot() {
+        const now = Date.now();
+        if (now - looseRoot.at < 1000) return looseRoot.el;
+
+        const widget = document.getElementById('pld-bar');
+        const divs = qa(document, 'div');
+        const scrolls = [];
+        for (let i = 0; i < divs.length; i++) {
+            const el = divs[i];
+            if (el.id === 'pld-bar' || el.id === 'pld-panel') continue;
+            if (widget && widget.contains(el)) continue;
+            if (!el.querySelector(CONFIG.inputNumber)) continue;
+            const st = window.getComputedStyle(el);
+            if (st.overflowY !== 'auto' && st.overflowY !== 'scroll') continue;
+            const r = el.getBoundingClientRect();
+            if (r.width < 240 || r.height < 260) continue;
+            if (!usableRoot(el)) continue;
+            scrolls.push(el);
+        }
+        scrolls.sort((a, b) => (b.getBoundingClientRect().height - a.getBoundingClientRect().height));
+        looseRoot = { at: now, el: scrolls[0] || null };
+        return looseRoot.el;
     }
 
     function findOrderFormRoot() {
-        const pane = findOrderPane();
-        if (pane) {
-            const anchor = pane.querySelector(FORM_MARK);
-            if (!anchor) return null;
-            return anchor.closest('.swipeable-view-order, .swipeable-view-content, form') || pane;
+        // 1) pane đang mở có form đơn
+        const panes = qa(document, CONFIG.swipePane);
+        const open = panes.filter(p => paneVisible(p, true)).map(formInfoOf).filter(Boolean);
+        if (open.length) {
+            open.sort((a, b) => b.score - a.score);
+            const el = open[0].el;
+            const inner = el.querySelector('.swipeable-view-order, .swipeable-view-content');
+            return inner || el;
         }
-        // một số luồng mở form đơn dạng modal
-        const modals = qa(document, '.ant-modal-content, .ant-drawer-body, .ant-modal');
-        const modal = modals.filter(el => isOnScreen(el) && el.querySelector(FORM_MARK))[0];
-        return modal || null;
+
+        // 2) ứng viên bất kỳ đang hiện, nhiều dấu hiệu form đơn nhất
+        const cands = qa(document,
+            'form, .swipeable-view-order, [class*="order" i], [id*="order" i], .ant-drawer-body, .ant-modal-content');
+        const picked = pickVisibleCandidate(cands);
+        if (picked) {
+            return picked.el.closest('.swipeable-view-order, .swipeable-view-content, form') || picked.el;
+        }
+
+        // 3) đi từ khối chứa ô "Giảm giá"
+        const box = findPaymentBox();
+        if (box) return box;
+
+        // 4) dò vùng cuộn (giống bản 12.1) — cuối cùng mới dùng
+        return findLooseOrderRoot();
     }
 
     function getAddressInput(root) {
+        const direct0 = q(document, CONFIG.address);
+        if (direct0 && usableRoot(direct0)) return direct0;
+
         const scope = root || findOrderFormRoot() || document;
         const direct = q(scope, CONFIG.address);
-        if (direct && isVisible(direct)) return direct;
-        const docLevel = q(document, CONFIG.address);
-        if (docLevel && isOnScreen(docLevel)) return docLevel;
-        const cands = qa(scope, 'input[type="text"], input:not([type]), textarea').filter(isVisible);
+        if (direct && usableRoot(direct)) return direct;
+        const cands = qa(scope, 'input[type="text"], input:not([type]), textarea').filter(shown);
         return cands.filter(el => /address|địa chỉ|dia chi/i.test(
             (el.id || '') + ' ' + (el.name || '') + ' ' + (el.placeholder || '')
         ))[0] || null;
@@ -606,6 +758,7 @@
             // "giảm giá: 60.000 đ" (nhãn dính số) -> chỉ nhận khi phần còn lại là số tiền
             if (t.indexOf(l + ':') === 0 || t.indexOf(l + ' ') === 0) {
                 const rest = t.slice(l.length).replace(/^[:\s]+/, '');
+                if (rest === '') return { label: l, inline: '' };   // "Thành tiền:"
                 if (/^[\d.,\s]*(đ|vnđ|vnd|đồng)?$/.test(rest) && /\d/.test(rest)) {
                     return { label: l, inline: rest };
                 }
@@ -645,6 +798,7 @@
         };
 
         qa(root, CONFIG.paymentRow).forEach(row => {
+            if (!shown(row)) return;
             const lab = rowLabel(row);
             const m = lab ? labelMatches(lab.text, list) : null;
             if (m) push(row, m.label, lab.el);
@@ -656,7 +810,7 @@
             const m = labelMatches(el.textContent, list);
             if (!m) continue;
             const row = rowOf(el);
-            if (!row) continue;
+            if (!row || !shown(el) || !shown(row)) continue;
             if (!/\d/.test(row.textContent || '') && !row.querySelector('input')) continue;
             push(row, m.label, el);
         }
@@ -682,6 +836,7 @@
         return toks.reduce((a, b) => (b.value > a.value ? b : a), toks[0]).value;
     }
 
+    // Chỉ gọi với row đã xác nhận nhãn CHÍNH XÁC "Giảm giá" nên các fallback dưới đây an toàn.
     function findDiscountInputIn(row) {
         if (!row) return null;
         const sels = [
@@ -689,10 +844,14 @@
             '.pancake-antd-input-number input',
             '.box-input-number-wrapper input',
             'input.ant-input-number-input',
-            'input[role="spinbutton"]'
+            'input[role="spinbutton"]',
+            'input[type="number"]',
+            'input[inputmode="numeric"]',
+            'input[type="text"]',
+            'input:not([type])'
         ];
         for (let i = 0; i < sels.length; i++) {
-            const el = qa(row, sels[i]).filter(e => !e.disabled && !e.readOnly)[0];
+            const el = qa(row, sels[i]).filter(e => !e.disabled && !e.readOnly && shown(e))[0];
             if (el) return el;
         }
         return null;
@@ -751,7 +910,7 @@
             out.finalEl = best.row.querySelector(CONFIG.finalPriceClass) || best.row;
         } else {
             // fallback 1: .text-final-price trong pane đang mở
-            const list = qa(root, CONFIG.finalPriceClass).filter(isVisible);
+            const list = qa(root, CONFIG.finalPriceClass).filter(shown);
             for (let i = list.length - 1; i >= 0; i--) {
                 const v = digitsValue(list[i].textContent);
                 if (v) { out.finalPrice = v; out.finalEl = list[i]; break; }
@@ -934,7 +1093,7 @@
             setStatus('notarget', 'Chưa có tổng đơn', 'Chưa thấy "tổng đơn / chốt đơn" trong chat.');
             return;
         }
-        if (S.target.age > CONFIG.maxRecentLines) {
+        if (S.cfg.maxAge > 0 && S.target.age > S.cfg.maxAge) {
             setStatus('stale', 'Tổng đơn đã cũ',
                 'Tổng đơn nằm cách ' + S.target.age + ' dòng nên KHÔNG tự ghi (tránh giảm sai). Hãy chốt lại tổng đơn.');
             return;
@@ -1133,9 +1292,17 @@
         try { return el.matches(CONFIG.productSearchLoose); } catch (_) { return false; }
     }
 
+    // Điền sẵn mã khi ô tìm kiếm còn TRỐNG (bản 12.1 cũng điền sẵn, không cần bấm)
+    function prefillProductSearch(root) {
+        const input = qa(root || document, CONFIG.productSearchLoose).filter(shown)[0];
+        if (!input) return;
+        if (document.activeElement === input) return;
+        fillProductSearch(input);
+    }
+
     function fillProductSearch(input) {
         if (!S.cfg.enabled || S.cfg.paused) return;
-        if (!input || !isOnScreen(input)) return;
+        if (!input || !shown(input)) return;
 
         const code = getProductCodeWithSize();
         if (!code) return;
@@ -1180,6 +1347,80 @@
 
 
     // =================================================================
+    // 11b. CHẨN ĐOÁN (để biết script "không thấy" cái gì)
+    // =================================================================
+
+    function describeEl(el) {
+        if (!el) return 'KHÔNG tìm thấy';
+        const cls = String(el.className || '').split(/\s+/).filter(Boolean).slice(0, 3).join('.');
+        return el.tagName.toLowerCase() + (el.id ? '#' + el.id : '') + (cls ? '.' + cls : '');
+    }
+
+    function diagnose() {
+        const L = [];
+        const cands = qa(document, CONFIG.swipePane);
+        const opens = cands.filter(e => paneVisible(e, true));
+
+        L.push('URL: ' + String(location.href).slice(0, 110));
+        L.push('');
+        L.push('— KHUNG ĐƠN —');
+        L.push('#customerCol: ' + (q(document, CONFIG.customerCol) ? 'CÓ' : 'KHÔNG'));
+        L.push('pane [data-swipeable] / .swipeable-view-order: ' +
+            cands.length + ' / ' + qa(document, '.swipeable-view-order').length +
+            ' (đang hiện: ' + opens.length + ')');
+        if (opens.length) L.push('  pane đang hiện: ' + opens.map(describeEl).join(', '));
+
+        const roots = ['form', '[class*="order" i]', '.ant-drawer-body', '.ant-modal-content'];
+        const vi = pickVisibleCandidate(qa(document, roots.join(', ')));
+        L.push('Ứng viên form đang hiện tốt nhất: ' + (vi ? describeEl(vi.el) + ' (điểm ' + vi.score + ')' : 'KHÔNG'));
+
+        const root = findOrderFormRoot();
+        L.push('Khu form đơn dùng được: ' + describeEl(root));
+        const f = readForm(root);
+        L.push('  · ô Giảm giá: ' + (f.discount && f.discount.input ? 'CÓ' : 'KHÔNG') +
+            ' | giá trị hiện tại: ' + (f.discount ? money(f.discount.value) : '—'));
+        L.push('  · Thành tiền: ' + (Number.isFinite(f.finalPrice) ? money(f.finalPrice) + ' đ' : 'KHÔNG đọc được') +
+            (f.finalEl ? '  (' + describeEl(f.finalEl) + ')' : ''));
+        L.push('  · Tổng tiền hàng: ' + (f.goods != null ? money(f.goods) : '—') +
+            ' | Phí vận chuyển: ' + (f.shipping != null ? money(f.shipping) : '—'));
+
+        const search = qa(document, CONFIG.productSearchLoose).filter(isVisible);
+        L.push('Ô tìm kiếm SP: ' + qa(document, 'input[type="search"]').length +
+            ' (đang hiện: ' + search.length + ') | giá trị: ' + (search[0] ? norm(search[0].value) || 'trống' : '—'));
+        const addrEl = getAddressInput(root);
+        L.push('Ô địa chỉ (#shippingAddress): ' + (q(document, CONFIG.address) ? 'CÓ' : 'KHÔNG') +
+            ' | đang hiện: ' + (addrEl ? 'CÓ' : 'KHÔNG') + ' | giá trị: ' + (addrEl ? norm(addrEl.value) || 'trống' : '—'));
+        L.push('Ô nhập số (ant-input-number-input) toàn trang: ' + qa(document, CONFIG.inputNumber).length);
+
+        const dLabels = qa(document, 'span, div, label, p, td, th')
+            .filter(el => !el.children.length && labelMatches(el.textContent, CONFIG.labels.discount));
+        L.push('Nhãn "Giảm giá" (đúng chữ) toàn trang: ' + dLabels.length +
+            (dLabels.length ? ' — vd: ' + dLabels.slice(0, 3).map(el => describeEl(el)).join(', ') : ''));
+
+        L.push('');
+        L.push('— CHAT —');
+        L.push('ô chat #message-col-list: ' + (q(document, CONFIG.messageCol) ? 'CÓ' : 'KHÔNG') +
+            ' | ' + S.lines.length + ' dòng đọc được');
+        L.push('Tổng đơn: ' + (S.target
+            ? money(S.target.value) + ' đ (cách ' + S.target.age + ' dòng)' + (S.target.assumed ? ' [đoán đơn vị]' : '')
+            : 'KHÔNG thấy'));
+        if (S.target) L.push('  dòng: "' + S.target.line + '"');
+        L.push('Size: ' + (S.size || '—') + ' | mã SP: ' + (getProductCode() || '—') +
+            ' | mã + size: ' + (getProductCodeWithSize() || '—'));
+        L.push('Địa chỉ nhận diện: ' + (S.address || '—'));
+        L.push('');
+        L.push('— TRẠNG THÁI —');
+        L.push('Bật: ' + (S.cfg.enabled ? 'CÓ' : 'KHÔNG') + ' | Tạm dừng: ' + (S.cfg.paused ? 'CÓ' : 'KHÔNG'));
+        L.push(S.status.text + (S.status.detail ? ' — ' + S.status.detail : ''));
+        L.push('sai số: ' + money(S.cfg.tolerance) + ' | bước: ' + money(S.cfg.step) +
+            ' | giảm tối đa: ' + money(S.cfg.maxDiscount) +
+            ' | tỉ lệ: ' + S.cfg.maxRatio + '% | tuổi tổng đơn tối đa: ' +
+            (S.cfg.maxAge ? S.cfg.maxAge + ' dòng' : 'không giới hạn'));
+        return L.join('\n');
+    }
+
+
+    // =================================================================
     // 12. GIAO DIỆN TỐI GIẢN (1 nút BẬT/TẮT + 1 nút TẠM DỪNG)
     // =================================================================
 
@@ -1212,7 +1453,18 @@
             'border:1px solid #1e293b;border-radius:6px;padding:2px 6px;font:inherit}',
             '#pld-panel button{width:100%;margin-top:6px;border:0;border-radius:8px;padding:6px;',
             'background:#334155;color:#e2e8f0;font:600 12px/1 inherit;cursor:pointer}',
-            '#pld-panel .pld-note{color:#64748b;font-size:11px;margin-top:6px}'
+            '#pld-panel .pld-note{color:#64748b;font-size:11px;margin-top:6px}',
+            '#pld-diag{position:fixed;z-index:2147483001;display:none;width:430px;max-width:92vw;',
+            'background:#0b1220;color:#e5e7eb;border:1px solid #1e293b;border-radius:12px;padding:10px;',
+            'font:500 12px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;',
+            'box-shadow:0 12px 34px rgba(0,0,0,.5)}',
+            '#pld-diag.open{display:block}',
+            '#pld-diag .pld-dd-head{display:flex;align-items:center;gap:8px;margin-bottom:6px;font-weight:700;color:#7dd3fc}',
+            '#pld-diag .pld-dd-head button{margin-left:auto;border:0;border-radius:6px;padding:3px 8px;',
+            'background:#334155;color:#e2e8f0;font:600 11px/1 inherit;cursor:pointer}',
+            '#pld-diag .pld-dd-head button+button{margin-left:0}',
+            '#pld-diag pre{margin:0;max-height:52vh;overflow:auto;white-space:pre-wrap;word-break:break-word;',
+            'font:11px/1.5 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;color:#cbd5e1}'
         ].join('');
     }
 
@@ -1248,13 +1500,27 @@
             '<input id="pld-max" type="number" step="10000" min="0"></div>' +
             '<div class="pld-row"><label>Tỉ lệ tối đa (%)</label>' +
             '<input id="pld-ratio" type="number" step="5" min="1" max="100"></div>' +
+            '<div class="pld-row"><label>Bỏ qua tổng đơn cũ hơn</label>' +
+            '<select id="pld-age"><option value="40">40 dòng</option><option value="80">80 dòng</option>' +
+            '<option value="200">200 dòng</option><option value="0">Không giới hạn</option></select></div>' +
             '<div class="pld-row"><label><input type="checkbox" id="pld-debug"> Ghi log</label><span></span></div>' +
             '<button id="pld-rearm">Bỏ khoá "sửa tay" cho đơn này</button>' +
+            '<button id="pld-diagbtn">Chẩn đoán (Ctrl+Shift+D)</button>' +
             '<div class="pld-note">Tự động điền: mã SP + size → ô tìm kiếm, địa chỉ, ô Giảm giá.</div>';
         document.body.appendChild(panel);
 
+        const diag = document.createElement('div');
+        diag.id = 'pld-diag';
+        diag.innerHTML =
+            '<div class="pld-dd-head"><span>Chẩn đoán tự động điền</span>' +
+            '<button id="pld-ddcopy">Copy</button><button id="pld-ddclose">✕</button></div>' +
+            '<pre id="pld-ddtext"></pre>';
+        document.body.appendChild(diag);
+
         UI.bar = bar;
         UI.panel = panel;
+        UI.diag = diag;
+        UI.diagText = diag.querySelector('#pld-ddtext');
         UI.dot = bar.querySelector('#pld-dot');
         UI.text = bar.querySelector('#pld-text');
         UI.toggle = bar.querySelector('#pld-toggle');
@@ -1265,6 +1531,7 @@
         const tol = panel.querySelector('#pld-tol');
         const max = panel.querySelector('#pld-max');
         const ratio = panel.querySelector('#pld-ratio');
+        const age = panel.querySelector('#pld-age');
         const debug = panel.querySelector('#pld-debug');
 
         const syncPanel = () => {
@@ -1272,6 +1539,7 @@
             tol.value = String(S.cfg.tolerance);
             max.value = String(S.cfg.maxDiscount);
             ratio.value = String(S.cfg.maxRatio);
+            age.value = String(S.cfg.maxAge);
             debug.checked = !!S.cfg.debug;
         };
         syncPanel();
@@ -1283,6 +1551,7 @@
             S.cfg.maxRatio = Math.min(100, Math.max(1, Number(ratio.value) || 70));
             syncPanel(); saveCfg();
         });
+        age.addEventListener('change', () => { S.cfg.maxAge = Number(age.value) || 0; saveCfg(); });
         debug.addEventListener('change', () => { S.cfg.debug = !!debug.checked; saveCfg(); });
 
         panel.querySelector('#pld-rearm').addEventListener('click', () => {
@@ -1306,7 +1575,24 @@
 
         UI.gear.addEventListener('click', () => {
             panel.classList.toggle('open');
-            positionPanel();
+            if (panel.classList.contains('open')) { closeDiag(); positionPanel(); }
+        });
+
+        panel.querySelector('#pld-diagbtn').addEventListener('click', openDiag);
+        diag.querySelector('#pld-ddclose').addEventListener('click', closeDiag);
+        diag.querySelector('#pld-ddcopy').addEventListener('click', () => {
+            const text = UI.diagText ? UI.diagText.textContent : '';
+            try {
+                if (navigator.clipboard) navigator.clipboard.writeText(text);
+            } catch (_) {}
+            try {
+                const ta = document.createElement('textarea');
+                ta.value = text;
+                document.body.appendChild(ta);
+                ta.select();
+                document.execCommand('copy');
+                document.body.removeChild(ta);
+            } catch (_) {}
         });
 
         // ----- kéo thả -----
@@ -1352,6 +1638,28 @@
 
         positionPanel();
         renderUI();
+    }
+
+    function openDiag() {
+        if (!UI.diag) return;
+        let text = '';
+        try { text = diagnose(); } catch (e) { text = 'Lỗi chẩn đoán: ' + e; }
+        UI.diagText.textContent = text;
+        UI.diag.classList.add('open');
+        if (UI.panel) UI.panel.classList.remove('open');
+        try { console.log('[Lên đơn 13.0] CHẨN ĐOÁN\n' + text); } catch (_) {}
+        const r = (UI.bar || UI.diag).getBoundingClientRect();
+        const w = UI.diag.offsetWidth || 430;
+        const h = UI.diag.offsetHeight || 400;
+        let left = Math.min(Math.max(8, r.left - w + (UI.bar ? UI.bar.offsetWidth : 0)), window.innerWidth - w - 8);
+        let top = r.top - h - 10;
+        if (top < 8) top = Math.min(window.innerHeight - h - 8, r.bottom + 10);
+        UI.diag.style.left = Math.max(8, left) + 'px';
+        UI.diag.style.top = Math.max(8, top) + 'px';
+    }
+
+    function closeDiag() {
+        if (UI.diag) UI.diag.classList.remove('open');
     }
 
     function positionPanel() {
@@ -1458,6 +1766,12 @@
             }
             S.formOpen = !!root;
 
+            const desc = describeEl(root);
+            if (S.cfg.debug && desc !== S.rootDesc) {
+                S.rootDesc = desc;
+                log('khu form đơn:', desc);
+            }
+
             if (!S.cfg.enabled) {
                 setStatus('off', 'Đang tắt', '');
                 if (W.phase !== 'idle') W.phase = 'idle';
@@ -1468,6 +1782,7 @@
                 setStatus('idle', 'Chưa mở form đơn', 'Mở tab "Tạo đơn" ở cột phải để script tự điền.');
                 if (W.phase !== 'idle') W.phase = 'idle';
             } else {
+                prefillProductSearch(root);
                 autoFillAddress(root);
                 autoDiscount(root);
             }
@@ -1540,14 +1855,31 @@
     document.addEventListener('keydown', onUserEditDiscount, true);
     document.addEventListener('input', onUserEditDiscount, true);
 
+    // Ctrl+Shift+D: mở bảng chẩn đoán (biết script đang "thấy" gì)
+    document.addEventListener('keydown', (e) => {
+        if (!e.ctrlKey || !e.shiftKey) return;
+        if (String(e.key).toLowerCase() !== 'd') return;
+        e.preventDefault();
+        openDiag();
+    }, true);
+
 
     // =================================================================
     // 15. KHỞI ĐỘNG
     // =================================================================
 
-    initUI();
-    startObserver();
+    try { initUI(); } catch (e) { warn('initUI lỗi:', e); }
+    try { startObserver(); } catch (e) { warn('startObserver lỗi:', e); }
     setInterval(tick, CONFIG.scanInterval);
     setTimeout(tick, 800);
+
+    // Nếu chưa từng tạo được giao diện, thử lại vài lần (trang render chậm)
+    let bootTry = 0;
+    const bootTimer = setInterval(() => {
+        bootTry++;
+        if (document.getElementById('pld-bar')) { clearInterval(bootTimer); return; }
+        try { initUI(); } catch (_) {}
+        if (bootTry > 40) clearInterval(bootTimer);
+    }, 500);
 
 })();
