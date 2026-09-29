@@ -44,7 +44,7 @@ nhất, khu form đơn dùng được, ô Giảm giá, Thành tiền, Tổng ti�
 ô tìm kiếm SP, ô địa chỉ, số nhãn "Giảm giá" tìm thấy, số dòng chat, tổng đơn nhận
 diện, size, mã SP, trạng thái. Có nút **Copy**.
 Nếu vẫn không điền, chỉ cần gửi 4 dòng: *Khu form đơn dùng được · ô Giảm giá ·
-Thành tiền · Tổng đơn*.
+Thành tiền · Tổng đơn* (hoặc dùng **① Chỉ định ô Thành tiền** cho nhanh).
 
 ### 1.6 Bớt chặn oan
 * Giới hạn "tổng đơn cũ" mặc định **200 dòng** (13.0 là 40 dòng → dễ chặn oan đơn
@@ -63,6 +63,71 @@ Thành tiền · Tổng đơn*.
 **117 test pass** (48 đọc tiền/nhãn + 25 bộ điều khiển + 30 DOM jsdom `html3.txt` +
 **14 test "UI đổi"**: form không có `#customerCol`, cấu trúc dòng tiền khác hẳn,
 pane bị đẩy ra ngoài, chưa có form).
+
+---
+
+# PHẦN 1B — 13.1 (tiếp): sửa theo bảng chẩn đoán thực tế của bạn
+
+Chẩn đoán gửi về cho thấy script **đã thấy khu form đơn** (`div.swipeable-view-order`),
+**đã đọc được ô Giảm giá** và `Tổng tiền hàng: 300.000`, nhưng **không đọc được
+"Thành tiền"** ⇒ đứng im, không điền. Ngoài ra địa chỉ bị nhận nhầm thành tin quảng cáo.
+
+### 1B.1 "Thành tiền" — 5 đường đọc, không còn phụ thuộc 1 class
+1. Dòng có nhãn khớp (mở rộng thêm: `tổng thanh toán`, `thanh toán`, `cần thanh toán`,
+   `phải trả`, `khách phải trả`, `tiền khách trả`, `số tiền phải trả`, `sau giảm giá`,
+   `giá trị đơn`… — trước đây chỉ có `thành tiền`, `tổng cộng`, `tổng tiền`).
+2. `.text-final-price` **nằm trong hộp thanh toán**.
+3. **Dòng cuối cùng có tiền** trong hộp thanh toán (sau dòng Giảm giá) — gần như luôn
+   là dòng tổng, dùng khi nhãn bị đổi thành chữ lạ.
+4. `.text-final-price` trong pane đang mở.
+5. Dòng ngay dưới ô Giảm giá.
+
+Thêm nữa: giá trị nằm trong `<input>` (không xuất hiện trong `textContent`) giờ cũng
+đọc được, và **"Thành tiền" đã khớp thì DỪNG, không "sửa" thành số lẻ** (xem 1B.3).
+
+### 1B.2 Địa chỉ: sửa lỗi khớp giữa chữ ("QC cao cấp" → "ấp")
+`ADDR_RE` cũ khớp **chuỗi con**, nên "cao **cấp**" bị coi là "ấp" và tin quảng cáo
+(`Áo shop SALE… Màu sắc… Chất liệu…`) bị nhận làm địa chỉ. Giờ bắt buộc **ranh giới từ**
+(không dùng `\b` vì tiếng Việt có dấu), đồng thời:
+* bỏ qua dòng dài > 160 ký tự (bảng giá, mô tả sản phẩm),
+* bỏ qua dòng có ≥ 2 dấu hiệu quảng cáo (`sale`, `màu sắc`, `chất liệu`, `miễn ship`,
+  `inbox`, `combo`, `bảng giá`…).
+
+### 1B.3 Sửa lỗi "điền rồi lại sửa thành số lẻ" (đúng kiểu "đôi khi điền sai")
+Sau khi ghi số đẹp (VD cần 101.000 → ghi 100.000, Thành tiền 200.000, lệch 1.000 ≤ sai số
+5.000), vòng lặp cũ **vẫn tính tiếp** và ghi đè thành số lẻ 101.000. Giờ kiểm tra
+**`|Thành tiền − Tổng đơn| ≤ sai số` trước tiên** ⇒ dừng ngay, giữ số đẹp.
+(Có test hồi quy: cần 101.000 → ghi **1 lần duy nhất** 100.000, không sửa lại.)
+
+### 1B.4 Chỉ định thủ công — "chốt hạ" khi UI đổi quá nhiều
+Trong `⚙` có 3 nút:
+* **① Chỉ định ô Thành tiền** → con trỏ thành dấu ngắm, bấm vào con số Thành tiền trên
+  trang. Script sinh CSS selector, lưu lại (sống qua F5) và **luôn ưu tiên** ô đó.
+* **② Chỉ định ô Giảm giá** → tương tự cho ô nhập giảm giá.
+* **Bỏ chỉ định** → trả về tự dò.
+
+Chỉ cần làm **một lần** cho mỗi máy/trình duyệt. Thanh trạng thái sẽ hiện
+"Bấm vào số tiền THÀNH TIỀN…" khi đang ở chế độ chọn.
+
+### 1B.5 Chẩn đoán in thêm 2 mục để soi tiếp
+* **Các dòng tiền trong hộp thanh toán**: `[0] "tổng tiền hàng" → 300.000 (.flex-between…)`
+  — thấy ngay nhãn thật là chữ gì, giá trị bao nhiêu, dòng nào đang [ẨN].
+* **`.text-final-price` toàn trang**: số lượng + giá trị + đang ẩn/hiện.
+* **Chỉ định thủ công**: selector đã lưu còn khớp không.
+
+### 1B.6 Bộ kiểm thử nằm trong repo
+`tests/lendon.test.js` (**111 test**) + `package.json`. Chạy:
+
+```bash
+npm install     # cài jsdom
+npm test
+```
+
+Gồm: đọc tiền/nhãn/size (48), bộ điều khiển giảm giá (25), DOM jsdom dựng theo
+`html3.txt` + các tình huống UI khác (38) — trong đó có hồi quy cho đúng ca của bạn:
+câu `"Tổng Đơn Hàng : 2 áo sz L 199k miễn ship"`, đơn 300.000, tin quảng cáo
+`"QC cao cấp…"` không được coi là địa chỉ, dòng tổng không có `.text-final-price`,
+nhãn tổng là chữ lạ, pane bị đẩy ra ngoài, và chỉ định thủ công.
 
 ---
 

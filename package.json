@@ -1,0 +1,12 @@
+{
+  "name": "salescript-tests",
+  "private": true,
+  "version": "1.0.0",
+  "description": "Bo kiem thu cho script Tampermonkey (chay bang Node + jsdom)",
+  "scripts": {
+    "test": "node tests/lendon.test.js"
+  },
+  "devDependencies": {
+    "jsdom": "^24.0.0"
+  }
+}

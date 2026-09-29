@@ -84,7 +84,12 @@
         // --- nhãn dòng tiền (khớp CHÍNH XÁC để tránh "Giảm giá theo combo") ---
         labels: {
             discount: ['giảm giá', 'giảm giá đơn hàng', 'chiết khấu đơn hàng', 'chiết khấu'],
-            final: ['thành tiền', 'tổng thanh toán', 'tổng tiền thanh toán', 'tổng cộng', 'tổng tiền'],
+            final: [
+                'thành tiền', 'tổng thanh toán', 'tổng tiền thanh toán', 'tổng cộng', 'tổng tiền',
+                'thanh toán', 'cần thanh toán', 'phải trả', 'khách phải trả', 'tổng phải trả',
+                'tiền khách phải trả', 'tiền khách trả', 'số tiền phải trả', 'sau giảm giá',
+                'giá trị đơn', 'tổng giá trị đơn'
+            ],
             goods: ['tổng tiền hàng', 'tiền hàng', 'tổng giá trị đơn hàng', 'tổng giá trị hàng'],
             shipping: ['phí vận chuyển', 'phí ship', 'vận chuyển']
         },
@@ -110,6 +115,8 @@
         maxDiscount: 2000000,
         maxRatio: 70,        // % tối đa của giá trị đơn
         maxAge: 200,         // bỏ qua tổng đơn cũ hơn N dòng (0 = không giới hạn)
+        bindFinal: '',       // chỉ định thủ công ô Thành tiền (CSS selector)
+        bindDiscount: '',    // chỉ định thủ công ô Giảm giá
         debug: false,
         left: null,
         top: null
@@ -148,7 +155,8 @@
         lastWriteAt: 0,
         lastTickAt: 0,
         status: { code: 'off', text: 'Đang tắt', detail: '' },
-        rootDesc: ''
+        rootDesc: '',
+        pickMode: ''          // 'final' | 'discount' | ''  (đang chờ bạn bấm chọn phần tử)
     };
 
     const W = {                // chu trình ghi + kiểm chứng ô Giảm giá
@@ -414,7 +422,22 @@
     }
 
     const PHONE_RE = /(?:0|\+84)(?:3[2-9]|5[689]|7[06-9]|8[1-589]|9[0-46-9])[\s.-]*\d{3}[\s.-]*\d{4}/;
-    const ADDR_RE = /(ấp|thôn|xóm|bản|tổ\s*\d+|xã|phường|quận|huyện|tỉnh|tp\b|thành phố|đường|số nhà|khu phố|đối diện|gần\s*(?:chợ|cây xăng|trường)|ngõ|hẻm|kdc|chung cư)/i;
+    // Bắt buộc ranh giới từ (không dùng \b vì tiếng Việt có dấu):
+    // "QC cao cấp" KHÔNG được khớp "ấp".
+    const VN_B = 'a-zà-ỹA-ZÀ-Ỹ';
+    const ADDR_WORDS = [
+        'ấp', 'thôn', 'xóm', 'bản', 'tổ', 'xã', 'phường', 'quận', 'huyện', 'tỉnh',
+        'thành phố', 'tp', 'đường', 'số nhà', 'khu phố', 'đối diện', 'ngõ', 'hẻm',
+        'kdc', 'chung cư', 'kiệt', 'ngách', 'ấp'
+    ];
+    const ADDR_RE = new RegExp(
+        '(?:^|[^' + VN_B + '])(' + ADDR_WORDS.join('|') + ')(?=$|[^' + VN_B + '])' +
+        '|(?:gần\s*(?:chợ|cây xăng|trường|ngã))|(?:tổ\s*\d+)',
+        'i'
+    );
+
+    // Tin quảng cáo/bảng giá của shop không phải địa chỉ
+    const PROMO_HINTS = /(sale|màu sắc|chất liệu|freeship|miễn ship|inbox|ib\b|combo|giá chỉ|đặt hàng|thanh lý|bảng giá|size\s*[smlxl]|sz\s*[smlxl])/i;
     const ORDER_RE = /(tổng|chốt|thành\s*tiền|thanh\s*toán|còn\s*lại|bill)/i;
 
     function isFeeContext(text, index) {
@@ -486,7 +509,13 @@
             const line = lines[i];
             if (ORDER_RE.test(line)) continue;
             if (PHONE_RE.test(line) && line.length < 16) continue;   // dòng chỉ có SĐT
-            if (ADDR_RE.test(line)) { addr = line; addrIdx = i; }
+            if (line.length > 160) continue;                         // quảng cáo dài
+            if (!ADDR_RE.test(line)) continue;
+            const promoHits = (line.match(PROMO_HINTS) || []).length;
+            if (promoHits >= 2) continue;                            // bảng giá / mô tả SP
+            if (promoHits >= 1 && !/\d/.test(line)) continue;
+            addr = line;
+            addrIdx = i;
         }
         if (addrIdx > 0 && addr.length < 26) {
             const prev = lines[addrIdx - 1];
@@ -829,6 +858,12 @@
             const v = parseInputNumber(input.value || input.getAttribute('aria-valuenow') || '');
             if (v) return v;
         }
+        // giá trị có thể nằm trong <input> (không xuất hiện trong textContent)
+        const inputs = qa(row, 'input');
+        for (let i = 0; i < inputs.length; i++) {
+            const v = parseInputNumber(inputs[i].value || '');
+            if (v) return v;
+        }
         const toks = moneyTokens(row.textContent || '');
         if (!toks.length) return null;
         const withUnit = toks.filter(t => t.unit);
@@ -860,6 +895,37 @@
     // Đọc trạng thái tiền của form đang mở.
     // Quan trọng: mọi dòng đều phải nằm trong/ gần "hộp thanh toán" của ô Giảm giá,
     // tránh bắt nhầm "Thành tiền" của TỪNG SẢN PHẨM (nằm phía trên).
+    // Người dùng tự chỉ định phần tử (khi UI đổi quá nhiều) — lưu vào localStorage
+    function boundEl(key) {
+        const sel = S.cfg[key];
+        if (!sel) return null;
+        const el = q(document, sel);
+        return el && shown(el) ? el : null;
+    }
+
+    function cssPath(el) {
+        if (!el || el.nodeType !== 1) return '';
+        if (el.id && /^[A-Za-z][\w-]*$/.test(el.id)) return '#' + el.id;
+        const parts = [];
+        let node = el;
+        for (let depth = 0; depth < 6 && node && node.nodeType === 1; depth++) {
+            let part = node.tagName.toLowerCase();
+            const cls = String(node.className || '').trim().split(/\s+/)
+                .filter(c => c && !/^css-/.test(c)).slice(0, 2);
+            if (cls.length) part += '.' + cls.join('.');
+            const parent = node.parentElement;
+            if (parent) {
+                const sibs = Array.prototype.slice.call(parent.children)
+                    .filter(c => c.tagName === node.tagName);
+                if (sibs.length > 1) part += ':nth-of-type(' + (sibs.indexOf(node) + 1) + ')';
+            }
+            parts.unshift(part);
+            if (node.id) break;
+            node = parent;
+        }
+        return parts.join(' > ');
+    }
+
     function readForm(root) {
         const out = { root, discount: null, finalPrice: null, goods: null, shipping: null, finalEl: null };
         if (!root) return out;
@@ -908,7 +974,30 @@
         if (best) {
             out.finalPrice = best.value;
             out.finalEl = best.row.querySelector(CONFIG.finalPriceClass) || best.row;
-        } else {
+        } else if (box && out.discount && out.discount.row) {
+            // (a) ưu tiên .text-final-price nằm NGAY TRONG hộp thanh toán
+            const fps = qa(box, CONFIG.finalPriceClass).filter(shown);
+            for (let i = fps.length - 1; i >= 0; i--) {
+                const v = digitsValue(fps[i].textContent);
+                if (v) { out.finalPrice = v; out.finalEl = fps[i]; break; }
+            }
+            // (b) nếu vẫn không có: lấy DÒNG CUỐI có tiền (sau dòng Giảm giá)
+            const rows = Array.prototype.slice.call(box.children || []);
+            const idx = rows.indexOf(out.discount.row);
+            const dVal = out.discount.value || 0;
+            for (let i = rows.length - 1; out.finalPrice == null && i > idx; i--) {
+                const v = readRowMoney(rows[i]);
+                if (!v) continue;
+                if (dVal && v === dVal) continue;              // chính ô giảm giá
+                const lab = rowLabel(rows[i]);
+                if (lab && labelMatches(lab.text, CONFIG.labels.discount)) continue;
+                if (lab && labelMatches(lab.text, CONFIG.labels.goods)) continue;
+                out.finalPrice = v;
+                out.finalEl = rows[i].querySelector(CONFIG.finalPriceClass) || rows[i];
+                break;
+            }
+        }
+        if (out.finalPrice == null) {
             // fallback 1: .text-final-price trong pane đang mở
             const list = qa(root, CONFIG.finalPriceClass).filter(shown);
             for (let i = list.length - 1; i >= 0; i--) {
@@ -924,6 +1013,18 @@
                     if (v) { out.finalPrice = v; out.finalEl = rows[i]; break; }
                 }
             }
+        }
+
+        // ---------- chỉ định thủ công (nếu có thì luôn thắng) ----------
+        const bf = boundEl('bindFinal');
+        if (bf) {
+            const v = digitsValue(bf.textContent) || (bf.value ? parseInputNumber(bf.value) : null);
+            if (v) { out.finalPrice = v; out.finalEl = bf; }
+        }
+        const bd = boundEl('bindDiscount');
+        if (bd) {
+            const v = parseInputNumber(bd.value || bd.getAttribute('aria-valuenow') || '');
+            out.discount = { row: rowOf(bd) || bd, input: bd, value: v };
         }
 
         // ---------- thông tin thêm (chỉ để hiển thị) ----------
@@ -1131,6 +1232,18 @@
 
         log('giá', { T, F, D, base, need, attempts: S.attempts });
 
+        // QUAN TRỌNG: Thành tiền ĐÃ khớp tổng đơn (trong sai số cho phép) thì DỪNG.
+        // Nếu thiếu bước này, sau lần ghi làm tròn (VD 100.000 cho 101.000) script
+        // sẽ "sửa" thành số lẻ 101.000 — đúng kiểu "đôi khi điền sai" cần tránh.
+        const finalErr = F - T;
+        if (Math.abs(finalErr) <= S.cfg.tolerance) {
+            S.needSeen = { value: null, count: 0 };
+            setStatus('applied', money(F) + ' ✓',
+                'Thành tiền ' + money(F) + ' khớp tổng đơn ' + money(T) +
+                ' (lệch ' + money(finalErr) + ' ≤ sai số ' + money(S.cfg.tolerance) + ').');
+            return;
+        }
+
         if (Math.abs(need) <= S.cfg.tolerance) {
             S.needSeen = { value: null, count: 0 };
             setStatus('ok', money(F) + ' ✓',
@@ -1302,6 +1415,7 @@
 
     function fillProductSearch(input) {
         if (!S.cfg.enabled || S.cfg.paused) return;
+        if (S.pickMode) return;
         if (!input || !shown(input)) return;
 
         const code = getProductCodeWithSize();
@@ -1361,7 +1475,7 @@
         const cands = qa(document, CONFIG.swipePane);
         const opens = cands.filter(e => paneVisible(e, true));
 
-        L.push('URL: ' + String(location.href).slice(0, 110));
+        L.push('URL: ' + String((typeof location !== 'undefined' && location.href) || '').slice(0, 110));
         L.push('');
         L.push('— KHUNG ĐƠN —');
         L.push('#customerCol: ' + (q(document, CONFIG.customerCol) ? 'CÓ' : 'KHÔNG'));
@@ -1383,6 +1497,38 @@
             (f.finalEl ? '  (' + describeEl(f.finalEl) + ')' : ''));
         L.push('  · Tổng tiền hàng: ' + (f.goods != null ? money(f.goods) : '—') +
             ' | Phí vận chuyển: ' + (f.shipping != null ? money(f.shipping) : '—'));
+
+        // liệt kê từng dòng tiền trong hộp thanh toán: nhãn -> giá trị
+        const box = boxTopFor(root);
+        if (box) {
+            L.push('');
+            L.push('— CÁC DÒNG TIỀN TRONG HỘP THANH TOÁN —');
+            const rows = Array.prototype.slice.call(box.children || []);
+            rows.slice(0, 14).forEach((row, i) => {
+                const lab = rowLabel(row);
+                const v = readRowMoney(row);
+                L.push('  [' + i + '] "' + (lab ? lab.text : norm(row.textContent).slice(0, 30)) +
+                    '" → ' + (v != null ? money(v) : 'KHÔNG có số') +
+                    '  (' + describeEl(row) + ')' +
+                    (shown(row) ? '' : ' [ẨN]'));
+            });
+        }
+
+        const fpAll = qa(document, CONFIG.finalPriceClass);
+        L.push('');
+        L.push('— .text-final-price toàn trang: ' + fpAll.length + ' —');
+        fpAll.slice(0, 6).forEach((el, i) => {
+            L.push('  [' + i + '] "' + norm(el.textContent).slice(0, 24) + '" → ' +
+                (digitsValue(el.textContent) != null ? money(digitsValue(el.textContent)) : 'KHÔNG có số') +
+                (shown(el) ? '' : ' [ẨN]'));
+        });
+
+        L.push('');
+        L.push('— CHỈ ĐỊNH THỦ CÔNG —');
+        L.push('  Thành tiền: ' + (S.cfg.bindFinal || 'chưa') +
+            (S.cfg.bindFinal ? (boundEl('bindFinal') ? ' (OK)' : ' (KHÔNG khớp nữa)') : ''));
+        L.push('  Giảm giá : ' + (S.cfg.bindDiscount || 'chưa') +
+            (S.cfg.bindDiscount ? (boundEl('bindDiscount') ? ' (OK)' : ' (KHÔNG khớp nữa)') : ''));
 
         const search = qa(document, CONFIG.productSearchLoose).filter(isVisible);
         L.push('Ô tìm kiếm SP: ' + qa(document, 'input[type="search"]').length +
@@ -1505,6 +1651,9 @@
             '<option value="200">200 dòng</option><option value="0">Không giới hạn</option></select></div>' +
             '<div class="pld-row"><label><input type="checkbox" id="pld-debug"> Ghi log</label><span></span></div>' +
             '<button id="pld-rearm">Bỏ khoá "sửa tay" cho đơn này</button>' +
+            '<button id="pld-pickfinal">① Chỉ định ô Thành tiền</button>' +
+            '<button id="pld-pickdisc">② Chỉ định ô Giảm giá</button>' +
+            '<button id="pld-unbind">Bỏ chỉ định</button>' +
             '<button id="pld-diagbtn">Chẩn đoán (Ctrl+Shift+D)</button>' +
             '<div class="pld-note">Tự động điền: mã SP + size → ô tìm kiếm, địa chỉ, ô Giảm giá.</div>';
         document.body.appendChild(panel);
@@ -1579,6 +1728,24 @@
         });
 
         panel.querySelector('#pld-diagbtn').addEventListener('click', openDiag);
+        panel.querySelector('#pld-pickfinal').addEventListener('click', () => {
+            closeDiag();
+            startPick('final');
+            panel.classList.remove('open');
+        });
+        panel.querySelector('#pld-pickdisc').addEventListener('click', () => {
+            closeDiag();
+            startPick('discount');
+            panel.classList.remove('open');
+        });
+        panel.querySelector('#pld-unbind').addEventListener('click', () => {
+            S.cfg.bindFinal = '';
+            S.cfg.bindDiscount = '';
+            saveCfg();
+            resetForNewOrder();
+            setStatus('idle', 'Đã bỏ chỉ định', 'Script tự dò lại như bình thường.');
+            renderUI();
+        });
         diag.querySelector('#pld-ddclose').addEventListener('click', closeDiag);
         diag.querySelector('#pld-ddcopy').addEventListener('click', () => {
             const text = UI.diagText ? UI.diagText.textContent : '';
@@ -1639,6 +1806,52 @@
         positionPanel();
         renderUI();
     }
+
+    // ---------- CHỈ ĐỊNH PHẦN TỬ BẰNG CÁCH BẤM ----------
+    function startPick(kind) {
+        S.pickMode = kind;
+        if (document.body) document.body.style.cursor = 'crosshair';
+        renderUI();
+    }
+
+    function stopPick() {
+        S.pickMode = '';
+        if (document.body) document.body.style.cursor = '';
+        renderUI();
+    }
+
+    function handlePick(e) {
+        if (!S.pickMode) return;
+        const t = e.target;
+        if (!t || !t.closest) return;
+        if (t.closest('#pld-bar, #pld-panel, #pld-diag')) return;
+
+        e.preventDefault();
+        e.stopPropagation();
+
+        const sel = cssPath(t);
+        const kind = S.pickMode;
+        if (kind === 'final') {
+            S.cfg.bindFinal = sel;
+            setStatus('ok', 'Đã chỉ định ô Thành tiền', 'Đang dùng: ' + sel);
+        } else {
+            S.cfg.bindDiscount = sel;
+            setStatus('ok', 'Đã chỉ định ô Giảm giá', 'Đang dùng: ' + sel);
+        }
+        saveCfg();
+        S.pickMode = '';
+        if (document.body) document.body.style.cursor = '';
+        resetForNewOrder();
+        renderUI();
+        try {
+            const info = kind === 'final'
+                ? 'giá trị đọc được: ' + (digitsValue(t.textContent) || parseInputNumber(t.value || '') || 'KHÔNG có số')
+                : 'giá trị hiện tại: ' + (parseInputNumber(t.value || '') || 0);
+            console.log('[Lên đơn 13.1] Chỉ định ' + kind + ':', sel, '—', info);
+        } catch (_) {}
+    }
+
+    document.addEventListener('click', handlePick, true);
 
     function openDiag() {
         if (!UI.diag) return;
@@ -1705,7 +1918,12 @@
 
         let code = S.status.code;
         let text = S.status.text;
-        if (S.cfg.paused) { code = 'paused'; text = 'Tạm dừng'; }
+        if (S.pickMode) {
+            code = 'writing';
+            text = S.pickMode === 'final'
+                ? 'Bấm vào số tiền THÀNH TIỀN…'
+                : 'Bấm vào ô GIẢM GIÁ…';
+        } else if (S.cfg.paused) { code = 'paused'; text = 'Tạm dừng'; }
         else if (code === 'idle' || code === 'off' || !code) {
             if (!S.formOpen) { code = 'idle'; text = 'Chưa mở form đơn'; }
             else if (!S.target) { code = 'notarget'; text = 'Chưa có tổng đơn'; }
