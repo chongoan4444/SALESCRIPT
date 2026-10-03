@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         Pancake Auto Upsale V6 (chỉ gửi trong DÃY có cùng snippet)
+// @name         Pancake Auto Upsale V6 (Dãy cùng snippet · Gửi hết khách bên dưới)
 // @namespace    http://tampermonkey.net/
-// @version      6.0
-// @description  Chỉ gửi cho các hội thoại nằm LIỀN NHAU trong danh sách và có .snippet-text GIỐNG HỆT hội thoại ở dấu đỏ. Không còn nhắm theo "row kế tiếp" nên không chạy sang đoạn chat khác. Selector đối chiếu từ html.txt / html2.txt / html3.txt + _app-*.v6.js + pancake.vn2.har.
+// @version      6.1
+// @description  2 chế độ. (1) DÃY: chỉ gửi hội thoại LIỀN NHAU và có .snippet-text GIỐNG HỆT hội thoại ở dấu đỏ. (2) BÊN DƯỚI: gửi hết mọi hội thoại còn class "unread" (khách đã trả lời) từ dấu đỏ trở xuống, tự cuộn danh sách, dừng khi gặp hội thoại đã đọc đầu tiên. Selector đối chiếu từ html.txt / html2.txt / html3.txt + _app-*.v6.js + pancake.vn2.har.
 // @match        *://*.pancake.vn/*
 // @grant        GM_getClipboard
 // @run-at       document-end
@@ -31,6 +31,29 @@
  *    (2) row PHẢI NỐI LIỀN dãy đang xử lý — tức trong danh sách ĐANG RENDER
  *        nó nằm ngay trên/dưới một row đã được xác nhận thuộc dãy.
  *  ⇒ Không bao giờ click ra ngoài dãy chứa khách ở dấu đỏ.
+ *
+ *  ------------------------------------------------------------
+ *  V6.1 — THÊM CHẾ ĐỘ "GỬI HẾT KHÁCH BÊN DƯỚI" (chạy nhanh)
+ *
+ *  Mục tiêu: mọi hội thoại còn class `unread` (khách đã trả lời, shop chưa
+ *  trả lời) nằm TỪ DẤU ĐỎ TRỞ XUỐNG — KHÔNG xét snippet. Dừng khi row gần
+ *  nhất còn chưa gửi ở dưới dấu đỏ đã là hội thoại ĐÃ ĐỌC (hết khối khách đã
+ *  trả lời) hoặc khi không cuộn được nữa (hết danh sách).
+ *
+ *  Vì sao phải cuộn bằng sự kiện `wheel`: Pancake KHÔNG cuộn bằng scrollTop —
+ *  .rc-virtual-list-holder có `overflow-y:hidden`, React đặt cửa sổ hiển thị
+ *  bằng `transform: translateY(...)` trên .rc-virtual-list-holder-inner
+ *  (html2.txt: translateY(3870px) · html3.txt: translateY(0px)). Wheel là thứ
+ *  app nghe (rc-virtual-list), nên script bắn wheel rồi chờ cửa sổ render đổi.
+ *
+ *  Dấu hiệu "khách đã trả lời": class `unread` trên .conversation-list-item
+ *  (html3.txt: 11/12 row có · html.txt & html2.txt: 0 row) + badge đỏ
+ *  sup.ant-badge-count[title="số tin"].
+ *
+ *  Tốc độ: "Chờ xác nhận" mặc định TẮT (không chờ Pancake xoá ô soạn), và bỏ
+ *  nhịp rAF trước Enter (chỉ nhường 1 macrotask) ⇒ mỗi khách còn: click → dán
+ *  → Enter. Đổi lại: nếu Pancake chậm, tin có thể chưa đi mà script đã sang
+ *  khách kế — script sẽ cảnh báo trong Console (xem `unsentIds`).
  *
  *  ------------------------------------------------------------
  *  SELECTOR — đối chiếu với source thật trong repo (không đoán)
@@ -80,7 +103,7 @@
 (function () {
     'use strict';
 
-    const VERSION = '6.0';
+    const VERSION = '6.1';
 
     /* =========================================================
      * SELECTORS — tất cả lấy từ HTML thật
@@ -89,7 +112,9 @@
     const SEL = {
         listRoot:   '#conversationList',
         listInner:  '.rc-virtual-list-holder-inner',
+        listHolder: '.rc-virtual-list-holder',        // node có height cố định + overflow-y:hidden
         row:        '.conversation-list-item',
+        rowUnread:  '.conversation-list-item.unread', // khách đã trả lời, shop chưa trả lời
         selected:   '.conversation-list-item.selected',
         snippet:    '.snippet-text',
         name:       '.name-text',
@@ -115,6 +140,11 @@
         pasteHold: 2000,   // dán lại cho tới khi composer GIỮ được nội dung
         sendConfirm: 600,  // chờ Pancake xóa composer = đã gửi xong
         sendConfirmSlow: 0,// chờ thêm khi đi đường chậm (api → extension → socket)
+        confirmFast: 150,  // mức "Nhanh" của Chờ xác nhận
+        waitShort:  600,   // chờ ngắn trước khi thử cuộn danh sách (chế độ Dãy)
+        scrollStep: 0.9,   // cuộn 1 nhịp = 90% khoảng cách từ dấu đỏ tới đáy vùng nhìn (xem scrollDownOnce)
+        scrollWait: 900,   // chờ React render lại sau khi cuộn
+        maxRunBelow: 5000, // chốt an toàn (kỹ thuật) cho chế độ GỬI HẾT BÊN DƯỚI
         maxRun:    500     // chốt an toàn: tối đa số khách gửi trong 1 dãy
     };
 
@@ -143,6 +173,13 @@
     let hotkeyEnabled = false;         // luôn OFF sau reload
 
     let runToken = 0;
+
+    /* ---------- CHẾ ĐỘ GỬI ----------
+     * 'run'   = Dãy cùng snippet (mặc định — an toàn nhất)
+     * 'below' = Gửi hết khách đã trả lời (unread) từ dấu đỏ trở xuống
+     */
+    let sendMode = 'run';
+    const isBelowMode = () => sendMode === 'below';
 
     /* ---------- DÃY (đơn vị làm việc của V6) ---------- */
 
@@ -173,6 +210,7 @@
     let stepStart = 0;
     let sentAt = 0;
     let pastedAt = 0;      // lúc dán xong (mốc cho chế độ Enter thủ công)
+    let prevSentId = '';   // khách vừa bấm Enter ở lượt trước (để cảnh báo tin chưa đi)
 
     function resetStats() {
         stats = { sent: 0, cycles: 0, totalMs: 0, sendMs: 0, waitMs: 0, min: 0, max: 0 };
@@ -180,6 +218,7 @@
         phaseSum = null;
         unsentIds = [];
         slowSends = 0;
+        prevSentId = '';
         renderStats();
     }
 
@@ -361,7 +400,7 @@
      * SPEED SETTINGS
      * =======================================================*/
 
-    const DEFAULT_SPEED = { autoEnter: 0, observer: 3000, gate: 0, enter: 1, upBottom: 1 };
+    const DEFAULT_SPEED = { autoEnter: 0, observer: 3000, gate: 0, enter: 1, upBottom: 1, confirm: 'off' };
     const speed = { ...DEFAULT_SPEED, ...(store.get(K.speed, {}) || {}) };
 
     const PINNED = { autoEnter: 0, observer: 3000, gate: 0 };
@@ -386,7 +425,15 @@
          * "lùi lên ở cuối bảng" của V5.10 (quét từ index 0 = đỉnh cửa sổ ảo
          * hoá) — V6 không bao giờ quét ra ngoài dãy.
          */
-        upBottom:  speed.upBottom === 0 ? 0 : 1
+        upBottom:  speed.upBottom === 0 ? 0 : 1,
+        /*
+         * CHỜ XÁC NHẬN GỬI — sau khi bấm Enter có chờ Pancake xoá ô soạn không.
+         *   'off'  = KHÔNG chờ (mặc định, nhanh nhất — đổi lại: Pancake chậm thì
+         *            tin có thể chưa đi mà script đã sang khách kế)
+         *   'fast' = chờ tối đa 150 ms
+         *   'full' = chờ 600 ms, chưa thấy thì thử thêm "đường chậm" (bản V5)
+         */
+        confirm:   ['off', 'fast', 'full'].includes(speed.confirm) ? speed.confirm : 'off'
     };
 
     function saveSpeed() {
@@ -698,6 +745,152 @@
     }
 
     /* =========================================================
+     * CHẾ ĐỘ "GỬI HẾT KHÁCH BÊN DƯỚI" (theo dấu đỏ)
+     *
+     * Khác chế độ dãy: KHÔNG xét snippet. Mục tiêu = mọi hội thoại còn class
+     * `unread` (khách đã trả lời mà shop chưa trả lời) nằm TỪ DẤU ĐỎ TRỞ XUỐNG,
+     * cho tới khi gặp hội thoại ĐÃ ĐỌC đầu tiên (hết khối khách đã trả lời)
+     * hoặc không cuộn được nữa (hết danh sách).
+     *
+     * Vì sao bám TOẠ ĐỘ dấu đỏ thay vì chỉ số row: Pancake xếp lại danh sách
+     * sau mỗi lần gửi (hội thoại vừa gửi rời khỏi chỗ cũ, các row khác trôi
+     * vào — hàm eg()/ev() trong _app-*.v6.js) nên chỉ số row đổi liên tục,
+     * còn dấu đỏ là mốc đứng yên trên màn hình.
+     * =======================================================*/
+
+    /** Node cuộn của danh sách (#conversationList > .rc-virtual-list-holder). */
+    function getListHolder() {
+        const list = getList();
+        return list ? list.querySelector(SEL.listHolder) : null;
+    }
+
+    /** Vị trí cuộn hiện tại — Pancake cuộn bằng transform: translateY(...) của holder-inner. */
+    function listOffset() {
+        const inner = getListInner();
+        if (!inner) return null;
+        const inline = (inner.style && inner.style.transform) || '';
+        const m = /translateY\(\s*(-?[\d.]+)px\s*\)/.exec(inline);
+        if (m) return parseFloat(m[1]);
+        try {
+            const computed = getComputedStyle(inner).transform || '';
+            const mm = /matrix\([^)]*,\s*(-?[\d.]+)\s*\)\s*$/.exec(computed);
+            if (mm) return parseFloat(mm[1]);
+        } catch (err) {}
+        return null;
+    }
+
+    /** "Dấu vân tay" cửa sổ đang render — để biết danh sách vừa cuộn/render lại. */
+    function listKey() {
+        const items = rowItems();
+        if (!items.length) return 'empty';
+        return `${listOffset()}|${items.length}|${items[0].id}|${items[items.length - 1].id}`;
+    }
+
+    /**
+     * Row còn "unread" = khách đã trả lời mà shop chưa trả lời.
+     * Nguồn: html3.txt — 11/12 row có class "unread" (row còn lại là row GHIM
+     * đang mở); html.txt (9 row) và html2.txt (10 row): không row nào có.
+     * Badge đỏ sup.ant-badge-count[title="N"] xuất hiện/ẩn cùng lúc với class
+     * này, nhưng code CHỈ dựa vào class — badge nằm trong .media-left nên khi
+     * React chưa render xong badge dễ thiếu hơn class.
+     */
+    const isUnreadRow = row => !!(row && row.classList && row.classList.contains('unread'));
+
+    /**
+     * Cuộn danh sách bằng sự kiện wheel. Pancake dùng .rc-virtual-list-holder
+     * với overflow-y:hidden nên scrollTop KHÔNG có tác dụng — phải bắn wheel
+     * (rc-virtual-list nghe wheel rồi tự cập nhật translateY).
+     */
+    function wheelScroll(px) {
+        const holder = getListHolder();
+        if (!holder || !px) return false;
+
+        const target = holder.querySelector(SEL.row) || holder;
+        let sent = 0;
+        while (sent < px) {
+            const delta = Math.min(120, px - sent);   // nhiều nhát nhỏ, không nhảy cóc
+            let ev = null;
+            try {
+                ev = new WheelEvent('wheel', {
+                    deltaY: delta, deltaMode: 0, bubbles: true, cancelable: true, composed: true
+                });
+            } catch (err) {
+                try { ev = new Event('wheel', { bubbles: true, cancelable: true }); } catch (err2) { ev = null; }
+                if (ev) { try { ev.deltaY = delta; ev.deltaMode = 0; } catch (err3) {} }
+            }
+            if (!ev) return false;
+            try { target.dispatchEvent(ev); } catch (err) { return false; }
+            sent += delta;
+        }
+        return true;
+    }
+
+    /** Chờ danh sách render lại (dấu vân tay đổi) — tối đa `timeout` ms. */
+    async function waitListChange(before, timeout = T.scrollWait) {
+        const until = performance.now() + timeout;
+        while (performance.now() < until) {
+            if (listKey() !== before) return true;
+            await sleep(20);
+        }
+        return listKey() !== before;
+    }
+
+    /** Cuộn xuống 1 nhịp để lộ thêm row. true = cửa sổ render ĐÃ đổi. */
+    async function scrollDownOnce() {
+        const holder = getListHolder();
+        if (!holder) return false;
+
+        const items = rowItems();
+        if (!items.length) return false;
+
+        const holderBox = holder.getBoundingClientRect();
+        const dotY = clickPos ? clickPos.y : holderBox.top;
+
+        /*
+         * CHỈ cuộn trong khoảng từ dấu đỏ tới đáy vùng nhìn.
+         * Cuộn xuống D px làm mọi row đang nằm dưới dấu đỏ trôi lên D px; row
+         * nào trôi qua khỏi dấu đỏ sẽ bị bỏ sót. Vùng [dấu đỏ → đáy vùng nhìn]
+         * thì mình ĐÃ quét hết (toàn row đã gửi, vì vòng lặp luôn gửi row đầu
+         * tiên ở dưới dấu đỏ trước), còn vùng dưới đáy vùng nhìn thì CHƯA đọc
+         * được ⇒ giữ D ≤ (đáy vùng nhìn − dấu đỏ) để không row nào bị bỏ sót.
+         */
+        const safe = Math.floor(Math.max(0, holderBox.bottom - dotY) * T.scrollStep);
+        const rowH = Math.round(items[0].row.getBoundingClientRect().height) || 72;
+        const step = Math.max(rowH * 0.5, safe, 8);
+
+        const before = listKey();
+        if (wheelScroll(step) && await waitListChange(before)) return true;
+
+        /* Dự phòng: nếu vì lý do nào đó holder cuộn được thật bằng scrollTop. */
+        const top0 = holder.scrollTop || 0;
+        try { holder.scrollTop = top0 + step; } catch (err) {}
+        if ((holder.scrollTop || 0) !== top0 && await waitListChange(before, 600)) return true;
+
+        return false;
+    }
+
+    /**
+     * Mục tiêu kế tiếp ở chế độ bên dưới: row ĐẦU TIÊN (trên→dưới) nằm từ dấu
+     * đỏ trở xuống, chưa gửi trong lượt này. Kèm cờ `unread` để vòng lặp biết
+     * đã chạm đáy khối khách đã trả lời hay chưa.
+     */
+    function pickBelowTarget() {
+        if (!clickPos) return null;
+        const items = rowItems();
+        if (!items.length) return null;
+
+        const dotY = clickPos.y;
+        for (const item of items) {
+            const box = item.row.getBoundingClientRect();
+            if (!box.height) continue;          // row đang bị ẩn
+            if (box.bottom <= dotY) continue;   // nằm TRÊN dấu đỏ ⇒ không phải "bên dưới"
+            if (handledIds.has(item.id)) continue;
+            return { ...item, unread: isUnreadRow(item.row) };
+        }
+        return null;
+    }
+
+    /* =========================================================
      * UI
      * =======================================================*/
 
@@ -735,6 +928,9 @@
   border-radius:5px;padding:8px;cursor:pointer;font-size:12px}
 #pk-hotkey{width:75px;background:#080808;color:#fff;border:1px solid #555;
   border-radius:4px;padding:4px}
+#pk-mode,#pk-confirm{background:#080808;color:#fff;border:1px solid #555;
+  border-radius:4px;padding:4px;font-size:11px;max-width:158px}
+.pk-hint b{color:#ffd591}
 #pk-text{box-sizing:border-box;width:100%;background:#111;color:#fff;
   border:1px solid #555;border-radius:4px;padding:6px}
 #pk-pos{text-align:center;font-size:10px;color:#888}
@@ -773,18 +969,35 @@
         </div>
 
         <div class="pk-card green">
-          <div class="pk-title green">🎯 Dãy gửi (theo snippet)</div>
+          <div class="pk-title green" id="pk-mode-title">🎯 Dãy gửi (theo snippet)</div>
+          <div class="pk-row">
+            <span class="pk-label">Chế độ gửi</span>
+            <select id="pk-mode">
+              <option value="run">Dãy cùng snippet</option>
+              <option value="below">Hết khách bên dưới</option>
+            </select>
+          </div>
           <div id="pk-run-info">Chưa xác định — chấm vị trí rồi bấm Bắt đầu</div>
           <div id="pk-run-snippet"></div>
         </div>
 
         <div class="pk-card">
           <div class="pk-title">⚙ Tuỳ chọn</div>
+          <div class="pk-row">
+            <span class="pk-label">Chờ xác nhận gửi</span>
+            <select id="pk-confirm">
+              <option value="off">Tắt — nhanh nhất</option>
+              <option value="fast">Nhanh — 150 ms</option>
+              <option value="full">Chắc — 600 ms</option>
+            </select>
+          </div>
           ${speedRow('pk-enter-count', 'Số Enter', D.enter)}
           ${speedRow('pk-up-bottom',   'Lùi lên trong dãy', D.upBottom)}
-          <div class="pk-hint">Số Enter: 1 = mặc định · 2 = khớp tuỳ chọn "Enter 2 lần chuyển tin kế" của Pancake (cẩn thận: có thể gửi thêm tin trống)
-Lùi lên trong dãy: 1 = row ngay trên dãy mà CÙNG snippet thì gộp vào dãy · 0 = chỉ tiến xuống
-<b>Script CHỈ gửi cho các đoạn chat nằm liền nhau và có snippet giống hệt đoạn chat ở dấu đỏ.</b> Hết dãy là tự dừng (không quét sang đoạn chat khác).</div>
+          <div class="pk-hint"><b>Dãy cùng snippet:</b> chỉ gửi hội thoại LIỀN NHAU + snippet giống hệt đoạn ở dấu đỏ (tự cuộn nếu dãy dài hơn màn hình).
+<b>Hết khách bên dưới:</b> gửi mọi hội thoại còn “unread” (khách đã trả lời) từ dấu đỏ trở xuống; tự cuộn; dừng khi gặp hội thoại ĐÃ ĐỌC đầu tiên.
+Chờ xác nhận: Tắt = nhanh nhất (Pancake chậm thì có thể mất tin — script cảnh báo ở Console) · Nhanh/Chắc = chờ Pancake xoá ô soạn rồi mới sang khách kế.
+Số Enter: 1 = mặc định · 2 = khớp tuỳ chọn "Enter 2 lần chuyển tin kế" của Pancake (cẩn thận: có thể gửi thêm tin trống).
+Lùi lên trong dãy (chỉ chế độ Dãy): 1 = row ngay trên dãy mà CÙNG snippet thì gộp vào · 0 = chỉ tiến xuống.</div>
         </div>
 
         <div class="pk-card pk-row">
@@ -850,6 +1063,9 @@ Lùi lên trong dãy: 1 = row ngay trên dãy mà CÙNG snippet thì gộp vào 
     const btnStopClear  = $('pk-stop-clear');
     const inputText     = $('pk-text');
     const selectHotkey  = $('pk-hotkey');
+    const selectMode    = $('pk-mode');
+    const selectConfirm = $('pk-confirm');
+    const txtModeTitle  = $('pk-mode-title');
     const txtPos        = $('pk-pos');
     const txtId         = $('pk-id');
     const txtObserver   = $('pk-observer');
@@ -900,6 +1116,22 @@ Lùi lên trong dãy: 1 = row ngay trên dãy mà CÙNG snippet thì gộp vào 
 
     /** Hiển thị dãy đang nhắm: số khách + snippet mẫu (để người dùng đối chiếu). */
     function updateRunUI() {
+        txtModeTitle.textContent = isBelowMode()
+            ? '🎯 Gửi hết khách bên dưới (unread)'
+            : '🎯 Dãy gửi (theo snippet)';
+
+        if (isBelowMode()) {
+            txtRunInfo.textContent = runAnchorId
+                ? `Bên dưới dấu đỏ · đã gửi ${stats.sent} khách`
+                : 'Chưa xác định — chấm vị trí rồi bấm Bắt đầu';
+            txtRunInfo.style.color = runAnchorId ? '#52c41a' : '#777';
+            txtRunSnippet.textContent = runAnchorId
+                ? 'Chỉ gửi khách còn “unread” (khách đã trả lời) từ dấu đỏ trở xuống'
+                : '';
+            txtRunSnippet.title = '';
+            return;
+        }
+
         if (!runSnippet) {
             txtRunInfo.textContent = 'Chưa xác định — chấm vị trí rồi bấm Bắt đầu';
             txtRunInfo.style.color = '#777';
@@ -934,7 +1166,9 @@ Lùi lên trong dãy: 1 = row ngay trên dãy mà CÙNG snippet thì gộp vào 
         btnAutoEnter.textContent = autoEnter ? '⚡ Auto Enter: ON' : '⚡ Auto Enter: OFF';
         btnAutoEnter.className = 'pk-btn wide' + (autoEnter ? ' on-green' : '');
 
-        selectHotkey.value = activationHotkey;
+        selectMode.value    = sendMode;
+        selectConfirm.value = D.confirm;
+        selectHotkey.value  = activationHotkey;
         txtHotkeyHint.textContent = `${activationHotkey.toUpperCase()} = Bắt đầu / Dừng`;
 
         if (clickPos) {
@@ -956,6 +1190,7 @@ Lùi lên trong dãy: 1 = row ngay trên dãy mà CÙNG snippet thì gộp vào 
         store.set(K.ui, {
             text: inputText.value,
             autoEnter,
+            mode: sendMode,
             hotkey: activationHotkey,
             minimized: panel.style.display === 'none',
             position: { left: Math.round(rect.left), top: Math.round(rect.top) }
@@ -979,6 +1214,7 @@ Lùi lên trong dãy: 1 = row ngay trên dãy mà CÙNG snippet thì gộp vào 
 
     function restoreUI() {
         inputText.value = typeof savedUI.text === 'string' ? savedUI.text : '';
+        sendMode = savedUI.mode === 'below' ? 'below' : 'run';
 
         const minimized = savedUI.minimized === true;
         panel.style.display = minimized ? 'none' : 'flex';
@@ -1014,6 +1250,23 @@ Lùi lên trong dãy: 1 = row ngay trên dãy mà CÙNG snippet thì gộp vào 
         activationHotkey = selectHotkey.value === 'F4' ? 'F4' : 'Tab';
         syncUI();
         saveUI();
+    };
+
+    selectMode.onchange = () => {
+        /* Đổi chế độ giữa chừng thì dừng lượt đang chạy — tránh trộn 2 kiểu
+           nhắm mục tiêu trong cùng một lượt. */
+        const next = selectMode.value === 'below' ? 'below' : 'run';
+        if (next === sendMode) return;
+        if (isRunning) stop('Đã dừng — bạn vừa đổi chế độ gửi');
+        sendMode = next;
+        syncUI();
+        saveUI();
+    };
+
+    selectConfirm.onchange = () => {
+        D.confirm = ['off', 'fast', 'full'].includes(selectConfirm.value) ? selectConfirm.value : 'off';
+        saveSpeed();
+        syncUI();
     };
 
     inputText.addEventListener('input', scheduleSaveUI);
@@ -1464,7 +1717,7 @@ Lùi lên trong dãy: 1 = row ngay trên dãy mà CÙNG snippet thì gộp vào 
 
         if (!snapshot.row || !snapshot.row.isConnected) { stop('Row không còn tồn tại'); return false; }
         if (!snapshot.id) { stop('Không xác định được REAL conversation ID'); return false; }
-        if (snapshot.snippet === null) { stop('Snippet chưa sẵn sàng'); return false; }
+        if (!isBelowMode() && snapshot.snippet === null) { stop('Snippet chưa sẵn sàng'); return false; }
 
         /* ---- Câu dừng: ưu tiên cao nhất ---- */
         if (stopSnippet && sameSnippet(snapshot.snippet, stopSnippet)) {
@@ -1472,11 +1725,21 @@ Lùi lên trong dãy: 1 = row ngay trên dãy mà CÙNG snippet thì gộp vào 
             return false;
         }
 
-        /* ---- Chốt an toàn: chỉ gửi cho khách TRONG dãy ---- */
-        if (!runIds.has(snapshot.id)) {
+        /* ---- Chốt an toàn (khác nhau theo chế độ) ----
+         *  • Chế độ DÃY   : row phải là thành viên đã xác nhận của dãy.
+         *  • Chế độ DƯỚI  : row phải CÒN "unread" (khách đã trả lời) — kiểm lại
+         *    ngay trước khi click, vì React có thể vừa render lại.
+         */
+        if (isBelowMode()) {
+            if (!isUnreadRow(snapshot.row)) {
+                stop('Row mục tiêu không còn "unread" (khách đã được xử lý?)');
+                return false;
+            }
+        } else if (!runIds.has(snapshot.id)) {
             stop('Row mục tiêu không thuộc dãy (đã bị xếp lại?)');
             return false;
         }
+
 
         /*
          * Chốt lại DANH TÍNH row ngay trước khi click: React có thể đã tráo node
@@ -1506,7 +1769,12 @@ Lùi lên trong dãy: 1 = row ngay trên dãy mà CÙNG snippet thì gộp vào 
         phaseMark('click');
 
         updateIdStatus(snapshot);
-        setStatus(`Đã bắt ID → đang mở (${stats.sent + 1}/${runIds.size})...`, '#52c41a');
+        setStatus(
+            isBelowMode()
+                ? `Đã bắt ID → đang mở (khách ${stats.sent + 1})...`
+                : `Đã bắt ID → đang mở (${stats.sent + 1}/${runIds.size})...`,
+            '#52c41a'
+        );
 
         /* ---- Composer ---- */
         let composer = await getComposerAfterClick(token);
@@ -1577,6 +1845,7 @@ Lùi lên trong dãy: 1 = row ngay trên dãy mà CÙNG snippet thì gộp vào 
 
             sentAt = performance.now();
             phaseMark('enter');
+            prevSentId = snapshot.id;
             /* Chế độ thủ công: thời gian "dán" chỉ tính tới lúc dán xong, KHÔNG
                tính thời gian người dùng ngồi gõ/nhìn màn hình. */
             recordSend((pastedAt || sentAt) - stepStart);
@@ -1588,6 +1857,7 @@ Lùi lên trong dãy: 1 = row ngay trên dãy mà CÙNG snippet thì gộp vào 
         setStatus('⚡ Đang gửi...', '#52c41a');
 
         if (D.autoEnter > 0) await sleep(D.autoEnter);
+        else if (D.confirm === 'off') await sleep(0);   // nhanh nhất: chỉ nhường 1 macrotask
         else await nextTick();
 
         if (!isRunning || token !== runToken || !isWaitingForEnter) return false;
@@ -1625,6 +1895,7 @@ Lùi lên trong dãy: 1 = row ngay trên dãy mà CÙNG snippet thì gộp vào 
 
         composer.dispatchEvent(makeEnterEvent('keydown'));
         composer.dispatchEvent(makeEnterEvent('keyup'));
+        prevSentId = snapshot.id;
 
         sentAt = performance.now();
         phaseMark('enter');
@@ -1646,13 +1917,17 @@ Lùi lên trong dãy: 1 = row ngay trên dãy mà CÙNG snippet thì gộp vào 
          * (composer dùng chung: "chưa gửi" và "đang gửi" không phân biệt được,
          * bấm lại có thể làm khách nhận 2 tin — gửi trùng tệ hơn mất tin).
          */
-        {
+        if (D.confirm === 'off') {
+            /* Không chờ: đi tiếp ngay. Cảnh báo tin-trước-chưa-đi nằm ở đầu
+               sendTo() của lượt kế. */
+            phaseMark('confirm');
+        } else {
             const t0 = performance.now();
-            const okFast = await waitForSent(token, T.sendConfirm);
+            const okFast = await waitForSent(token, D.confirm === 'fast' ? T.confirmFast : T.sendConfirm);
             if (!isRunning || token !== runToken) return false;
 
             let ok = okFast;
-            if (!okFast) {
+            if (!okFast && D.confirm === 'full') {
                 setStatus('⏳ Pancake đang gửi (đường chậm)…', '#faad14');
                 ok = await waitForSent(token, T.sendConfirmSlow);
                 if (!isRunning || token !== runToken) return false;
@@ -1711,8 +1986,20 @@ Lùi lên trong dãy: 1 = row ngay trên dãy mà CÙNG snippet thì gộp vào 
                 if (runFinished()) return stop(doneReason());
 
                 setStatus('👁 Chờ khách kế trong dãy...', '#faad14');
-                target = await waitForRunTarget(token);
+                target = await waitForRunTarget(token, T.waitShort);
                 if (!isRunning || token !== runToken) return;
+
+                if (!target && !runFinished()) {
+                    /* Vẫn chưa thấy ⇒ dãy có thể còn dài hơn tầm nhìn: cuộn
+                       xuống để lộ thêm row (Pancake không cuộn bằng scrollTop). */
+                    setStatus('👁 Dãy còn dài hơn tầm nhìn — cuộn xuống...', '#faad14');
+                    const moved = await scrollDownOnce();
+                    if (!isRunning || token !== runToken) return;
+                    if (moved) continue;                       // vòng lặp tự tính lại
+                    target = await waitForRunTarget(token);    // chờ nốt như bản cũ
+                    if (!isRunning || token !== runToken) return;
+                }
+
                 if (!target) return stop(doneReason());
             }
 
@@ -1728,6 +2015,69 @@ Lùi lên trong dãy: 1 = row ngay trên dãy mà CÙNG snippet thì gộp vào 
                 /* sendTo() trả false: hoặc đã stop() (có lý do ở panel), hoặc bị
                    bỏ dở vì token đổi. Nếu vẫn "đang chạy" thì đây là lỗi lạ —
                    dừng hẳn để không thành script treo. */
+                if (isRunning && token === runToken) stop('Bỏ dở giữa lượt gửi — xem Console');
+                return;
+            }
+        }
+    }
+
+    /* =========================================================
+     * VÒNG LẶP CHẾ ĐỘ "GỬI HẾT KHÁCH BÊN DƯỚI"
+     *
+     * Mỗi vòng: lấy row ĐẦU TIÊN từ dấu đỏ trở xuống còn chưa gửi.
+     *   • row đó còn "unread"  ⇒ gửi.
+     *   • row đó đã đọc        ⇒ hết khối khách đã trả lời ⇒ DỪNG.
+     *   • không còn row nào ở dưới trong cửa sổ render ⇒ cuộn xuống tìm tiếp;
+     *     cuộn không được nữa ⇒ hết danh sách ⇒ DỪNG.
+     * =======================================================*/
+
+    async function runLoopBelow(token) {
+        while (isRunning && token === runToken) {
+            if (stats.sent >= T.maxRunBelow) {
+                return stop(`Đã gửi ${stats.sent} khách — chạm trần an toàn ${T.maxRunBelow}, dừng lại.`);
+            }
+
+            let target = pickBelowTarget();
+
+            if (!target) {
+                /* React có thể đang render lại sau khi gửi — chờ 1 nhịp rồi thử lại
+                   trước khi cuộn (cuộn sớm quá sẽ thừa). */
+                await nextTick();
+                if (!isRunning || token !== runToken) return;
+                target = pickBelowTarget();
+            }
+
+            if (!target) {
+                setStatus('👁 Hết row trong tầm nhìn — cuộn xuống tìm tiếp...', '#faad14');
+                const moved = await scrollDownOnce();
+                if (!isRunning || token !== runToken) return;
+                if (!moved) {
+                    return stop(`✅ Hết danh sách — đã gửi ${stats.sent} khách bên dưới dấu đỏ`);
+                }
+                continue;
+            }
+
+            if (!target.unread) {
+                /* Row gần nhất ở dưới dấu đỏ mà chưa gửi đã là hội thoại ĐÃ ĐỌC.
+                   Danh sách Pancake xếp: ghim → chưa đọc → đã đọc, nên tới đây là
+                   hết khối khách đã trả lời. Kiểm tra lại 1 nhịp cho chắc. */
+                await nextTick();
+                if (!isRunning || token !== runToken) return;
+                const again = pickBelowTarget();
+                if (again && !again.unread) {
+                    console.info('[Pancake Auto] Hết khối khách đã trả lời — row đã đọc đầu tiên bên dưới dấu đỏ:', again.id);
+                    return stop(`✅ Hết khách đã trả lời — đã gửi ${stats.sent} khách bên dưới dấu đỏ`);
+                }
+                continue;
+            }
+
+            if (sentAt) {
+                recordWait(Math.max(0, performance.now() - sentAt));
+                sentAt = 0;
+            }
+
+            const ok = await sendTo(target, token);
+            if (!ok) {
                 if (isRunning && token === runToken) stop('Bỏ dở giữa lượt gửi — xem Console');
                 return;
             }
@@ -1781,6 +2131,7 @@ Lùi lên trong dãy: 1 = row ngay trên dãy mà CÙNG snippet thì gộp vào 
         handledIds.clear();
         unsentIds = [];
         slowSends = 0;
+        prevSentId = '';
 
         btnRun.textContent = '▶ Bắt đầu';
         btnRun.style.background = '#1677ff';
@@ -1788,6 +2139,23 @@ Lùi lên trong dãy: 1 = row ngay trên dãy mà CÙNG snippet thì gộp vào 
 
         txtObserver.textContent = '';
         updateRunUI();
+
+        /* Chạy nhanh nhất (không chờ xác nhận): rà lại 1 lần cho chắc — chờ
+           400 ms rồi xem ô soạn còn nội dung không. Có ⇒ tin cuối chưa đi. */
+        if (D.confirm === 'off' && prevSentId) {
+            const lastId = prevSentId;
+            setTimeout(() => {
+                const box = getComposer();
+                const leftover = box ? String(box.value || '').trim() : '';
+                if (!leftover) return;
+                if (!unsentIds.includes(lastId)) unsentIds.push(lastId);
+                console.warn(
+                    `[Pancake Auto] ⚠ Không chờ xác nhận: ô soạn vẫn còn nội dung sau khi dừng — tin cuối (${lastId})`
+                    + ` có thể CHƯA đi: ${JSON.stringify(leftover.slice(0, 60))}`
+                    + ' · bật "Chờ xác nhận: Nhanh/Chắc" nếu hay gặp.'
+                );
+            }, 400);
+        }
 
         setStatus(
             reason || 'Đã dừng',
@@ -1819,7 +2187,40 @@ Lùi lên trong dãy: 1 = row ngay trên dãy mà CÙNG snippet thì gộp vào 
         btnRun.textContent = '⏹ Dừng lại';
         btnRun.style.background = '#ff4d4f';
         bubble.style.background = '#ff4d4f';
-        setStatus('🎯 Đang xác định dãy...', '#52c41a');
+        setStatus(isBelowMode() ? '🎯 Đang xác định vùng bên dưới dấu đỏ...' : '🎯 Đang xác định dãy...', '#52c41a');
+
+        /* ---- CHẾ ĐỘ BÊN DƯỚI: chỉ cần row ở dấu đỏ, KHÔNG xét snippet ---- */
+        if (isBelowMode()) {
+            const anchorBelow = getSnapshot();
+            if (!anchorBelow) return stop('Không tìm thấy conversation tại dấu đỏ');
+            if (!anchorBelow.id) return stop('Không đọc được REAL conversation ID tại dấu đỏ');
+
+            if (stopSnippet && sameSnippet(anchorBelow.snippet, stopSnippet)) {
+                return stop(`🛑 Đã gặp câu dừng: ${stopSnippet}`);
+            }
+
+            runSnippet  = '';               // chế độ này không dùng snippet
+            runAnchorId = anchorBelow.id;
+            updateIdStatus({ id: anchorBelow.id });
+            updateRunUI();
+
+            console.info(
+                `[Pancake Auto] Chế độ GỬI HẾT BÊN DƯỚI · dấu đỏ tại ${anchorBelow.id}`
+                + ` · row ở dấu đỏ: ${isUnreadRow(anchorBelow.row) ? 'CHƯA trả lời (sẽ gửi)' : 'đã đọc (bỏ qua)'}`
+                + ` · chỉ gửi khách còn "unread" từ dấu đỏ trở xuống`
+            );
+
+            if (!inputText.value.trim()) await getSendText();
+            if (!isRunning || token !== runToken) return;
+
+            setStatus('🎯 Chế độ gửi hết khách bên dưới — bắt đầu...', '#52c41a');
+
+            runLoopBelow(token).catch(err => {
+                console.error('[Pancake Auto] Run error:', err);
+                if (isRunning && token === runToken) stop('Script lỗi - xem Console');
+            });
+            return;
+        }
 
         /* ---- (1) Khách ở dấu đỏ = MẪU của dãy ---- */
         const anchor = getSnapshot();
@@ -1905,7 +2306,7 @@ Lùi lên trong dãy: 1 = row ngay trên dãy mà CÙNG snippet thì gộp vào 
     restoreUI();
     syncUI();
 
-    console.info(`[Pancake Auto] V${VERSION} sẵn sàng — chế độ GỬI THEO DÃY (snippet)`);
+    console.info(`[Pancake Auto] V${VERSION} sẵn sàng — 2 chế độ: DÃY (snippet) · GỬI HẾT KHÁCH BÊN DƯỚI (unread)`);
 
     if (clickPos) setTimeout(() => updateIdStatus(getSnapshot()), 0);
 })();
