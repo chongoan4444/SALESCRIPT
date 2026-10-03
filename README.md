@@ -27,7 +27,7 @@ script hoạt động phù hợp với website thực tế.
 
 - `html.txt`: HTML được lưu từ website.
 - `dashboard-fa168c408c705d9e.v6.js`: JavaScript được tải bởi website.
-- `_app-62a04783e7706d46.v6.js`: JavaScript được tải bởi website.
+- `_app-9331d46f21a84eb1.v6.js`: JavaScript được tải bởi website.
 - `html2.txt`: HTML khi mở đoạn chat được lưu từ website.
 - `pancake.vn2.har`: Chứa file har xuất ra từ Network trong quá trình sử dụng website.
 - `POST.txt/POST2.txt`: chứa thông tin từ network sau khi gửi tin nhắn.
