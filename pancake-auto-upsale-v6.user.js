@@ -141,8 +141,16 @@
         sendConfirm: 600,  // chờ Pancake xóa composer = đã gửi xong
         sendConfirmSlow: 0,// chờ thêm khi đi đường chậm (api → extension → socket)
         confirmFast: 150,  // mức "Nhanh" của Chờ xác nhận
-        waitShort:  600,   // chờ ngắn trước khi thử cuộn danh sách (chế độ Dãy)
+        /*
+         * Chờ "danh sách im lặng" (chế độ Dãy) trước khi thử cuộn. KHÔNG tốn
+         * thời gian khi Pancake phản hồi bình thường: MutationObserver trả về
+         * ngay khi row kế trôi vào cửa sổ; chỉ khi danh sách KHÔNG đổi gì trong
+         * suốt khoảng này mới coi là "không còn khách kế".
+         */
+        waitShort: 1500,
         scrollStep: 0.9,   // cuộn 1 nhịp = 90% khoảng cách từ dấu đỏ tới đáy vùng nhìn (xem scrollDownOnce)
+        scrollMax:  12,    // tối đa số nhịp cuộn XUỐNG liên tiếp khi tìm khách kế của dãy
+        scrollMaxUp:20,    // tối đa số nhịp cuộn LÊN khi đi tìm đầu dãy
         scrollWait: 900,   // chờ React render lại sau khi cuộn
         maxRunBelow: 5000, // chốt an toàn (kỹ thuật) cho chế độ GỬI HẾT BÊN DƯỚI
         maxRun:    500     // chốt an toàn: tối đa số khách gửi trong 1 dãy
@@ -806,9 +814,11 @@
         if (!holder || !px) return false;
 
         const target = holder.querySelector(SEL.row) || holder;
+        const dir = px < 0 ? -1 : 1;                  // px âm = cuộn LÊN
+        const total = Math.abs(px);
         let sent = 0;
-        while (sent < px) {
-            const delta = Math.min(120, px - sent);   // nhiều nhát nhỏ, không nhảy cóc
+        while (sent < total) {
+            const delta = Math.min(120, total - sent) * dir;   // nhiều nhát nhỏ, không nhảy cóc
             let ev = null;
             try {
                 ev = new WheelEvent('wheel', {
@@ -820,7 +830,7 @@
             }
             if (!ev) return false;
             try { target.dispatchEvent(ev); } catch (err) { return false; }
-            sent += delta;
+            sent += Math.abs(delta);
         }
         return true;
     }
@@ -835,8 +845,19 @@
         return listKey() !== before;
     }
 
-    /** Cuộn xuống 1 nhịp để lộ thêm row. true = cửa sổ render ĐÃ đổi. */
-    async function scrollDownOnce() {
+    /**
+     * Cuộn xuống 1 nhịp để lộ thêm row. true = cửa sổ render ĐÃ đổi.
+     *
+     * `limitToDot` (chế độ "gửi hết bên dưới") = CHỈ cuộn trong khoảng từ dấu đỏ
+     * tới đáy vùng nhìn: row nào đang ở dưới dấu đỏ mà trôi qua khỏi dấu đỏ sẽ bị
+     * BỎ SÓT.
+     *
+     * Chế độ DÃY truyền limitToDot = false ⇒ cuộn cả trang. Ở chế độ dãy, hàm
+     * chọn mục tiêu quét TOÀN BỘ cửa sổ (không chỉ dưới dấu đỏ) và ta chỉ cuộn
+     * khi trong cửa sổ KHÔNG còn row nào của dãy chưa gửi, nên cuộn cả trang là
+     * an toàn — cần vậy mới kịp khi dãy dài hơn tầm nhìn nhiều lần.
+     */
+    async function scrollDownOnce(limitToDot = false) {
         const holder = getListHolder();
         if (!holder) return false;
 
@@ -854,9 +875,10 @@
          * tiên ở dưới dấu đỏ trước), còn vùng dưới đáy vùng nhìn thì CHƯA đọc
          * được ⇒ giữ D ≤ (đáy vùng nhìn − dấu đỏ) để không row nào bị bỏ sót.
          */
-        const safe = Math.floor(Math.max(0, holderBox.bottom - dotY) * T.scrollStep);
         const rowH = Math.round(items[0].row.getBoundingClientRect().height) || 72;
-        const step = Math.max(rowH * 0.5, safe, 8);
+        const step = limitToDot
+            ? Math.max(rowH * 0.5, Math.floor(Math.max(0, holderBox.bottom - dotY) * T.scrollStep), 8)
+            : Math.max(rowH * 2, Math.round(holderBox.height * T.scrollStep));
 
         const before = listKey();
         if (wheelScroll(step) && await waitListChange(before)) return true;
@@ -864,6 +886,28 @@
         /* Dự phòng: nếu vì lý do nào đó holder cuộn được thật bằng scrollTop. */
         const top0 = holder.scrollTop || 0;
         try { holder.scrollTop = top0 + step; } catch (err) {}
+        if ((holder.scrollTop || 0) !== top0 && await waitListChange(before, 600)) return true;
+
+        return false;
+    }
+
+    /** Cuộn LÊN 1 nhịp (đi tìm đầu dãy khi dãy còn dài về phía trên). */
+    async function scrollUpOnce() {
+        const holder = getListHolder();
+        if (!holder) return false;
+
+        const items = rowItems();
+        if (!items.length) return false;
+
+        const holderBox = holder.getBoundingClientRect();
+        const rowH = Math.round(items[0].row.getBoundingClientRect().height) || 72;
+        const step = Math.max(rowH * 2, Math.round(holderBox.height * T.scrollStep));
+
+        const before = listKey();
+        if (wheelScroll(-step) && await waitListChange(before)) return true;
+
+        const top0 = holder.scrollTop || 0;
+        try { holder.scrollTop = Math.max(0, top0 - step); } catch (err) {}
         if ((holder.scrollTop || 0) !== top0 && await waitListChange(before, 600)) return true;
 
         return false;
@@ -1969,6 +2013,23 @@ Lùi lên trong dãy (chỉ chế độ Dãy): 1 = row ngay trên dãy mà CÙNG
         if (runStopId) {
             console.info('[Pancake Auto] Đáy dãy: row ngay dưới khách cuối cùng là', runStopId);
         }
+
+        /*
+         * Còn row CÙNG snippet đang thấy mà KHÔNG thuộc dãy ⇒ nói rõ, không im
+         * lặng. Gặp khi: (a) dãy bị cắt vì Pancake chưa xếp lại danh sách (khách
+         * vừa gửi còn nằm chỗ cũ nên không nối được), hoặc (b) có cụm cùng snippet
+         * khác nằm xa dãy (script cố tình không gửi). Cả hai đều là thông tin
+         * người dùng cần biết để kiểm tra tay.
+         */
+        const strays = rowItems().filter(it => !isMember(it) && sameSnippet(it.snippet, runSnippet));
+        if (strays.length) {
+            console.warn(
+                `[Pancake Auto] ⚠ Còn ${strays.length} row cùng snippet trong tầm nhìn nhưng KHÔNG thuộc dãy nên không gửi:`
+                + ` ${strays.map(it => it.id).join(', ')}`
+                + ' — nếu đây vẫn là khách bạn muốn gửi, hãy để các khách đó nằm LIỀN NHAU với dấu đỏ'
+                + ' (và đổi "Chờ xác nhận" sang Nhanh/Chắc nếu Pancake chậm xếp lại danh sách) rồi chạy lại.'
+            );
+        }
         return `✅ Hết dãy — đã gửi ${stats.sent} khách có snippet trùng mẫu`
             + (runIds.size ? ` (dãy ${runIds.size} khách)` : '');
     }
@@ -1990,14 +2051,61 @@ Lùi lên trong dãy (chỉ chế độ Dãy): 1 = row ngay trên dãy mà CÙNG
                 if (!isRunning || token !== runToken) return;
 
                 if (!target && !runFinished()) {
-                    /* Vẫn chưa thấy ⇒ dãy có thể còn dài hơn tầm nhìn: cuộn
-                       xuống để lộ thêm row (Pancake không cuộn bằng scrollTop). */
-                    setStatus('👁 Dãy còn dài hơn tầm nhìn — cuộn xuống...', '#faad14');
-                    const moved = await scrollDownOnce();
+                    /* Vẫn chưa thấy ⇒ dãy có thể còn dài hơn tầm nhìn: tự cuộn
+                       xuống TỪNG TRANG để lộ thêm row. Cuộn được nhịp nào thì
+                       kiểm tra lại ngay nhịp đó (không chờ 3 s mỗi nhịp).
+                       Chỉ cuộn khi trong cửa sổ KHÔNG còn row nào của dãy chưa
+                       gửi (do pickRunTarget quét cả cửa sổ) ⇒ cuộn cả trang vẫn
+                       không bỏ sót khách nào. */
+                    let bottomReached = false;
+                    for (let step = 0; isRunning && token === runToken && !target
+                                      && !runFinished() && step < T.scrollMax; step++) {
+                        setStatus(`👁 Dãy còn dài hơn tầm nhìn — cuộn xuống (${step + 1})...`, '#faad14');
+                        const moved = await scrollDownOnce(false);
+                        if (!isRunning || token !== runToken) return;
+                        if (!moved) {
+                            bottomReached = true;
+                            console.info('[Pancake Auto] Đã tới cuối danh sách hội thoại (không cuộn xuống được nữa).');
+                            break;
+                        }
+                        target = pickRunTarget();
+                    }
                     if (!isRunning || token !== runToken) return;
-                    if (moved) continue;                       // vòng lặp tự tính lại
-                    target = await waitForRunTarget(token);    // chờ nốt như bản cũ
-                    if (!isRunning || token !== runToken) return;
+
+                    /* Cuộn hết mức mà vẫn không thấy row kế: có thể dãy còn dài
+                       nhưng Pancake chưa xếp lại danh sách (khách vừa gửi chưa
+                       rời chỗ) nên không nối được. NÓI RÕ để người dùng kiểm tra,
+                       tuyệt đối không gửi bừa sang row khác. */
+                    if (!target) {
+                        /*
+                         * Dãy bị CẮT ở đây? Dấu hiệu chính xác: có row mang ĐÚNG
+                         * snippet của dãy nằm ngay dưới một row ĐÃ là thành viên
+                         * (thường là khách vừa gửi — không còn "sống" nên không
+                         * được dùng làm cầu nối). Tức là rất có thể còn khách
+                         * trong dãy mà script KHÔNG dám tự nối — báo để người
+                         * dùng kiểm tra tay, tuyệt đối không gửi bừa.
+                         */
+                        const itemsTail = rowItems();
+                        for (let i = itemsTail.length - 1; i > 0; i--) {
+                            const cur = itemsTail[i], prev = itemsTail[i - 1];
+                            if (isMember(prev) && !isMember(cur) && sameSnippet(cur.snippet, runSnippet)) {
+                                console.warn(
+                                    '[Pancake Auto] ⚠ Có row cùng snippet nằm ngay dưới khách đã gửi nhưng script KHÔNG'
+                                    + ' tự nối (khách vừa gửi chưa rời chỗ ⇒ không chắc còn liền dãy). Cách xử lý:'
+                                    + ' (1) đổi "Chờ xác nhận" sang Nhanh/Chắc rồi chạy lại, hoặc (2) cuộn tay xuống xem còn'
+                                    + ' khách cùng snippet không.'
+                                );
+                                setStatus('⚠ Có thể còn khách trong dãy — xem Console', '#faad14');
+                                break;
+                            }
+                        }
+                    }
+
+                    /* Vẫn chưa có thì chờ nốt như bản cũ (dãy trôi vào chậm). */
+                    if (!target && !bottomReached) {
+                        target = await waitForRunTarget(token);
+                        if (!isRunning || token !== runToken) return;
+                    }
                 }
 
                 if (!target) return stop(doneReason());
@@ -2049,7 +2157,7 @@ Lùi lên trong dãy (chỉ chế độ Dãy): 1 = row ngay trên dãy mà CÙNG
 
             if (!target) {
                 setStatus('👁 Hết row trong tầm nhìn — cuộn xuống tìm tiếp...', '#faad14');
-                const moved = await scrollDownOnce();
+                const moved = await scrollDownOnce(true);   // true = chỉ cuộn trong khoảng dấu đỏ→đáy vùng nhìn
                 if (!isRunning || token !== runToken) return;
                 if (!moved) {
                     return stop(`✅ Hết danh sách — đã gửi ${stats.sent} khách bên dưới dấu đỏ`);
@@ -2066,7 +2174,9 @@ Lùi lên trong dãy (chỉ chế độ Dãy): 1 = row ngay trên dãy mà CÙNG
                 const again = pickBelowTarget();
                 if (again && !again.unread) {
                     console.info('[Pancake Auto] Hết khối khách đã trả lời — row đã đọc đầu tiên bên dưới dấu đỏ:', again.id);
-                    return stop(`✅ Hết khách đã trả lời — đã gửi ${stats.sent} khách bên dưới dấu đỏ`);
+                    return stop(stats.sent
+                        ? `✅ Hết khách đã trả lời — đã gửi ${stats.sent} khách bên dưới dấu đỏ`
+                        : '✅ Không có khách nào đã trả lời ở dưới dấu đỏ');
                 }
                 continue;
             }
@@ -2249,6 +2359,29 @@ Lùi lên trong dãy (chỉ chế độ Dãy): 1 = row ngay trên dãy mà CÙNG
             + ` · snippet mẫu: ${JSON.stringify(runSnippet)}`
             + (runBottomSeen ? ' · đã thấy đáy dãy' : ' · đáy dãy còn ngoài tầm nhìn')
         );
+
+        /* ---- (2b) Dãy có thể còn dài về PHÍA TRÊN tầm nhìn: cuộn lên tìm đầu dãy.
+                Chỉ làm khi "Lùi lên trong dãy" đang bật. Dừng ngay khi row TRÊN
+                CÙNG của cửa sổ không còn là row của dãy (đã tới đầu dãy, hoặc
+                đã tới đầu danh sách). Nhờ vậy dãy dài hơn màn hình vẫn đủ khách. */
+        if (D.upBottom) {
+            let ups = 0;
+            while (isRunning && token === runToken && ups < T.scrollMaxUp) {
+                const itemsTop = rowItems();
+                if (!itemsTop.length || !isBridge(itemsTop[0])) break;
+                setStatus(`↖ Dãy còn dài về phía trên — cuộn lên tìm đầu dãy (${ups + 1})...`, '#faad14');
+                const moved = await scrollUpOnce();
+                if (!isRunning || token !== runToken) return;
+                if (!moved) break;                       // đã ở đầu danh sách
+                refreshRun(rowItems());
+                ups++;
+            }
+            if (!isRunning || token !== runToken) return;
+            if (ups) {
+                console.info(`[Pancake Auto] Đã cuộn lên ${ups} nhịp để tìm đầu dãy · dãy hiện ${runIds.size} khách`);
+                updateRunUI();
+            }
+        }
 
         /* ---- (3) Nội dung: đọc clipboard 1 lần nếu ô text trống ---- */
         if (!inputText.value.trim()) await getSendText();
