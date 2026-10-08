@@ -66,7 +66,7 @@
 
     const OBSERVER_TIMEOUT = 6000;
     const SELECTED_TIMEOUT = 2500;
-    const HIDDEN_ENTER_CONFIRM_TIMEOUT = 600;
+    const ENTER_CONFIRM_TIMEOUT = 600;
     const POLL_FAST = 100;
     const POLL_MID = 200;
     const POLL_SLOW = 300;
@@ -773,6 +773,7 @@
         for (const waiter of Array.from(uiWaiters)) {
             try { waiter.observer?.disconnect(); } catch (err) {}
             if (waiter.timeoutId) clearTimeout(waiter.timeoutId);
+            if (waiter.intervalId) clearInterval(waiter.intervalId);
             uiWaiters.delete(waiter);
             try { waiter.resolve?.(null); } catch (err) {}
         }
@@ -781,6 +782,7 @@
     function waitDOMCondition(callback, options = {}) {
         const token = options.token ?? runToken;
         const timeout = options.timeout ?? 7000;
+        const interval = options.interval ?? 0;
         const rootNode = options.root || document.body;
 
         return new Promise(resolve => {
@@ -789,12 +791,19 @@
                 return;
             }
 
-            const waiter = { observer: null, timeoutId: null, resolve, done: false };
+            const waiter = {
+                observer: null,
+                timeoutId: null,
+                intervalId: null,
+                resolve,
+                done: false
+            };
             const finish = value => {
                 if (waiter.done) return;
                 waiter.done = true;
                 try { waiter.observer?.disconnect(); } catch (err) {}
                 if (waiter.timeoutId) clearTimeout(waiter.timeoutId);
+                if (waiter.intervalId) clearInterval(waiter.intervalId);
                 uiWaiters.delete(waiter);
                 resolve(value);
             };
@@ -829,6 +838,9 @@
 
             uiWaiters.add(waiter);
             check();
+            if (!waiter.done && interval > 0) {
+                waiter.intervalId = setInterval(check, interval);
+            }
             if (!waiter.done && timeout > 0) {
                 waiter.timeoutId = setTimeout(() => finish(null), timeout);
             }
@@ -1074,17 +1086,18 @@
             if (!composer || !isVisible(composer)) return null;
             const text = getComposerText(composer);
             return text ? { composer, text } : null;
-        }, { token, timeout: 8000 });
+        }, { token, timeout: 8000, interval: 50 });
     }
 
     /*
-     * Sending is asynchronous in Pancake (socket/API/extension). Normally we
-     * keep the zero-delay path. If the tab was backgrounded during this step,
-     * Chrome can delay the socket work; do not switch conversation while the
-     * old composer still contains the message.
+     * Sending is asynchronous in Pancake (socket/API/extension). The composer
+     * value is a textarea property, so a React value update does not always
+     * produce a MutationObserver record; the waiter above therefore polls too.
+     * Do not switch conversation while the old composer still contains the
+     * message.
      */
-    async function waitForHiddenSendConfirmation(token) {
-        const until = performance.now() + HIDDEN_ENTER_CONFIRM_TIMEOUT;
+    async function waitForEnterConfirmation(token) {
+        const until = performance.now() + ENTER_CONFIRM_TIMEOUT;
         while (tokenValid(token) && performance.now() < until) {
             const composer = getComposer();
             if (!composer || !getComposerText(composer)) return true;
@@ -1360,14 +1373,17 @@
         stats.pendingSendAt = performance.now();
         renderStats();
 
-        if (tabHiddenDuringStep) {
-            setStatus('⏳ Tab vừa ẩn → xác nhận Pancake đã gửi...', '#faad14');
-            const confirmed = await waitForHiddenSendConfirmation(token);
-            if (!tokenValid(token)) return null;
-            if (!confirmed) {
-                stop('Tab vừa ẩn nhưng composer chưa được Pancake xóa sau Enter');
-                return null;
-            }
+        setStatus(
+            tabHiddenDuringStep
+                ? '⏳ Tab vừa ẩn → xác nhận Pancake đã gửi...'
+                : '⏳ Xác nhận Pancake đã xóa composer...',
+            '#faad14'
+        );
+        const confirmed = await waitForEnterConfirmation(token);
+        if (!tokenValid(token)) return null;
+        if (!confirmed) {
+            stop('Pancake chưa xóa composer sau Enter; không chuyển conversation');
+            return null;
         }
 
         releaseNextConversationWait(token);
