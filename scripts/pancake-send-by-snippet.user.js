@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Pancake – Gửi 1 câu cho các đoạn chat cùng snippet
 // @namespace    salescript
-// @version      1.0.0
-// @description  Chọn 1 snippet trong danh sách đoạn chat Pancake rồi gửi cùng 1 câu cho toàn bộ đoạn chat có snippet giống nhau.
+// @version      1.1.0
+// @description  Chọn chuỗi chat (Alt+Click 2 đầu) hoặc chọn theo snippet trong danh sách Pancake rồi gửi cùng 1 câu cho tất cả.
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
 // @match        https://pages.fm/*
@@ -52,8 +52,12 @@
 
   const state = {
     enabled: true,          // BẬT/TẮT tính năng (lắng nghe click, highlight)
-    target: null,           // { id, name, snippet, time } — snippet người dùng đã chọn
-    matches: [],            // danh sách đoạn chat khớp snippet [{ id, name, snippet, time, checked }]
+    mode: null,             // 'snippet' (chọn theo snippet) | 'range' (chọn chuỗi 2 đầu) | null
+    target: null,           // { id, name, snippet, time } — snippet người dùng đã chọn (mode snippet)
+    rangeStart: null,       // đầu chuỗi (mode range — Alt+Click lần 1)
+    rangeEnd: null,         // cuối chuỗi (mode range — Alt+Click lần 2)
+    allRows: null,          // Map id → dòng (+ order trên→dưới) từ "Quét toàn bộ danh sách"
+    matches: [],            // danh sách đoạn chat sẽ gửi [{ id, name, snippet, time, checked, mark, ... }]
     sending: false,
     stopRequested: false,
     pickMode: false,
@@ -204,11 +208,72 @@
 
   /* ============================ CHỌN SNIPPET + KHỚP ============================ */
 
+  /* ============================ CHỌN SNIPPET / CHỌN CHUỖI 2 ĐẦU ============================ */
+
+  // Nguồn dòng để khớp: ưu tiên kết quả quét toàn bộ, nếu chưa quét thì các dòng đang render
+  function sourceRows() {
+    if (state.allRows && state.allRows.size) return Array.from(state.allRows.values());
+    return visibleRows();
+  }
+
+  function markOf(r) {
+    if (state.target && r.id === state.target.id) return 'target';
+    if (state.rangeStart && r.id === state.rangeStart.id) return 'start';
+    if (state.rangeEnd && r.id === state.rangeEnd.id) return 'end';
+    return '';
+  }
+
+  function computeMatches() {
+    const before = new Map(state.matches.map((m) => [m.id, m]));
+    const list = [];
+    const push = (r) => {
+      const old = before.get(r.id);
+      list.push({
+        ...r,
+        checked: old ? old.checked : (r.type !== 'comment'), // bình luận: mặc định bỏ tick (reply_inbox không áp dụng)
+        isTarget: !!markOf(r),
+        mark: markOf(r),
+      });
+    };
+    if (state.mode === 'snippet' && state.target) {
+      sourceRows().forEach((r) => {
+        if (r.snippet && r.snippet === state.target.snippet) push(r);
+      });
+    } else if (state.mode === 'range' && state.rangeStart && state.rangeEnd) {
+      const aId = state.rangeStart.id, bId = state.rangeEnd.id;
+      let rows, idxOf;
+      if (state.allRows && state.allRows.has(aId) && state.allRows.has(bId)) {
+        rows = Array.from(state.allRows.values());
+        idxOf = (id) => state.allRows.get(id).order;
+      } else {
+        // virtual list render 1 dải liền nhau → 2 đầu còn thấy ⇒ các dòng ở giữa cũng thấy
+        rows = visibleRows();
+        const idx = new Map(rows.map((r, i) => [r.id, i]));
+        idxOf = (id) => (idx.has(id) ? idx.get(id) : -1);
+      }
+      const ia = idxOf(aId), ib = idxOf(bId);
+      if (ia < 0 || ib < 0) {
+        logLine('⚠ Không tìm thấy 1 trong 2 đầu chuỗi trong danh sách — hãy Alt+Click chọn lại');
+      } else {
+        const lo = Math.min(ia, ib), hi = Math.max(ia, ib);
+        rows.forEach((r) => {
+          const i = idxOf(r.id);
+          if (i >= lo && i <= hi) push(r); // rows đang theo thứ tự trên→dưới
+        });
+      }
+    }
+    state.matches = list;
+    highlightRows();
+  }
+
   function setTarget(info, sourceLabel) {
     if (!info || !info.snippet) {
       logLine('⚠ Không đọc được snippet từ ' + (sourceLabel || 'dòng đã chọn'));
       return;
     }
+    state.mode = 'snippet';
+    state.rangeStart = null;
+    state.rangeEnd = null;
     state.target = {
       id: info.id,
       name: info.name,
@@ -217,48 +282,74 @@
       time: info.time,
     };
     logLine('🎯 Đã chọn snippet từ ' + (info.name || '?') + ': “' + clip(info.snippet, 70) + '”');
-    rescanMatches();
+    computeMatches();
     render();
   }
 
-  function rescanMatches() {
-    const before = new Map(state.matches.map((m) => [m.id, m]));
-    const rows = visibleRows();
-    const tgt = state.target;
-    const list = [];
-    if (tgt) {
-      rows.forEach((r) => {
-        if (r.snippet && r.snippet === tgt.snippet) {
-          const old = before.get(r.id);
-          list.push({
-            id: r.id,
-            pageId: r.pageId,
-            name: r.name,
-            snippet: r.snippet,
-            snippetRaw: r.snippetRaw,
-            time: r.time,
-            type: r.type,
-            platform: r.platform,
-            checked: old ? old.checked : (r.type !== 'comment'), // bình luận: mặc định bỏ tick (reply_inbox không áp dụng)
-            isTarget: r.id === tgt.id,
-          });
-        }
-      });
+  function setRangeStart(info) {
+    if (!info) return;
+    state.mode = 'range';
+    state.target = null;
+    state.rangeEnd = null;
+    state.rangeStart = {
+      id: info.id,
+      name: info.name,
+      snippet: info.snippet,
+      snippetRaw: info.snippetRaw,
+      time: info.time,
+    };
+    state.matches = [];
+    highlightRows();
+    logLine('🅰 Đã đặt ĐẦU CHUỖI: ' + (info.name || info.id)
+      + ' — giữ Alt và nhấp tiếp dòng CUỐI chuỗi (Esc để hủy)');
+    render();
+  }
+
+  async function completeRange(endInfo) {
+    const start = state.rangeStart;
+    if (!start) return;
+    const visIds = new Set(visibleRows().map((r) => r.id));
+    const haveAll = !!(state.allRows && state.allRows.has(start.id) && state.allRows.has(endInfo.id));
+    const bothVisible = visIds.has(start.id) && visIds.has(endInfo.id);
+    if (!haveAll && !bothVisible) {
+      // 1 trong 2 đầu đã cuộn ra khỏi vùng render → quét toàn bộ để có thứ tự trên→dưới
+      logLine('⏳ Một trong 2 đầu chuỗi đã ra khỏi vùng hiển thị — đang quét danh sách…');
+      await scanFullList();
     }
-    state.matches = list;
+    state.mode = 'range';
+    state.rangeEnd = {
+      id: endInfo.id,
+      name: endInfo.name,
+      snippet: endInfo.snippet,
+      snippetRaw: endInfo.snippetRaw,
+      time: endInfo.time,
+    };
+    computeMatches();
+    const n = state.matches.length;
+    logLine('🔗 CHUỖI CHỌN: ' + (start.name || start.id) + ' → ' + (endInfo.name || endInfo.id)
+      + ' — ' + n + ' chat trong chuỗi'
+      + (state.allRows ? ' (toàn danh sách)' : ' (trong vùng đang hiển thị)'));
+    render();
+  }
+
+  function clearSelection() {
+    state.mode = null;
+    state.target = null;
+    state.rangeStart = null;
+    state.rangeEnd = null;
+    state.matches = [];
     highlightRows();
   }
 
   function highlightRows() {
+    const matchIds = new Set(state.matches.map((m) => m.id));
     $$('.conversation-list-item').forEach((item) => {
       item.classList.remove('ssb-match', 'ssb-match-target');
-      if (!state.enabled || !state.target) return;
+      if (!state.enabled) return;
       const info = rowInfo(item);
-      if (!info || !info.snippet) return;
-      if (info.snippet === state.target.snippet) {
-        item.classList.add('ssb-match');
-        if (state.target && info.id === state.target.id) item.classList.add('ssb-match-target');
-      }
+      if (!info) return;
+      if (markOf(info)) item.classList.add('ssb-match-target');
+      else if (matchIds.has(info.id)) item.classList.add('ssb-match');
     });
   }
 
@@ -286,7 +377,7 @@
       return;
     }
     const savedTop = scroller.scrollTop;
-    const found = new Map(state.matches.map((m) => [m.id, m]));
+    const found = new Map();
     let idle = 0;
     let guard = 0;
     logLine('🔍 Đang quét toàn bộ danh sách đoạn chat…');
@@ -295,20 +386,16 @@
       let added = 0;
       visibleRows().forEach((r) => {
         if (!found.has(r.id)) {
-          found.set(r.id, {
-            ...r,
-            checked: r.type !== 'comment', // bình luận: mặc định bỏ tick
-            isTarget: !!(state.target && r.id === state.target.id),
-          });
+          found.set(r.id, { ...r }); // thứ tự Map = thứ tự trên→dưới
           added++;
         }
       });
       return added;
     };
 
-    collect();
     scroller.scrollTop = 0;
-    await sleep(350);
+    await sleep(400);
+    collect();
 
     while (idle < 8 && guard < 400) {
       guard++;
@@ -331,24 +418,16 @@
     scroller.scrollTop = savedTop;
     await sleep(250);
 
-    // Giữ trạng thái checkbox cũ nếu có
-    const before = new Map(state.matches.map((m) => [m.id, m]));
-    const rows = visibleRows();
-    const rowIds = new Set(rows.map((r) => r.id));
-    // ưu tiên dữ liệu mới đọc từ DOM
-    rows.forEach((r) => {
+    // cập nhật dữ liệu mới nhất cho các dòng còn đang render
+    visibleRows().forEach((r) => {
       if (found.has(r.id)) found.set(r.id, { ...found.get(r.id), ...r });
     });
-    const list = [];
-    found.forEach((v, id) => {
-      const old = before.get(id);
-      list.push({ ...v, checked: old ? old.checked : (v.checked !== false), isTarget: !!(state.target && id === state.target.id) });
-    });
-    state.matches = list;
-    highlightRows();
-    logLine('🔍 Quét xong: ' + list.length + ' đoạn chat trong danh sách'
-      + (state.target ? ', ' + list.filter((m) => m.snippet === state.target.snippet).length + ' khớp snippet' : '')
-      + (rowIds.size < list.length ? ' (một số dòng đã ra khỏi vùng render — vẫn giữ trong danh sách)' : ''));
+    // gán thứ tự trên→dưới để dùng cho chọn chuỗi
+    let ord = 0;
+    found.forEach((v) => { v.order = ord++; });
+    state.allRows = found;
+    logLine('🔍 Quét xong: ' + found.size + ' đoạn chat trong danh sách');
+    computeMatches();
     render();
   }
 
@@ -396,11 +475,14 @@
   }
 
   async function sendToAll() {
-    const text = ($('#ssb-msg') && $('#ssb-msg').value || '').trim();
+    // LƯU Ý: panel nằm trong shadow DOM → phải lấy phần tử qua shadow.getElementById,
+    // document.querySelector sẽ không thấy (đây là nguyên nhân lỗi "Hãy nhập nội dung câu cần gửi")
+    const msgEl = shadow && shadow.getElementById('ssb-msg');
+    const text = (msgEl && msgEl.value || '').trim();
     if (!text) { alert('Hãy nhập nội dung câu cần gửi.'); return; }
     const targets = state.matches.filter((m) => m.checked);
     if (!targets.length) {
-      alert('Chưa có đoạn chat nào được chọn.\nHãy chọn snippet rồi bấm "Quét toàn bộ danh sách".');
+      alert('Chưa có đoạn chat nào được chọn.\nHãy chọn snippet (nút "Lấy snippet từ chat đang chọn")\nhoặc chọn chuỗi bằng 2 lần Alt+Click (đầu → cuối).');
       return;
     }
     const names = targets.slice(0, MAX_NAME_LIST).map((m) => m.name || m.id).join(', ')
@@ -409,7 +491,7 @@
     const warnComment = nComment
       ? '\n\n⚠ Trong đó ' + nComment + ' chat loại BÌNH LUẬN — API reply_inbox có thể không áp dụng cho các chat này!'
       : '';
-    if (!confirm('Gửi 1 câu tới ' + targets.length + ' đoạn chat có cùng snippet?\n\n“'
+    if (!confirm('Gửi 1 câu tới ' + targets.length + ' đoạn chat đã chọn?\n\n“'
       + clip(text, 120) + '”\n\nNhận: ' + names + warnComment)) return;
 
     state.sending = true;
@@ -418,7 +500,8 @@
     logLine('🚀 Bắt đầu gửi cho ' + targets.length + ' đoạn chat…');
 
     let ok = 0, fail = 0;
-    const delay = Math.max(300, Math.min(20000, parseInt(($('#ssb-delay') && $('#ssb-delay').value) || DEF_DELAY, 10) || DEF_DELAY));
+    const delayEl = shadow && shadow.getElementById('ssb-delay');
+    const delay = Math.max(300, Math.min(20000, parseInt((delayEl && delayEl.value) || DEF_DELAY, 10) || DEF_DELAY));
     for (let i = 0; i < targets.length; i++) {
       if (state.stopRequested) {
         logLine('⏸ Đã dừng bởi bạn tại ' + i + '/' + targets.length);
@@ -523,16 +606,16 @@
         </div>
         <div class="body" id="ssb-body">
           <div>
-            <div class="label">1) Snippet đã chọn</div>
-            <div class="snippet-box" id="ssb-target">Chưa chọn — bấm nút bên dưới hoặc Alt+Click vào 1 dòng chat</div>
+            <div class="label">1) Đang chọn</div>
+            <div class="snippet-box" id="ssb-target">Chưa chọn — <b>Alt+Click 2 lần</b> (đầu → cuối chuỗi) hoặc lấy snippet từ chat đang chọn</div>
             <div class="row" style="margin-top:6px">
-              <button class="b b-blue" id="ssb-use-selected">Lấy từ chat đang chọn</button>
-              <button class="b b-gray" id="ssb-pick">Chọn bằng click</button>
+              <button class="b b-blue" id="ssb-use-selected">Lấy snippet từ chat đang chọn</button>
+              <button class="b b-gray" id="ssb-pick">Chọn chuỗi (2 nhấp)</button>
               <button class="b b-gray" id="ssb-clear">Xóa</button>
             </div>
           </div>
           <div>
-            <div class="label">2) Đoạn chat cùng snippet (<span class="count" id="ssb-count">0</span>)</div>
+            <div class="label">2) Đoạn chat sẽ gửi (<span class="count" id="ssb-count">0</span>)</div>
             <div class="row" style="margin:4px 0">
               <button class="b b-gray" id="ssb-scan">Quét toàn bộ danh sách</button>
               <button class="b b-gray" id="ssb-rescan">Quét dòng đang thấy</button>
@@ -554,8 +637,9 @@
           <div class="prog"><i id="ssb-bar"></i></div>
           <div class="log" id="ssb-log"></div>
           <div class="hint">
-            • Alt+Click vào 1 dòng chat bất kỳ để chọn snippet của dòng đó.<br>
-            • Dòng viền <b style="color:#22c55e">xanh lá</b> = khớp snippet; <b style="color:#3b82f6">xanh dương</b> = dòng bạn chọn.<br>
+            • <b>Alt+Click lần 1</b> = đầu chuỗi → <b>giữ Alt + nhấp lần 2</b> = cuối chuỗi: chọn tất cả chat ở giữa (chuỗi chọn). Nhấp lần 3 = bắt đầu chuỗi mới.<br>
+            • Hoặc bấm <b>“Lấy snippet từ chat đang chọn”</b> để gửi cho các chat cùng snippet.<br>
+            • Dòng viền <b style="color:#22c55e">xanh lá</b> = sẽ được gửi; <b style="color:#3b82f6">xanh dương</b> = đầu/cuối chuỗi hoặc nguồn snippet.<br>
             • Chat gắn nhãn <b style="color:#f59e0b">[bình luận]</b> mặc định bỏ tick (reply_inbox không áp dụng cho bình luận).<br>
             • Gửi qua API <code style="color:#94a3b8">POST /v1/pages/.../messages</code> (action=reply_inbox) — đúng request website tự dùng.
           </div>
@@ -591,14 +675,14 @@
     });
     on('ssb-pick', 'click', () => {
       state.pickMode = !state.pickMode;
-      logLine(state.pickMode ? '👉 Chế độ chọn: nhấp vào 1 dòng chat trong danh sách (Esc để hủy)' : 'Đã tắt chế độ chọn');
+      logLine(state.pickMode
+        ? '👉 Chế độ chọn chuỗi: nhấp dòng ĐẦU, rồi nhấp tiếp dòng CUỐI (Esc để hủy)'
+        : 'Đã tắt chế độ chọn chuỗi');
       render();
     });
     on('ssb-clear', 'click', () => {
-      state.target = null;
-      state.matches = [];
-      highlightRows();
-      logLine('Đã xóa snippet đang chọn');
+      clearSelection();
+      logLine('Đã xóa lựa chọn');
       render();
     });
     on('ssb-scan', 'click', async () => {
@@ -609,8 +693,8 @@
       render();
     });
     on('ssb-rescan', 'click', () => {
-      rescanMatches();
-      logLine('🔄 Đã quét lại các dòng đang hiển thị: ' + state.matches.length + ' khớp');
+      computeMatches();
+      logLine('🔄 Đã quét lại các dòng đang hiển thị: ' + state.matches.length + ' chat trong lựa chọn');
       render();
     });
     on('ssb-all', 'click', () => {
@@ -679,10 +763,19 @@
     }
     const tgt = shadow.getElementById('ssb-target');
     if (tgt) {
-      tgt.innerHTML = state.target
-        ? '<b>' + esc(state.target.name || '?') + '</b> · ' + esc(state.target.time || '') + '<br>'
-          + esc(state.target.snippetRaw || state.target.snippet)
-        : 'Chưa chọn — bấm nút bên dưới hoặc Alt+Click vào 1 dòng chat';
+      if (state.mode === 'range' && state.rangeStart && state.rangeEnd) {
+        tgt.innerHTML = '🔗 Chuỗi: <b>' + esc(state.rangeStart.name || '?') + '</b> (' + esc(state.rangeStart.time || '') + ')'
+          + ' → <b>' + esc(state.rangeEnd.name || '?') + '</b> (' + esc(state.rangeEnd.time || '') + ')'
+          + '<br>' + state.matches.length + ' chat trong chuỗi';
+      } else if (state.mode === 'range' && state.rangeStart) {
+        tgt.innerHTML = '🅰 Đã đặt ĐẦU CHUỖI: <b>' + esc(state.rangeStart.name || '?') + '</b> · ' + esc(state.rangeStart.time || '')
+          + '<br>Giữ Alt và nhấp tiếp dòng <b>CUỐI chuỗi</b>…';
+      } else if (state.target) {
+        tgt.innerHTML = '🎯 Snippet: <b>' + esc(state.target.name || '?') + '</b> · ' + esc(state.target.time || '') + '<br>'
+          + esc(state.target.snippetRaw || state.target.snippet);
+      } else {
+        tgt.innerHTML = 'Chưa chọn — <b>Alt+Click 2 lần</b> (đầu → cuối chuỗi) hoặc lấy snippet từ chat đang chọn';
+      }
     }
     const cnt = shadow.getElementById('ssb-count');
     if (cnt) cnt.textContent = String(state.matches.length);
@@ -696,7 +789,11 @@
           <label class="item">
             <input type="checkbox" data-i="${i}" ${m.checked ? 'checked' : ''}>
             <span style="flex:1">
-              <span class="nm">${esc(m.name || m.id)}${m.isTarget ? ' <span style="color:#3b82f6">(đã chọn)</span>' : ''}${
+              <span class="nm">${esc(m.name || m.id)}${
+                m.mark === 'start' ? ' <span style="color:#3b82f6">(đầu chuỗi)</span>'
+                : m.mark === 'end' ? ' <span style="color:#3b82f6">(cuối chuỗi)</span>'
+                : m.mark === 'target' ? ' <span style="color:#3b82f6">(nguồn snippet)</span>' : ''
+              }${
                 m.type === 'comment' ? ' <span style="color:#f59e0b" title="Bình luận bài viết — reply_inbox có thể không áp dụng; mặc định bỏ tick">[bình luận]</span>'
                 : (m.type === 'inbox' ? '' : ' <span style="color:#64748b" title="Không xác định loại">[?]</span>')
               }</span><br>
@@ -734,19 +831,29 @@
     if (!isAlt && !state.pickMode) return; // click thường = mở chat như bình thường
     const info = rowInfo(item);
     if (!info) return;
-    if (isAlt || state.pickMode) {
-      e.preventDefault();
-      e.stopPropagation();
-      setTarget(info, 'click');
-      state.pickMode = false;
-      render();
+    e.preventDefault();
+    e.stopPropagation();
+    state.pickMode = false;
+    // Alt+Click lần 1 = đầu chuỗi, lần 2 = cuối chuỗi → chọn tất cả ở giữa; lần 3 = bắt đầu chuỗi mới
+    if (state.mode === 'range' && state.rangeStart && !state.rangeEnd) {
+      completeRange(info).catch((err) => logLine('⚠ Lỗi khi tạo chuỗi: ' + err));
+    } else {
+      setRangeStart(info);
     }
+    render();
   }
 
   function onKeydown(e) {
-    if (e.key === 'Escape' && state.pickMode) {
+    if (e.key === 'Escape' && (state.pickMode || (state.rangeStart && !state.rangeEnd))) {
       state.pickMode = false;
-      logLine('Đã hủy chế độ chọn');
+      if (state.rangeStart && !state.rangeEnd) {
+        state.rangeStart = null;
+        state.mode = null;
+        highlightRows();
+        logLine('Đã hủy chọn chuỗi');
+      } else {
+        logLine('Đã tắt chế độ chọn');
+      }
       render();
       return;
     }
@@ -768,7 +875,7 @@
     buildPanel();
     document.addEventListener('click', onDocClick, true);
     document.addEventListener('keydown', onKeydown, true);
-    logLine('Sẵn sàng. Chọn snippet trong danh sách đoạn chat để bắt đầu.');
+    logLine('Sẵn sàng. Alt+Click 2 lần (đầu → cuối chuỗi) để chọn chuỗi chat, hoặc dùng nút lấy snippet.');
   }
 
   if (document.readyState === 'loading') {
@@ -784,9 +891,18 @@
     sendOne,
     scanFullList,
     visibleRows,
+    computeMatches,
+    clearSelection,
     setTargetByIndex(i) {
       const rows = visibleRows();
       if (rows[i]) setTarget(rows[i], 'debug');
+    },
+    setRangeByIndexes(i, j) {
+      const rows = visibleRows();
+      if (rows[i] && rows[j]) {
+        setRangeStart(rows[i]);
+        completeRange(rows[j]);
+      }
     },
   };
 })();

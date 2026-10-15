@@ -22,19 +22,22 @@ Phù hợp khi nhiều khách nhắn cùng 1 câu hỏi / cùng 1 tin tự độ
 ## Sử dụng
 
 1. Bấm vào biểu tượng panel **“💬 Gửi 1 câu theo snippet”** góc dưới bên phải (kéo thả được).
-2. **Chọn snippet** — một trong 3 cách:
-   - Bấm 1 chat bất kỳ trong danh sách (chat đó được chọn) → bấm **“Lấy từ chat đang chọn”**;
-   - Bấm **“Chọn bằng click”** rồi nhấp vào 1 dòng chat bất kỳ (Esc để hủy);
-   - **Alt + Click** vào 1 dòng chat bất kỳ (nhanh nhất).
-3. Các dòng **viền xanh lá** là các chat có snippet giống nhau (dòng bạn chọn viền xanh dương).
+2. **Chọn đối tượng nhận tin** — 2 cách:
+   - **Chọn chuỗi (2 đầu):** **Alt+Click** vào dòng chat **đầu chuỗi** → **giữ Alt và nhấp tiếp** dòng
+     **cuối chuỗi**. Tất cả chat nằm **giữa 2 dòng đó** trong danh sách được chọn thành 1 chuỗi
+     (nhấp lần 3 = bắt đầu chuỗi mới; Esc = hủy). Nút “Chọn chuỗi (2 nhấp)” cũng làm được điều tương tự.
+   - **Chọn theo snippet:** bấm 1 chat bất kỳ (chat đó được chọn) → bấm **“Lấy snippet từ chat đang chọn”**
+     (hoặc `Alt+Shift+D`) — mọi chat có snippet giống nhau sẽ được chọn.
+3. Các dòng **viền xanh lá** là chat sẽ được nhận tin (dòng đầu/cuối chuỗi hoặc nguồn snippet viền xanh dương).
 4. Bấm **“Quét toàn bộ danh sách”** để quét thêm các chat ngoài vùng đang hiển thị
-   (list là virtual list — script tự cuộn, đọc hết rồi cuộn về chỗ cũ).
+   (list là virtual list — script tự cuộn, đọc hết rồi cuộn về chỗ cũ). Nếu 2 đầu chuỗi cách xa nhau,
+   script tự quét khi bạn nhấp dòng cuối.
 5. Bỏ tick chat nào không muốn gửi trong danh sách mục 2.
 6. Nhập **1 câu** cần gửi vào mục 3 → bấm **“Gửi 1 câu cho tất cả”** → xác nhận.
    - Giãn cách mặc định 1500 ms/lần gửi (đổi được), có nút **Dừng** giữa chừng.
    - Log phía dưới hiện rõ chat nào gửi thành công / lỗi gì.
 
-Phím tắt: `Alt+Shift+B` ẩn/hiện panel, `Alt+Shift+D` lấy snippet từ chat đang chọn.
+Phím tắt: `Alt+Shift+B` ẩn/hiện panel, `Alt+Shift+D` lấy snippet từ chat đang chọn, `Esc` hủy chọn chuỗi.
 
 ## Script dựa vào phần nào của source trong repo?
 
@@ -50,6 +53,7 @@ Không dùng selector bịa: mọi class/id ở trên đều lấy trực tiếp
 
 - **Snippet so khớp là snippet hiển thị** (đã cắt ngắn có `...` đúng như bạn thấy trong danh sách) —
   "có cùng snippet" nghĩa là giống nhau trên màn hình bạn đang nhìn.
+- **Chuỗi chọn** lấy theo thứ tự trên→dưới của danh sách đoạn chat tại thời điểm chọn.
 - Gửi tin đi qua **cùng API mà Pancake dùng** khi nhân viên bấm Gửi trong ô chat
   (`#replyBoxComposer` → `action=reply_inbox`), nên tin hiện trong lịch sử chat như 1 tin nhắn bình thường.
 - Đoạn chat loại **COMMENT** (bình luận bài viết) có thể bị API từ chối với `reply_inbox`;
