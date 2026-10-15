@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Pancake – Gửi 1 câu cho các đoạn chat cùng snippet
 // @namespace    salescript
-// @version      1.3.0
+// @version      1.4.0
 // @description  Chọn chuỗi chat (Alt+Click 2 đầu) hoặc chọn theo snippet trong danh sách Pancake rồi gửi cùng 1 câu cho tất cả.
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -494,6 +494,23 @@
     }
   }
 
+  // ---- Ghi nhớ kênh gửi tốt cho từng chat (sessionStorage) ----
+  const CH_KEY = 'ssb_channel_hints';
+  let channelHints = {};
+  try { channelHints = JSON.parse(sessionStorage.getItem(CH_KEY) || '{}') || {}; } catch (e) { channelHints = {}; }
+  function markChannel(convId, ch) {
+    channelHints[convId] = ch;
+    try { sessionStorage.setItem(CH_KEY, JSON.stringify(channelHints)); } catch (e) { /* ignore */ }
+  }
+  let batchSkipApi = false; // API đã bị "(#10)" trong loạt gửi này → khỏi thử lại cho các chat sau
+
+  function isThreadControlError(msg) {
+    const m = String(msg || '');
+    return /\(#(551|2022|10|100|1_reduce_data|-1|613|80006)(?:,\d+)?\)/.test(m)
+      || m.indexOf('kiểm soát thread') > -1
+      || m.toLowerCase().indexOf('rate limit') > -1;
+  }
+
   // Lấy conversation đầy đủ (thread_id, thread_key, from, updated_at…):
   // ưu tiên redux store của trang, sau đó GET /conversations/{id}
   async function getFullConversation(conv) {
@@ -532,6 +549,63 @@
     }
   }
 
+  // Tìm globalId (PSID) của khách — đúng đường app: cache → findGlobalIdForConv (extension GET_GLOBAL_ID_FOR_CONV)
+  async function resolveGlobalId(full, threadId, cacheKey) {
+    const key = (full && full.id) || cacheKey;
+    try {
+      const g1 = window.__GlobalIdCacheTest__, g2 = window.__tempGlobalIdCache__;
+      const cached = (g1 && g1.get(key)) || (g2 && g2.get(key));
+      if (cached) return cached;
+    } catch (e) { /* ignore */ }
+    if (typeof window.findGlobalIdForConv === 'function' && threadId) {
+      try {
+        const gid = await window.findGlobalIdForConv({
+          pageId: full.page_id,
+          threadId,
+          threadKey: full.thread_key || null,
+          isBusiness: false,
+          conversationUpdatedTime: Date.parse(String(full.updated_at || '') + 'Z'),
+          customerName: (full.from && (full.from.username || full.from.name)) || '',
+          convType: 'INBOX',
+          postId: null,
+          convId: null,
+        });
+        if (gid) {
+          try { window.__tempGlobalIdCache__ && window.__tempGlobalIdCache__.set(key, gid); } catch (e) { /* ignore */ }
+          return gid;
+        }
+      } catch (e) { /* ignore */ }
+    }
+    return null;
+  }
+
+  // Gửi qua Facebook WebSocket — ĐÚNG đường "gửi bình thường" mà app/nhân viên vẫn dùng
+  // (_app: executeBySocketFB → __MqttHelper__.sendMessage(pageId, globalId, {text}) → publish /ls_req)
+  async function sendViaSocket(conv, text) {
+    const helper = window.__MqttHelper__;
+    if (!helper || typeof helper.sendMessage !== 'function') {
+      return { ok: false, error: 'Không thấy __MqttHelper__' };
+    }
+    const platform = detectPlatform(conv.pageId || conv.id.split('_')[0]);
+    if (platform !== 'facebook') return { ok: false, error: 'Socket chỉ áp dụng cho Facebook' };
+    const full = await getFullConversation(conv);
+    if (!full) return { ok: false, error: 'Không lấy được thông tin đoạn chat' };
+    const pageId = full.page_id || conv.pageId;
+    let threadId = full.thread_id;
+    if (!threadId && typeof window.__syncMissingThreadId__ === 'function') {
+      try { threadId = await window.__syncMissingThreadId__(pageId, full.id || conv.id); } catch (e) { /* ignore */ }
+    }
+    const gid = await resolveGlobalId(full, threadId, conv.id);
+    if (!gid) return { ok: false, error: 'Không tìm thấy globalId' };
+    try {
+      const res = await helper.sendMessage(pageId, gid, { text });
+      if (res && res.success) return { ok: true, id: gid, sendBy: 'socket' };
+      return { ok: false, error: 'Socket không gửi được' + (res && res.reason ? ' (' + res.reason + ')' : '') };
+    } catch (e) {
+      return { ok: false, error: 'Socket lỗi: ' + (e && e.message || e) };
+    }
+  }
+
   // Gửi qua extension Pancake (đường app dùng khi API bị "(#10)" — executeByExtOnce, type REPLY_INBOX_PHOTO)
   async function sendViaExtension(conv, text) {
     const adapter = window.__ExtensionAdapter__;
@@ -559,11 +633,8 @@
     }
     if (!threadId) return { ok: false, error: 'Không tìm thấy thread_id' };
 
-    let globalUserId = null;
-    try {
-      const g1 = window.__GlobalIdCacheTest__, g2 = window.__tempGlobalIdCache__;
-      globalUserId = (g1 && g1.get(full.id || conv.id)) || (g2 && g2.get(full.id || conv.id)) || null;
-    } catch (e) { /* ignore */ }
+    const gid = await resolveGlobalId(full, threadId, conv.id);
+    const globalUserId = gid || null;
 
     const token = getToken();
     const payload = {
@@ -607,7 +678,7 @@
         try { v = fn(); } catch (e) { /* ignore */ }
         if (v) return resolve(v);
         if (Date.now() - t0 >= timeout) return resolve(null);
-        setTimeout(tick, 120);
+        setTimeout(tick, 90);
       };
       tick();
     });
@@ -624,24 +695,45 @@
     if (el) return el;
     const scroller = getScroller();
     if (!scroller) return null;
-    scroller.scrollTop = 0;
-    await sleep(320);
-    let guard = 0;
-    while (guard++ < 300) {
+
+    // Nhảy thẳng tới vị trí ước lượng từ thứ tự đã quét (không cuộn từ đầu — rất chậm)
+    const info = state.allRows && state.allRows.get ? state.allRows.get(convId) : null;
+    if (info && state.allRows.size > 1 && scroller.scrollHeight > scroller.clientHeight) {
+      const ratio = info.order / (state.allRows.size - 1);
+      scroller.scrollTop = Math.round(ratio * (scroller.scrollHeight - scroller.clientHeight));
+      await sleep(240);
       el = findRowEl(convId);
       if (el) return el;
-      const prev = scroller.scrollTop;
-      scroller.scrollTop = prev + Math.max(180, Math.round(scroller.clientHeight * 0.7));
-      if (scroller.scrollTop === prev) {
-        try {
-          scroller.dispatchEvent(new WheelEvent('wheel', { deltaY: 220, bubbles: true, cancelable: true }));
-        } catch (e) { /* ignore */ }
-        await sleep(360);
-        if (scroller.scrollTop === prev && !findRowEl(convId)) break; // hết cuộn
-      }
-      await sleep(280);
     }
-    return findRowEl(convId);
+
+    const step = Math.max(180, Math.round(scroller.clientHeight * 0.75));
+    const scanDown = async (fromTop) => {
+      if (fromTop) {
+        scroller.scrollTop = 0;
+        await sleep(240);
+      }
+      let idle = 0, guard = 0;
+      while (idle < 3 && guard++ < 120) {
+        const e2 = findRowEl(convId);
+        if (e2) return e2;
+        const prev = scroller.scrollTop;
+        scroller.scrollTop = prev + step;
+        if (scroller.scrollTop === prev) {
+          try {
+            scroller.dispatchEvent(new WheelEvent('wheel', { deltaY: step, bubbles: true, cancelable: true }));
+          } catch (e) { /* ignore */ }
+          await sleep(260);
+          if (scroller.scrollTop === prev) return findRowEl(convId); // hết biên
+        } else {
+          await sleep(180);
+        }
+        idle = 0;
+      }
+      return findRowEl(convId);
+    };
+    el = await scanDown(false);      // quét xuống từ vị trí hiện tại
+    if (!el) el = await scanDown(true); // không thấy → quét lại từ đầu danh sách
+    return el || null;
   }
 
   // Gửi qua giao diện thật: mở chat → điền #replyBoxComposer → Enter
@@ -659,12 +751,12 @@
       return t && t.isConnected ? t : null;
     }, 6000);
     if (!ta) return { ok: false, error: 'Không mở được khung chat' };
-    await sleep(300);
+    await sleep(180);
 
     const setter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value').set;
     setter.call(ta, text);
     ta.dispatchEvent(new Event('input', { bubbles: true }));
-    await sleep(180);
+    await sleep(100);
     if (ta.value.trim() !== text.trim()) {
       return { ok: false, error: 'UI: không điền được nội dung vào ô chat' };
     }
@@ -704,22 +796,39 @@
     return run;
   }
 
-  // API (nhanh) → Extension (đường app tự fallback khi "(#10)") → Giao diện (cuối cùng)
+  // API (nhanh) → Socket (đường gửi tay) → Extension → Giao diện
+  // Có nhớ kênh tốt cho từng chat + bỏ API ngay khi biết thread đang bị "(#10)" kiểm soát
   async function sendOne(conv, text) {
-    const a = await sendViaApi(conv, text);
-    if (a.ok) return a;
-    if (a.error && a.error.indexOf('Token') === 0) return a;
-
-    const b = await sendViaExtension(conv, text);
-    if (b.ok) return b;
-    if (state.stopRequested) return { ok: false, error: 'Đã dừng' };
-
-    const c = await sendViaUIQueued(conv, text);
-    if (c.ok) return c;
-    return {
-      ok: false,
-      error: 'API: ' + a.error + ' | Ext: ' + (b.skipExt ? 'bỏ qua' : b.error) + ' | UI: ' + c.error,
+    const channels = {
+      api: async () => {
+        const r = await sendViaApi(conv, text);
+        if (!r.ok && isThreadControlError(r.error)) batchSkipApi = true;
+        return r;
+      },
+      socket: () => sendViaSocket(conv, text),
+      ext: () => sendViaExtension(conv, text),
+      ui: () => sendViaUIQueued(conv, text),
     };
+    const order = ['api', 'socket', 'ext', 'ui'];
+    const hint = channelHints[conv.id];
+    let seq = (hint && order.indexOf(hint) > -1)
+      ? [hint].concat(order.filter((x) => x !== hint))
+      : order.slice();
+    if (batchSkipApi) seq = seq.filter((x) => x !== 'api');
+
+    const tried = [];
+    for (let i = 0; i < seq.length; i++) {
+      const ch = seq[i];
+      if (state.stopRequested) break;
+      const r = await channels[ch]();
+      if (r.ok) {
+        markChannel(conv.id, ch);
+        return { ok: true, id: r.id || '', sendBy: r.sendBy || ch };
+      }
+      tried.push((ch === 'ext' ? 'Ext' : ch) + ': ' + (r.error || 'fail'));
+      if (r.error && r.error.indexOf('Token') === 0) return r; // token hỏng — dừng hẳn
+    }
+    return { ok: false, error: tried.join(' | ') };
   }
 
   async function sendToAll() {
@@ -744,6 +853,7 @@
 
     state.sending = true;
     state.stopRequested = false;
+    batchSkipApi = false;
     render();
 
     const modeEl = shadow && shadow.getElementById('ssb-mode');
@@ -762,7 +872,9 @@
       done++;
       if (r.ok) {
         ok++;
-        const via = r.sendBy === 'extension' ? ' — qua Extension' : r.sendBy === 'ui' ? ' — qua giao diện' : '';
+        const via = r.sendBy === 'socket' ? ' — qua Socket'
+          : r.sendBy === 'extension' ? ' — qua Extension'
+          : r.sendBy === 'ui' ? ' — qua giao diện' : '';
         logLine('✅ [' + done + '/' + targets.length + '] ' + (c.name || c.id) + ' — đã gửi' + via);
       } else {
         fail++;
@@ -928,7 +1040,7 @@
             • Dòng viền <b style="color:#22c55e">xanh lá</b> = sẽ được gửi; <b style="color:#3b82f6">xanh dương</b> = đầu/cuối chuỗi hoặc nguồn snippet.<br>
             • Chat gắn nhãn <b style="color:#f59e0b">[bình luận]</b> mặc định bỏ tick (reply_inbox không áp dụng cho bình luận).<br>
             • Gửi qua API <code style="color:#94a3b8">POST /v1/pages/.../messages</code> (action=reply_inbox) — đúng request website tự dùng, không cần mở từng chat.<br>
-            • Nếu API bị chặn <code style="color:#94a3b8">(#10) app khác kiểm soát thread</code> (bot đang giữ quyền) → script tự gửi tiếp qua <b>Extension</b>, rồi qua <b>giao diện</b> — log ghi rõ kênh đã gửi.<br>
+            • Nếu API bị chặn <code style="color:#94a3b8">(#10) app khác kiểm soát thread</code> → tự gửi tiếp qua <b>Socket</b> (đúng đường gửi tay của app), rồi <b>Extension</b>, rồi <b>giao diện</b> — log ghi rõ kênh đã gửi. Kênh tốt được ghi nhớ cho lần sau.<br>
             • Tốc độ mặc định <b>“Gửi tất cả cùng lúc”</b> (1 phát); nếu bị báo spam/429 hãy chuyển sang “Song song 5 luồng” hoặc “Tuần tự”.
           </div>
         </div>
@@ -1185,6 +1297,7 @@
     getToken,
     sendOne,
     sendViaApi,
+    sendViaSocket,
     sendViaExtension,
     sendViaUI,
     scanFullList,

@@ -51,15 +51,19 @@ Phím tắt: `Alt+Shift+B` ẩn/hiện panel, `Alt+Shift+D` lấy snippet từ c
 
 Không dùng selector bịa: mọi class/id/đường API ở trên đều lấy trực tiếp từ source.
 
-## 3 tầng gửi (tự động dự phòng)
+## 4 tầng gửi (tự động dự phòng, nhớ kênh tốt)
 
 1. **API** — nhanh nhất, gửi song song nhiều chat cùng lúc.
-2. **Extension Pancake** — nếu API bị Facebook từ chối `"(#10) … một ứng dụng khác hiện đang kiểm soát thread này"`
-   (khi bot/app khác đang giữ quyền thread — đúng lỗi app cũng gặp và cũng tự fallback như vậy).
-   Yêu cầu đã cài **extension Pancake V2** và đang đăng nhập Facebook trong trình duyệt.
-3. **Giao diện** — cuối cùng: tự mở chat → điền ô chat → Enter (giống bạn gửi thủ công).
+2. **Socket (Facebook WebSocket)** — **đúng đường “gửi bình thường”** mà app Pancake dùng khi bạn
+   gõ tay (`executeBySocketFB` → `__MqttHelper__.sendMessage` → `/ls_req`). Vượt được lỗi
+   `"(#10) … một ứng dụng khác hiện đang kiểm soát thread này"` (bot/app khác giữ quyền thread).
+   Cần **extension Pancake V2** (đăng nhập Facebook trong trình duyệt).
+3. **Extension Pancake** — đường `executeByExt` của app (`REPLY_INBOX_PHOTO`).
+4. **Giao diện** — cuối cùng: tự mở chat → điền ô chat → Enter (giống bạn gửi thủ công).
 
-Log từng dòng ghi rõ kênh đã gửi: `— đã gửi`, `— qua Extension`, `— qua giao diện`.
+Tự động tăng tốc: sau lần đầu API bị `(#10)`, các chat còn lại **bỏ qua API** đi thẳng sang Socket;
+kênh gửi thành công được **ghi nhớ** (session) nên lần gửi sau vào thẳng kênh đó. Log từng dòng ghi rõ
+kênh: `— đã gửi`, `— qua Socket`, `— qua Extension`, `— qua giao diện`.
 
 ## Lưu ý
 
@@ -69,7 +73,8 @@ Log từng dòng ghi rõ kênh đã gửi: `— đã gửi`, `— qua Extension`
 - Gửi tin đi qua **cùng API mà Pancake dùng** khi nhân viên bấm Gửi trong ô chat
   (`#replyBoxComposer` → `action=reply_inbox`), nên tin hiện trong lịch sử chat như 1 tin nhắn bình thường.
   Nếu API bị chặn (lỗi `#10` do bot/app khác giữ quyền thread), script tự chuyển sang gửi qua
-  **Extension Pancake** và sau đó qua **giao diện** — hãy cài extension Pancake V2 để dùng tầng dự phòng này.
+  **Socket** (đúng đường gửi tay — nhanh), rồi **Extension Pancake**, cuối cùng qua **giao diện** —
+  hãy cài extension Pancake V2 để dùng các tầng dự phòng nhanh.
 - Đoạn chat loại **COMMENT** (bình luận bài viết) có thể bị API từ chối với `reply_inbox`;
   chat nào lỗi sẽ hiện rõ trong log (thường chỉ gặp với chat Inbox là mượt).
 - Nếu log báo **token hết hạn** → tải lại trang Pancake rồi chạy lại (token mới được script tự bắt).
