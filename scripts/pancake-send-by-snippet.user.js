@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Pancake – Gửi 1 câu cho các đoạn chat cùng snippet
 // @namespace    salescript
-// @version      1.6.0
+// @version      1.7.0
 // @description  Chọn chuỗi chat (Alt+Click 2 đầu) hoặc chọn theo snippet trong danh sách Pancake rồi gửi cùng 1 câu cho tất cả.
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -58,6 +58,7 @@
     rangeEnd: null,         // cuối chuỗi (mode range — Alt+Click lần 2)
     allRows: null,          // Map id → dòng (+ order trên→dưới) từ "Quét toàn bộ danh sách"
     matches: [],            // danh sách đoạn chat sẽ gửi [{ id, name, snippet, time, checked, mark, ... }]
+    listKey: '',            // key dựng panel list — tránh build lại HTML khi không đổi
     sending: false,
     stopRequested: false,
     pickMode: false,
@@ -471,7 +472,7 @@
 
     const step = Math.max(220, Math.round(scroller.clientHeight * 0.9));
     let noNewStreak = 0;
-    while (guard++ < 300) {
+    while (guard++ < 5000) { // đủ cho cả nghìn chat (mỗi bước ~1 màn hình ≈ 8-12 dòng)
       const prevTop = scroller.scrollTop;
       scroller.scrollTop = prevTop + step;
       let atBottom = false;
@@ -483,7 +484,7 @@
         await sleep(120);
         atBottom = scroller.scrollTop === prevTop; // kéo không nổi = đáy danh sách
       }
-      await sleep(110); // chờ render + app kích hoạt tải thêm (infinite scroll)
+      await sleep(90); // chờ render + app kích hoạt tải thêm (infinite scroll)
       const added = collect();
 
       if (atBottom) {
@@ -926,8 +927,12 @@
     const warnComment = nComment
       ? '\n\n⚠ Trong đó ' + nComment + ' chat loại BÌNH LUẬN — API reply_inbox có thể không áp dụng cho các chat này!'
       : '';
+    const modePre = (shadow && shadow.getElementById('ssb-mode') || {}).value || 'all';
+    const warnHuge = (targets.length >= 150 && modePre === 'all')
+      ? '\n\n⚠ Chuỗi ' + targets.length + ' chat: gửi 1 phát dễ bị Facebook chặn (429) — nên chuyển sang "Song song 5 luồng" hoặc "Tuần tự" cho chuỗi lớn.'
+      : '';
     if (!confirm('Gửi 1 câu tới ' + targets.length + ' đoạn chat đã chọn?\n\n“'
-      + clip(text, 120) + '”\n\nNhận: ' + names + warnComment)) return;
+      + clip(text, 120) + '”\n\nNhận: ' + names + warnComment + warnHuge)) return;
 
     state.sending = true;
     state.stopRequested = false;
@@ -1266,10 +1271,15 @@
 
     const list = shadow.getElementById('ssb-list');
     if (list) {
-      if (!state.matches.length) {
-        list.innerHTML = '<div class="empty">Trống</div>';
-      } else {
-        list.innerHTML = state.matches.map((m, i) => `
+      // Với chuỗi hàng nghìn chat: chỉ dựng lại HTML danh sách khi ĐỔI danh sách/tick —
+      // không build lại mỗi lần render (tiến độ gửi cập nhật liên tục sẽ gây đơ).
+      const listKey = state.matches.map((m) => m.id + '~' + (m.checked ? 1 : 0)).join('|');
+      if (listKey !== state.listKey) {
+        state.listKey = listKey;
+        if (!state.matches.length) {
+          list.innerHTML = '<div class="empty">Trống</div>';
+        } else {
+          list.innerHTML = state.matches.map((m, i) => `
           <label class="item">
             <input type="checkbox" data-i="${i}" ${m.checked ? 'checked' : ''}>
             <span style="flex:1">
@@ -1285,12 +1295,13 @@
             </span>
             <span class="tm">${esc(m.time || '')}</span>
           </label>`).join('');
-        list.querySelectorAll('input[type=checkbox]').forEach((cb) => {
-          cb.addEventListener('change', () => {
-            const i = parseInt(cb.getAttribute('data-i'), 10);
-            if (state.matches[i]) state.matches[i].checked = cb.checked;
+          list.querySelectorAll('input[type=checkbox]').forEach((cb) => {
+            cb.addEventListener('change', () => {
+              const i = parseInt(cb.getAttribute('data-i'), 10);
+              if (state.matches[i]) state.matches[i].checked = cb.checked;
+            });
           });
-        });
+        }
       }
     }
     const send = shadow.getElementById('ssb-send');
