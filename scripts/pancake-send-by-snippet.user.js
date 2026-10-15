@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Pancake – Gửi 1 câu cho các đoạn chat cùng snippet
 // @namespace    salescript
-// @version      1.8.0
+// @version      1.9.0
 // @description  Chọn chuỗi chat (Alt+Click 2 đầu) hoặc chọn theo snippet trong danh sách Pancake rồi gửi cùng 1 câu cho tất cả.
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -808,13 +808,14 @@
     batchSkipApi = false;
     render();
 
-    // CHỈ gửi hàng loạt theo lượt: ≤100 tin → 1 lượt; >100 tin → mỗi lượt 200 tin, cách nhau 500ms
-    const WAVE_SIZE = 200;
+    // Gửi theo lượt: mỗi lượt = "Số tin mỗi lượt" trên panel (mặc định 200), giữa các lượt nghỉ 500ms
+    const waveEl = shadow && shadow.getElementById('ssb-wave');
+    const WAVE_SIZE = Math.max(1, Math.min(5000, parseInt((waveEl && waveEl.value) || '200', 10) || 200));
     const WAVE_GAP = 500;
-    const useWaves = targets.length > 100;
+    const useWaves = targets.length > WAVE_SIZE;
     logLine(useWaves
       ? '🚀 Bắt đầu gửi ' + targets.length + ' chat THEO LƯỢT: mỗi lượt ' + WAVE_SIZE + ' tin, cách nhau ' + WAVE_GAP + 'ms…'
-      : '🚀 Bắt đầu gửi ' + targets.length + ' chat (1 lượt)…');
+      : '🚀 Bắt đầu gửi ' + targets.length + ' chat (1 lượt — ' + WAVE_SIZE + ' tin/lượt)…');
 
     let ok = 0, fail = 0, done = 0;
 
@@ -988,7 +989,7 @@
             • Chat gắn nhãn <b style="color:#f59e0b">[bình luận]</b> mặc định bỏ tick (reply_inbox không áp dụng cho bình luận).<br>
             • Gửi qua API <code style="color:#94a3b8">POST /v1/pages/.../messages</code> (action=reply_inbox) — đúng request website tự dùng, không cần mở từng chat.<br>
             • Nếu API bị chặn <code style="color:#94a3b8">(#10) app khác kiểm soát thread</code> → tự gửi tiếp qua <b>Socket</b> (đúng đường gửi tay của app), rồi <b>Extension</b> — log ghi rõ kênh đã gửi. Kênh tốt được ghi nhớ cho lần sau.<br>
-            • <b>Chỉ gửi hàng loạt</b>: ≤100 tin → 1 lượt; &gt;100 tin → tự chia <b>200 tin/lượt</b>, cách nhau <b>500ms</b>. Không còn cơ chế gửi từng con qua giao diện.
+            • <b>Chỉ gửi hàng loạt theo lượt</b>: chỉnh <b>“Số tin mỗi lượt”</b> (mặc định 200) — các lượt cách nhau <b>500ms</b>. Số tin ≤ số/lượt thì gửi 1 lượt. Không còn cơ chế gửi từng con qua giao diện.
           </div>
         </div>
       </div>

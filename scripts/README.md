@@ -66,8 +66,9 @@ Không dùng selector bịa: mọi class/id/đường API ở trên đều lấy
 3. **Extension Pancake** — đường `executeByExt` của app (`REPLY_INBOX_PHOTO`).
 
 **Không còn cơ chế gửi từng con** (đã bỏ gửi tuần tự và tầng giao diện “nhảy vào từng chat”).
-Gửi theo lượt: **≤100 tin → 1 lượt; >100 tin → mỗi lượt 200 tin, cách nhau 500ms** (mỗi lượt bắn
-song song toàn bộ). Chat gửi không thành công qua cả 3 kênh sẽ báo ❌ kèm lý do trong log.
+Gửi theo lượt: chỉnh **“Số tin mỗi lượt”** ngay trên panel (mặc định **200 tin/lượt**, các lượt cách
+nhau **500ms**; số tin ≤ số/lượt thì gửi 1 lượt). Mỗi lượt bắn song song toàn bộ. Chat gửi không
+thành công qua cả 3 kênh sẽ báo ❌ kèm lý do trong log.
 
 Tự động tăng tốc: sau lần đầu API bị `(#10)`, các chat còn lại **bỏ qua API** đi thẳng sang Socket;
 kênh gửi thành công được **ghi nhớ** (session) nên lần gửi sau vào thẳng kênh đó. Log từng dòng ghi rõ
