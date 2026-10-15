@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Pancake – Gửi 1 câu cho các đoạn chat cùng snippet
 // @namespace    salescript
-// @version      1.7.0
+// @version      1.8.0
 // @description  Chọn chuỗi chat (Alt+Click 2 đầu) hoặc chọn theo snippet trong danh sách Pancake rồi gửi cùng 1 câu cho tất cả.
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -45,7 +45,7 @@
 
   const PANEL_ID = 'ssb-root';          // ssb = SaleScript Bulk — không đụng pk-*/adj-*/pancake-* của script khác
   const STYLE_ID = 'ssb-style';
-  const DEF_DELAY = 300;                // ms giữa 2 lần gửi (chỉ dùng ở chế độ tuần tự)
+
   const MAX_NAME_LIST = 12;             // số tên hiển thị khi xác nhận
 
   /* ============================ TRẠNG THÁI ============================ */
@@ -748,134 +748,8 @@
     }
   }
 
-  function waitFor(fn, timeout) {
-    return new Promise((resolve) => {
-      const t0 = Date.now();
-      const tick = () => {
-        let v = null;
-        try { v = fn(); } catch (e) { /* ignore */ }
-        if (v) return resolve(v);
-        if (Date.now() - t0 >= timeout) return resolve(null);
-        setTimeout(tick, 90);
-      };
-      tick();
-    });
-  }
-
-  function findRowEl(convId) {
-    return document.getElementById(convId)
-      || document.querySelector('[id^="' + convId + '__"]')
-      || null;
-  }
-
-  async function scrollToRow(convId) {
-    let el = findRowEl(convId);
-    if (el) return el;
-    const scroller = getScroller();
-    if (!scroller) return null;
-
-    // Nhảy thẳng tới vị trí ước lượng từ thứ tự đã quét (không cuộn từ đầu — rất chậm)
-    const info = state.allRows && state.allRows.get ? state.allRows.get(convId) : null;
-    if (info && state.allRows.size > 1 && scroller.scrollHeight > scroller.clientHeight) {
-      const ratio = info.order / (state.allRows.size - 1);
-      scroller.scrollTop = Math.round(ratio * (scroller.scrollHeight - scroller.clientHeight));
-      await sleep(240);
-      el = findRowEl(convId);
-      if (el) return el;
-    }
-
-    // Quét quanh vị trí ước lượng (giới hạn ±12 bước — không cuộn khắp danh sách)
-    const step = Math.max(180, Math.round(scroller.clientHeight * 0.75));
-    const scan = async (down, maxSteps) => {
-      let g = 0;
-      while (g++ < maxSteps) {
-        const prev = scroller.scrollTop;
-        scroller.scrollTop = down ? prev + step : Math.max(0, prev - step);
-        if (scroller.scrollTop === prev) {
-          try {
-            scroller.dispatchEvent(new WheelEvent('wheel', { deltaY: down ? step : -step, bubbles: true, cancelable: true }));
-          } catch (e) { /* ignore */ }
-          await sleep(200);
-          if (scroller.scrollTop === prev) return findRowEl(convId); // hết biên
-        } else {
-          await sleep(140);
-        }
-        const e2 = findRowEl(convId);
-        if (e2) return e2;
-      }
-      return findRowEl(convId);
-    };
-    const jumpBack = scroller.scrollTop;
-    el = await scan(true, 12);
-    if (!el) {
-      scroller.scrollTop = jumpBack;
-      await sleep(140);
-      el = await scan(false, 12);
-    }
-    return el || null;
-  }
-
-  // Gửi qua giao diện thật: mở chat → điền #replyBoxComposer → Enter
-  // (đúng chuỗi thao tác mà người dùng vẫn làm — app tự dùng đường socket/extension bên trong)
-  async function sendViaUI(conv, text) {
-    if (state.stopRequested) return { ok: false, error: 'Đã dừng' };
-    const rowWrap = await scrollToRow(conv.id);
-    if (!rowWrap) return { ok: false, error: 'Không tìm thấy dòng chat trong danh sách' };
-    const item = (rowWrap.classList && rowWrap.classList.contains('conversation-list-item'))
-      ? rowWrap
-      : (rowWrap.querySelector && rowWrap.querySelector('.conversation-list-item')) || rowWrap;
-    item.click();
-    const ta = await waitFor(() => {
-      const t = document.getElementById('replyBoxComposer');
-      return t && t.isConnected ? t : null;
-    }, 6000);
-    if (!ta) return { ok: false, error: 'Không mở được khung chat' };
-    await sleep(180);
-
-    const setter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value').set;
-    setter.call(ta, text);
-    ta.dispatchEvent(new Event('input', { bubbles: true }));
-    await sleep(100);
-    if (ta.value.trim() !== text.trim()) {
-      return { ok: false, error: 'UI: không điền được nội dung vào ô chat' };
-    }
-
-    const pressEnter = () => {
-      ['keydown', 'keypress', 'keyup'].forEach((type) => {
-        const ev = new KeyboardEvent(type, { key: 'Enter', code: 'Enter', bubbles: true, cancelable: true });
-        try {
-          Object.defineProperty(ev, 'keyCode', { get: () => 13 });
-          Object.defineProperty(ev, 'which', { get: () => 13 });
-        } catch (e) { /* ignore */ }
-        ta.dispatchEvent(ev);
-      });
-    };
-    pressEnter();
-    // app xóa ô chat sau khi gửi — nếu vẫn còn chữ thì thử Enter lần nữa
-    let sent = await waitFor(() => {
-      const t = document.getElementById('replyBoxComposer');
-      return !t || !t.value.trim() || t.value.trim() !== text.trim();
-    }, 8000);
-    if (!sent) {
-      pressEnter();
-      sent = await waitFor(() => {
-        const t = document.getElementById('replyBoxComposer');
-        return !t || !t.value.trim() || t.value.trim() !== text.trim();
-      }, 8000);
-    }
-    if (!sent) return { ok: false, error: 'UI: ô chat không gửi đi' };
-    return { ok: true, id: '', sendBy: 'ui' };
-  }
-
-  // UI chỉ mở được 1 chat mỗi lần → xếp hàng tuần tự
-  let uiLock = Promise.resolve();
-  function sendViaUIQueued(conv, text) {
-    const run = uiLock.then(() => sendViaUI(conv, text));
-    uiLock = run.then(() => {}, () => {});
-    return run;
-  }
-
-  // API (nhanh) → Socket (đường gửi tay) → Extension → Giao diện
+  // API (nhanh) → Socket (đường gửi tay) → Extension
+  // CHỈ gửi hàng loạt — KHÔNG còn cơ chế gửi từng con qua giao diện.
   // Có nhớ kênh tốt cho từng chat + bỏ API ngay khi biết thread đang bị "(#10)" kiểm soát
   async function sendOne(conv, text) {
     const channels = {
@@ -886,9 +760,8 @@
       },
       socket: () => sendViaSocket(conv, text),
       ext: () => sendViaExtension(conv, text),
-      ui: () => sendViaUIQueued(conv, text),
     };
-    const order = ['api', 'socket', 'ext', 'ui'];
+    const order = ['api', 'socket', 'ext'];
     const hint = channelHints[conv.id];
     let seq = (hint && order.indexOf(hint) > -1)
       ? [hint].concat(order.filter((x) => x !== hint))
@@ -927,26 +800,21 @@
     const warnComment = nComment
       ? '\n\n⚠ Trong đó ' + nComment + ' chat loại BÌNH LUẬN — API reply_inbox có thể không áp dụng cho các chat này!'
       : '';
-    const modePre = (shadow && shadow.getElementById('ssb-mode') || {}).value || 'all';
-    const warnHuge = (targets.length >= 150 && modePre === 'all')
-      ? '\n\n⚠ Chuỗi ' + targets.length + ' chat: gửi 1 phát dễ bị Facebook chặn (429) — nên chuyển sang "Song song 5 luồng" hoặc "Tuần tự" cho chuỗi lớn.'
-      : '';
     if (!confirm('Gửi 1 câu tới ' + targets.length + ' đoạn chat đã chọn?\n\n“'
-      + clip(text, 120) + '”\n\nNhận: ' + names + warnComment + warnHuge)) return;
+      + clip(text, 120) + '”\n\nNhận: ' + names + warnComment)) return;
 
     state.sending = true;
     state.stopRequested = false;
     batchSkipApi = false;
     render();
 
-    const modeEl = shadow && shadow.getElementById('ssb-mode');
-    const mode = (modeEl && modeEl.value) || 'all';
-    const delayEl = shadow && shadow.getElementById('ssb-delay');
-    const delay = Math.max(0, Math.min(20000, parseInt((delayEl && delayEl.value) || DEF_DELAY, 10)));
-    const modeName = mode === 'all' ? 'gửi tất cả cùng lúc'
-      : mode === 'pool5' ? 'song song 5 luồng'
-      : 'tuần tự, giãn cách ' + (isNaN(delay) ? DEF_DELAY : delay) + 'ms';
-    logLine('🚀 Bắt đầu gửi cho ' + targets.length + ' đoạn chat (' + modeName + ')…');
+    // CHỈ gửi hàng loạt theo lượt: ≤100 tin → 1 lượt; >100 tin → mỗi lượt 200 tin, cách nhau 500ms
+    const WAVE_SIZE = 200;
+    const WAVE_GAP = 500;
+    const useWaves = targets.length > 100;
+    logLine(useWaves
+      ? '🚀 Bắt đầu gửi ' + targets.length + ' chat THEO LƯỢT: mỗi lượt ' + WAVE_SIZE + ' tin, cách nhau ' + WAVE_GAP + 'ms…'
+      : '🚀 Bắt đầu gửi ' + targets.length + ' chat (1 lượt)…');
 
     let ok = 0, fail = 0, done = 0;
 
@@ -956,8 +824,7 @@
       if (r.ok) {
         ok++;
         const via = r.sendBy === 'socket' ? ' — qua Socket'
-          : r.sendBy === 'extension' ? ' — qua Extension'
-          : r.sendBy === 'ui' ? ' — qua giao diện' : '';
+          : r.sendBy === 'extension' ? ' — qua Extension' : '';
         logLine('✅ [' + done + '/' + targets.length + '] ' + (c.name || c.id) + ' — đã gửi' + via);
       } else {
         fail++;
@@ -967,28 +834,31 @@
       return r;
     };
 
-    if (mode === 'seq') {
-      for (let i = 0; i < targets.length; i++) {
-        if (state.stopRequested) break;
-        const r = await sendOneAndLog(targets[i]);
-        if (!r.ok && r.error && r.error.indexOf('Token') === 0) {
-          logLine('⛔ Dừng sớm vì token không còn hợp lệ.');
-          state.stopRequested = true;
-          break;
-        }
-        if (i < targets.length - 1 && !state.stopRequested) await sleep(isNaN(delay) ? DEF_DELAY : delay);
-      }
-    } else {
-      const limit = mode === 'all' ? Math.max(1, targets.length) : 5;
-      await runPool(targets, async (c) => {
+    // 1 lượt = bắn song song toàn bộ số tin trong lượt
+    const sendBatch = async (batch) => {
+      await runPool(batch, async (c) => {
         if (state.stopRequested) return null;
         const r = await sendOneAndLog(c);
         if (!r.ok && r.error && r.error.indexOf('Token') === 0) {
           logLine('⛔ Dừng sớm vì token không còn hợp lệ.');
-          state.stopRequested = true; // chặn các request chưa bắn
+          state.stopRequested = true;
         }
         return r;
-      }, limit);
+      }, Math.max(1, batch.length));
+    };
+
+    if (useWaves) {
+      const totalWaves = Math.ceil(targets.length / WAVE_SIZE);
+      for (let i = 0; i < targets.length && !state.stopRequested; i += WAVE_SIZE) {
+        await sendBatch(targets.slice(i, i + WAVE_SIZE));
+        const waveNo = Math.ceil(Math.min(i + WAVE_SIZE, targets.length) / WAVE_SIZE);
+        if (i + WAVE_SIZE < targets.length && !state.stopRequested) {
+          logLine('🌊 Lượt ' + waveNo + '/' + totalWaves + ' xong (' + done + ' tin) — nghỉ ' + WAVE_GAP + 'ms rồi lượt tiếp…');
+          await sleep(WAVE_GAP);
+        }
+      }
+    } else {
+      await sendBatch(targets);
     }
 
     state.sending = false;
@@ -1101,14 +971,7 @@
             <div class="label">3) Câu cần gửi</div>
             <textarea id="ssb-msg" placeholder="Nhập 1 câu sẽ gửi cho tất cả đoạn chat ở trên…"></textarea>
             <div class="row" style="align-items:center">
-              <span class="hint">Tốc độ:</span>
-              <select id="ssb-mode" title="Chế độ gửi">
-                <option value="all">🚀 Gửi tất cả cùng lúc</option>
-                <option value="pool5">⚡ Song song 5 luồng</option>
-                <option value="seq">🐢 Tuần tự (giãn cách)</option>
-              </select>
-              <span class="hint" id="ssb-delay-label" style="display:none">Giãn cách (ms):</span>
-              <input type="number" id="ssb-delay" value="${DEF_DELAY}" min="0" step="100" style="display:none">
+              <span class="hint">Gửi theo lượt: ≤100 tin → 1 lượt; &gt;100 tin → 200 tin/lượt, cách nhau 500ms</span>
             </div>
             <div class="row" style="align-items:center">
               <button class="b b-green" id="ssb-send" style="margin-left:auto">Gửi 1 câu cho tất cả</button>
@@ -1124,8 +987,8 @@
             • Dòng viền <b style="color:#22c55e">xanh lá</b> = sẽ được gửi; <b style="color:#3b82f6">xanh dương</b> = đầu/cuối chuỗi hoặc nguồn snippet.<br>
             • Chat gắn nhãn <b style="color:#f59e0b">[bình luận]</b> mặc định bỏ tick (reply_inbox không áp dụng cho bình luận).<br>
             • Gửi qua API <code style="color:#94a3b8">POST /v1/pages/.../messages</code> (action=reply_inbox) — đúng request website tự dùng, không cần mở từng chat.<br>
-            • Nếu API bị chặn <code style="color:#94a3b8">(#10) app khác kiểm soát thread</code> → tự gửi tiếp qua <b>Socket</b> (đúng đường gửi tay của app), rồi <b>Extension</b>, rồi <b>giao diện</b> — log ghi rõ kênh đã gửi. Kênh tốt được ghi nhớ cho lần sau.<br>
-            • Tốc độ mặc định <b>“Gửi tất cả cùng lúc”</b> (1 phát); nếu bị báo spam/429 hãy chuyển sang “Song song 5 luồng” hoặc “Tuần tự”.
+            • Nếu API bị chặn <code style="color:#94a3b8">(#10) app khác kiểm soát thread</code> → tự gửi tiếp qua <b>Socket</b> (đúng đường gửi tay của app), rồi <b>Extension</b> — log ghi rõ kênh đã gửi. Kênh tốt được ghi nhớ cho lần sau.<br>
+            • <b>Chỉ gửi hàng loạt</b>: ≤100 tin → 1 lượt; &gt;100 tin → tự chia <b>200 tin/lượt</b>, cách nhau <b>500ms</b>. Không còn cơ chế gửi từng con qua giao diện.
           </div>
         </div>
       </div>
@@ -1191,13 +1054,6 @@
     on('ssb-stop', 'click', () => {
       state.stopRequested = true;
       logLine('⏸ Yêu cầu dừng…');
-    });
-    on('ssb-mode', 'change', () => {
-      const m = (root.getElementById('ssb-mode') || {}).value;
-      const dl = root.getElementById('ssb-delay');
-      const lbl = root.getElementById('ssb-delay-label');
-      if (dl) dl.style.display = m === 'seq' ? '' : 'none';
-      if (lbl) lbl.style.display = m === 'seq' ? '' : 'none';
     });
 
     // kéo thả panel
@@ -1388,7 +1244,6 @@
     sendViaApi,
     sendViaSocket,
     sendViaExtension,
-    sendViaUI,
     scanFullList,
     visibleRows,
     computeMatches,
