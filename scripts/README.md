@@ -29,9 +29,9 @@ Phù hợp khi nhiều khách nhắn cùng 1 câu hỏi / cùng 1 tin tự độ
    - **Chọn theo snippet:** bấm 1 chat bất kỳ (chat đó được chọn) → bấm **“Lấy snippet từ chat đang chọn”**
      (hoặc `Alt+Shift+D`) — mọi chat có snippet giống nhau sẽ được chọn.
 3. Các dòng **viền xanh lá** là chat sẽ được nhận tin (dòng đầu/cuối chuỗi hoặc nguồn snippet viền xanh dương).
-4. Bấm **“Quét toàn bộ danh sách”** để quét thêm các chat ngoài vùng đang hiển thị
-   (list là virtual list — script tự cuộn, đọc hết rồi cuộn về chỗ cũ). Nếu 2 đầu chuỗi cách xa nhau,
-   script tự quét khi bạn nhấp dòng cuối.
+4. **Script không bao giờ tự cuộn danh sách** — khi cần quét toàn bộ chat (để chọn chuỗi chính xác
+   khắp danh sách / so khớp snippet ngoài vùng đang thấy), bấm **“⚡ Tải danh sách”**: script quét
+   siêu nhanh (bước cuộn lớn, chờ tối thiểu), đếm dần trên nút, xong tự cuộn về chỗ cũ.
 5. Bỏ tick chat nào không muốn gửi trong danh sách mục 2.
 6. Nhập **1 câu** cần gửi vào mục 3 → chọn **tốc độ gửi** → bấm **“Gửi 1 câu cho tất cả”** → xác nhận.
    - **🚀 Gửi tất cả cùng lúc** (mặc định): bắn mọi request song song — xong trong 1 phát.

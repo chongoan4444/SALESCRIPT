@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Pancake – Gửi 1 câu cho các đoạn chat cùng snippet
 // @namespace    salescript
-// @version      1.4.0
+// @version      1.5.0
 // @description  Chọn chuỗi chat (Alt+Click 2 đầu) hoặc chọn theo snippet trong danh sách Pancake rồi gửi cùng 1 câu cho tất cả.
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -326,14 +326,9 @@
   async function completeRange(endInfo) {
     const start = state.rangeStart;
     if (!start) return;
-    const visIds = new Set(visibleRows().map((r) => r.id));
-    const haveAll = !!(state.allRows && state.allRows.has(start.id) && state.allRows.has(endInfo.id));
-    const bothVisible = visIds.has(start.id) && visIds.has(endInfo.id);
-    if (!haveAll && !bothVisible) {
-      // 1 trong 2 đầu đã cuộn ra khỏi vùng render → quét toàn bộ để có thứ tự trên→dưới
-      logLine('⏳ Một trong 2 đầu chuỗi đã ra khỏi vùng hiển thị — đang quét danh sách…');
-      await scanFullList();
-    }
+    // KHÔNG tự cuộn/quét ở đây — chỉ dùng dữ liệu đã có:
+    //  - state.allRows (nếu đã bấm "⚡ Tải danh sách") → chính xác toàn danh sách
+    //  - 2 đầu còn nằm trong vùng render → lấy theo thứ tự DOM
     state.mode = 'range';
     state.rangeEnd = {
       id: endInfo.id,
@@ -344,9 +339,17 @@
     };
     computeMatches();
     const n = state.matches.length;
-    logLine('🔗 CHUỖI CHỌN: ' + (start.name || start.id) + ' → ' + (endInfo.name || endInfo.id)
-      + ' — ' + n + ' chat trong chuỗi'
-      + (state.allRows ? ' (toàn danh sách)' : ' (trong vùng đang hiển thị)'));
+    const haveAll = !!(state.allRows && state.allRows.has(start.id) && state.allRows.has(endInfo.id));
+    const visIds = new Set(visibleRows().map((r) => r.id));
+    const bothVisible = visIds.has(start.id) && visIds.has(endInfo.id);
+    if (!haveAll && !bothVisible) {
+      logLine('🔗 CHUỖI CHỌN: ' + (start.name || start.id) + ' → ' + (endInfo.name || endInfo.id)
+        + ' — ⚠ 1 trong 2 đầu đã trôi khỏi màn hình. Bấm "⚡ Tải danh sách" để nạp đủ rồi chọn lại (hoặc chuỗi sẽ tự hoàn tất sau khi tải).');
+    } else {
+      logLine('🔗 CHUỖI CHỌN: ' + (start.name || start.id) + ' → ' + (endInfo.name || endInfo.id)
+        + ' — ' + n + ' chat trong chuỗi'
+        + (state.allRows ? ' (toàn danh sách)' : ' (trong vùng đang hiển thị)'));
+    }
     render();
   }
 
@@ -388,17 +391,19 @@
 
   // Danh sách là virtual list (rc-virtual-list): chỉ render các dòng đang thấy.
   // Quét = cuộn dần, đọc từng dòng xuất hiện, cho tới khi không thấy id mới.
+  // Tải/quét toàn bộ danh sách — CHỈ chạy khi người dùng bấm nút (không tự cuộn bao giờ).
+  // Tối ưu tốc độ: bước cuộn lớn, chờ ngắn theo poll, chỉ chờ lâu ở đáy (app đang tải thêm).
   async function scanFullList() {
     const scroller = getScroller();
     if (!scroller) {
       logLine('⚠ Không tìm thấy khung danh sách đoạn chat (#conversationList)');
       return;
     }
+    const btn = shadow && shadow.getElementById('ssb-scan');
     const savedTop = scroller.scrollTop;
     const found = new Map();
-    let idle = 0;
     let guard = 0;
-    logLine('🔍 Đang quét toàn bộ danh sách đoạn chat…');
+    logLine('⚡ Đang tải danh sách đoạn chat…');
 
     const collect = () => {
       let added = 0;
@@ -410,31 +415,55 @@
       });
       return added;
     };
+    const setBtn = (t) => { if (btn) btn.textContent = t; };
 
     scroller.scrollTop = 0;
-    await sleep(400);
+    await sleep(150);
     collect();
+    setBtn('⏳ ' + found.size + ' chat…');
 
-    while (idle < 8 && guard < 400) {
-      guard++;
+    const step = Math.max(220, Math.round(scroller.clientHeight * 0.9));
+    let noNewStreak = 0;
+    while (guard++ < 300) {
       const prevTop = scroller.scrollTop;
-      const step = Math.max(180, Math.round(scroller.clientHeight * 0.72));
       scroller.scrollTop = prevTop + step;
-      // 1 số bản render cuộn bằng wheel event thay vì scrollTop
+      let atBottom = false;
       if (scroller.scrollTop === prevTop) {
+        // 1 số bản render cuộn bằng wheel event thay vì scrollTop
         try {
           scroller.dispatchEvent(new WheelEvent('wheel', { deltaY: step, bubbles: true, cancelable: true }));
         } catch (e) { /* ignore */ }
+        await sleep(120);
+        atBottom = scroller.scrollTop === prevTop; // kéo không nổi = đáy danh sách
       }
-      await sleep(420); // chờ virtual list render + app tải thêm dữ liệu (infinite scroll)
+      await sleep(110); // chờ render + app kích hoạt tải thêm (infinite scroll)
       const added = collect();
-      if (added === 0 && scroller.scrollTop === prevTop) idle++;
-      else idle = 0;
-      if (guard % 10 === 0) logLine('   …đã thấy ' + found.size + ' đoạn chat');
+
+      if (atBottom) {
+        // đáy: chờ app tải nốt trang cuối (poll nhanh, tối đa ~450ms)
+        const t0 = Date.now();
+        while (Date.now() - t0 < 450) {
+          await sleep(110);
+          if (collect() > 0) { setBtn('⏳ ' + found.size + ' chat…'); }
+        }
+        break;
+      }
+      if (added === 0) {
+        noNewStreak++;
+        if (noNewStreak >= 2) {
+          // 2 bước không thấy dòng mới giữa chừng → app có thể đang tải dở, chờ nốt rồi đi tiếp
+          await sleep(260);
+          collect();
+          noNewStreak = 0;
+        }
+      } else {
+        noNewStreak = 0;
+      }
+      if (guard % 8 === 0) setBtn('⏳ ' + found.size + ' chat…');
     }
 
     scroller.scrollTop = savedTop;
-    await sleep(250);
+    await sleep(120);
 
     // cập nhật dữ liệu mới nhất cho các dòng còn đang render
     visibleRows().forEach((r) => {
@@ -444,7 +473,8 @@
     let ord = 0;
     found.forEach((v) => { v.order = ord++; });
     state.allRows = found;
-    logLine('🔍 Quét xong: ' + found.size + ' đoạn chat trong danh sách');
+    setBtn('⚡ Tải danh sách (' + found.size + ' chat)');
+    logLine('⚡ Tải xong: ' + found.size + ' chat trong danh sách');
     computeMatches();
     render();
   }
@@ -706,33 +736,34 @@
       if (el) return el;
     }
 
+    // Quét quanh vị trí ước lượng (giới hạn ±12 bước — không cuộn khắp danh sách)
     const step = Math.max(180, Math.round(scroller.clientHeight * 0.75));
-    const scanDown = async (fromTop) => {
-      if (fromTop) {
-        scroller.scrollTop = 0;
-        await sleep(240);
-      }
-      let idle = 0, guard = 0;
-      while (idle < 3 && guard++ < 120) {
-        const e2 = findRowEl(convId);
-        if (e2) return e2;
+    const scan = async (down, maxSteps) => {
+      let g = 0;
+      while (g++ < maxSteps) {
         const prev = scroller.scrollTop;
-        scroller.scrollTop = prev + step;
+        scroller.scrollTop = down ? prev + step : Math.max(0, prev - step);
         if (scroller.scrollTop === prev) {
           try {
-            scroller.dispatchEvent(new WheelEvent('wheel', { deltaY: step, bubbles: true, cancelable: true }));
+            scroller.dispatchEvent(new WheelEvent('wheel', { deltaY: down ? step : -step, bubbles: true, cancelable: true }));
           } catch (e) { /* ignore */ }
-          await sleep(260);
+          await sleep(200);
           if (scroller.scrollTop === prev) return findRowEl(convId); // hết biên
         } else {
-          await sleep(180);
+          await sleep(140);
         }
-        idle = 0;
+        const e2 = findRowEl(convId);
+        if (e2) return e2;
       }
       return findRowEl(convId);
     };
-    el = await scanDown(false);      // quét xuống từ vị trí hiện tại
-    if (!el) el = await scanDown(true); // không thấy → quét lại từ đầu danh sách
+    const jumpBack = scroller.scrollTop;
+    el = await scan(true, 12);
+    if (!el) {
+      scroller.scrollTop = jumpBack;
+      await sleep(140);
+      el = await scan(false, 12);
+    }
     return el || null;
   }
 
@@ -1007,7 +1038,7 @@
           <div>
             <div class="label">2) Đoạn chat sẽ gửi (<span class="count" id="ssb-count">0</span>)</div>
             <div class="row" style="margin:4px 0">
-              <button class="b b-gray" id="ssb-scan">Quét toàn bộ danh sách</button>
+              <button class="b b-gray" id="ssb-scan">⚡ Tải danh sách</button>
               <button class="b b-gray" id="ssb-rescan">Quét dòng đang thấy</button>
               <button class="b b-gray" id="ssb-all">Chọn tất cả</button>
               <button class="b b-gray" id="ssb-none">Bỏ chọn</button>
@@ -1036,6 +1067,7 @@
           <div class="log" id="ssb-log"></div>
           <div class="hint">
             • <b>Alt+Click lần 1</b> = đầu chuỗi → <b>giữ Alt + nhấp lần 2</b> = cuối chuỗi: chọn tất cả chat ở giữa (chuỗi chọn). Nhấp lần 3 = bắt đầu chuỗi mới.<br>
+            • Bấm <b>“⚡ Tải danh sách”</b> khi cần quét toàn bộ chat (siêu nhanh) — script <b>không bao giờ tự cuộn</b> khi bạn không bấm; nên bấm1 lần để chọn chuỗi/so khớp chính xác khắp danh sách.<br>
             • Hoặc bấm <b>“Lấy snippet từ chat đang chọn”</b> để gửi cho các chat cùng snippet.<br>
             • Dòng viền <b style="color:#22c55e">xanh lá</b> = sẽ được gửi; <b style="color:#3b82f6">xanh dương</b> = đầu/cuối chuỗi hoặc nguồn snippet.<br>
             • Chat gắn nhãn <b style="color:#f59e0b">[bình luận]</b> mặc định bỏ tick (reply_inbox không áp dụng cho bình luận).<br>
