@@ -33,9 +33,11 @@ Phù hợp khi nhiều khách nhắn cùng 1 câu hỏi / cùng 1 tin tự độ
    (list là virtual list — script tự cuộn, đọc hết rồi cuộn về chỗ cũ). Nếu 2 đầu chuỗi cách xa nhau,
    script tự quét khi bạn nhấp dòng cuối.
 5. Bỏ tick chat nào không muốn gửi trong danh sách mục 2.
-6. Nhập **1 câu** cần gửi vào mục 3 → bấm **“Gửi 1 câu cho tất cả”** → xác nhận.
-   - Giãn cách mặc định 1500 ms/lần gửi (đổi được), có nút **Dừng** giữa chừng.
-   - Log phía dưới hiện rõ chat nào gửi thành công / lỗi gì.
+6. Nhập **1 câu** cần gửi vào mục 3 → chọn **tốc độ gửi** → bấm **“Gửi 1 câu cho tất cả”** → xác nhận.
+   - **🚀 Gửi tất cả cùng lúc** (mặc định): bắn mọi request song song — xong trong 1 phát.
+   - **⚡ Song song 5 luồng**: 5 chat cùng lúc — vẫn nhanh nhưng nhẹ hơn cho server.
+   - **🐢 Tuần tự**: gửi lần lượt, có giãn cách (mặc định 300 ms, đổi được) — dành khi bị báo spam/429.
+   - Có nút **Dừng** giữa chừng; log phía dưới hiện rõ chat nào gửi thành công / lỗi gì.
 
 Phím tắt: `Alt+Shift+B` ẩn/hiện panel, `Alt+Shift+D` lấy snippet từ chat đang chọn, `Esc` hủy chọn chuỗi.
 

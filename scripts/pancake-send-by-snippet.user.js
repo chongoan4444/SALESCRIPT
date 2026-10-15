@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Pancake – Gửi 1 câu cho các đoạn chat cùng snippet
 // @namespace    salescript
-// @version      1.1.0
+// @version      1.2.0
 // @description  Chọn chuỗi chat (Alt+Click 2 đầu) hoặc chọn theo snippet trong danh sách Pancake rồi gửi cùng 1 câu cho tất cả.
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -45,7 +45,7 @@
 
   const PANEL_ID = 'ssb-root';          // ssb = SaleScript Bulk — không đụng pk-*/adj-*/pancake-* của script khác
   const STYLE_ID = 'ssb-style';
-  const DEF_DELAY = 1500;               // ms giữa 2 lần gửi
+  const DEF_DELAY = 300;                // ms giữa 2 lần gửi (chỉ dùng ở chế độ tuần tự)
   const MAX_NAME_LIST = 12;             // số tên hiển thị khi xác nhận
 
   /* ============================ TRẠNG THÁI ============================ */
@@ -72,6 +72,24 @@
   const $$ = (sel, root) => Array.from((root || document).querySelectorAll(sel));
   const norm = (s) => (s || '').normalize('NFC').replace(/\s+/g, ' ').trim();
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+  // Chạy song song tối đa `limit` task cùng lúc (limit = items.length ⇒ "1 phát" tất cả)
+  async function runPool(items, worker, limit) {
+    const results = new Array(items.length);
+    let next = 0;
+    const n = Math.max(1, Math.min(limit || 1, items.length));
+    const lanes = [];
+    for (let k = 0; k < n; k++) {
+      lanes.push((async () => {
+        while (next < items.length && !state.stopRequested) {
+          const i = next++;
+          results[i] = await worker(items[i], i);
+        }
+      })());
+    }
+    await Promise.all(lanes);
+    return results;
+  }
   const esc = (s) => String(s == null ? '' : s)
     .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
@@ -497,33 +515,60 @@
     state.sending = true;
     state.stopRequested = false;
     render();
-    logLine('🚀 Bắt đầu gửi cho ' + targets.length + ' đoạn chat…');
 
-    let ok = 0, fail = 0;
+    const modeEl = shadow && shadow.getElementById('ssb-mode');
+    const mode = (modeEl && modeEl.value) || 'all';
     const delayEl = shadow && shadow.getElementById('ssb-delay');
-    const delay = Math.max(300, Math.min(20000, parseInt((delayEl && delayEl.value) || DEF_DELAY, 10) || DEF_DELAY));
-    for (let i = 0; i < targets.length; i++) {
-      if (state.stopRequested) {
-        logLine('⏸ Đã dừng bởi bạn tại ' + i + '/' + targets.length);
-        break;
-      }
-      const c = targets[i];
+    const delay = Math.max(0, Math.min(20000, parseInt((delayEl && delayEl.value) || DEF_DELAY, 10)));
+    const modeName = mode === 'all' ? 'gửi tất cả cùng lúc'
+      : mode === 'pool5' ? 'song song 5 luồng'
+      : 'tuần tự, giãn cách ' + (isNaN(delay) ? DEF_DELAY : delay) + 'ms';
+    logLine('🚀 Bắt đầu gửi cho ' + targets.length + ' đoạn chat (' + modeName + ')…');
+
+    let ok = 0, fail = 0, done = 0;
+
+    const sendOneAndLog = async (c) => {
       const r = await sendOne(c, text);
+      done++;
       if (r.ok) {
         ok++;
-        logLine('✅ [' + (i + 1) + '/' + targets.length + '] ' + (c.name || c.id) + ' — đã gửi');
+        logLine('✅ [' + done + '/' + targets.length + '] ' + (c.name || c.id) + ' — đã gửi');
       } else {
         fail++;
-        logLine('❌ [' + (i + 1) + '/' + targets.length + '] ' + (c.name || c.id) + ' — ' + r.error);
-        if (r.error && r.error.indexOf('Token') === 0) {
+        logLine('❌ [' + done + '/' + targets.length + '] ' + (c.name || c.id) + ' — ' + r.error);
+      }
+      setProgress(done, targets.length);
+      return r;
+    };
+
+    if (mode === 'seq') {
+      for (let i = 0; i < targets.length; i++) {
+        if (state.stopRequested) break;
+        const r = await sendOneAndLog(targets[i]);
+        if (!r.ok && r.error && r.error.indexOf('Token') === 0) {
           logLine('⛔ Dừng sớm vì token không còn hợp lệ.');
+          state.stopRequested = true;
           break;
         }
+        if (i < targets.length - 1 && !state.stopRequested) await sleep(isNaN(delay) ? DEF_DELAY : delay);
       }
-      setProgress(i + 1, targets.length);
-      if (i < targets.length - 1) await sleep(delay);
+    } else {
+      const limit = mode === 'all' ? Math.max(1, targets.length) : 5;
+      await runPool(targets, async (c) => {
+        if (state.stopRequested) return null;
+        const r = await sendOneAndLog(c);
+        if (!r.ok && r.error && r.error.indexOf('Token') === 0) {
+          logLine('⛔ Dừng sớm vì token không còn hợp lệ.');
+          state.stopRequested = true; // chặn các request chưa bắn
+        }
+        return r;
+      }, limit);
     }
+
     state.sending = false;
+    if (state.stopRequested && done < targets.length) {
+      logLine('⏸ Đã dừng sớm sau ' + done + '/' + targets.length + ' chat.');
+    }
     logLine('🏁 Hoàn tất: ' + ok + ' thành công, ' + fail + ' lỗi.');
     render();
   }
@@ -582,6 +627,8 @@
         textarea:focus { border-color: #2563eb; }
         input[type=number] { width: 84px; background: #0b1220; color: #f1f5f9; border: 1px solid #334155;
                              border-radius: 6px; padding: 5px 6px; font-size: 11px; }
+        select { background: #0b1220; color: #f1f5f9; border: 1px solid #334155;
+                 border-radius: 6px; padding: 5px 6px; font-size: 11px; cursor: pointer; }
         .list { border: 1px solid #334155; border-radius: 8px; max-height: 180px; overflow: auto; background: #0b1220; }
         .item { display: flex; gap: 6px; align-items: flex-start; padding: 6px 8px; border-bottom: 1px solid #1e293b; }
         .item:last-child { border-bottom: none; }
@@ -628,8 +675,16 @@
             <div class="label">3) Câu cần gửi</div>
             <textarea id="ssb-msg" placeholder="Nhập 1 câu sẽ gửi cho tất cả đoạn chat ở trên…"></textarea>
             <div class="row" style="align-items:center">
-              <span class="hint">Giãn cách (ms):</span>
-              <input type="number" id="ssb-delay" value="${DEF_DELAY}" min="300" step="100">
+              <span class="hint">Tốc độ:</span>
+              <select id="ssb-mode" title="Chế độ gửi">
+                <option value="all">🚀 Gửi tất cả cùng lúc</option>
+                <option value="pool5">⚡ Song song 5 luồng</option>
+                <option value="seq">🐢 Tuần tự (giãn cách)</option>
+              </select>
+              <span class="hint" id="ssb-delay-label" style="display:none">Giãn cách (ms):</span>
+              <input type="number" id="ssb-delay" value="${DEF_DELAY}" min="0" step="100" style="display:none">
+            </div>
+            <div class="row" style="align-items:center">
               <button class="b b-green" id="ssb-send" style="margin-left:auto">Gửi 1 câu cho tất cả</button>
               <button class="b b-red" id="ssb-stop" disabled>Dừng</button>
             </div>
@@ -641,7 +696,8 @@
             • Hoặc bấm <b>“Lấy snippet từ chat đang chọn”</b> để gửi cho các chat cùng snippet.<br>
             • Dòng viền <b style="color:#22c55e">xanh lá</b> = sẽ được gửi; <b style="color:#3b82f6">xanh dương</b> = đầu/cuối chuỗi hoặc nguồn snippet.<br>
             • Chat gắn nhãn <b style="color:#f59e0b">[bình luận]</b> mặc định bỏ tick (reply_inbox không áp dụng cho bình luận).<br>
-            • Gửi qua API <code style="color:#94a3b8">POST /v1/pages/.../messages</code> (action=reply_inbox) — đúng request website tự dùng.
+            • Gửi qua API <code style="color:#94a3b8">POST /v1/pages/.../messages</code> (action=reply_inbox) — đúng request website tự dùng, không cần mở từng chat.<br>
+            • Tốc độ mặc định <b>“Gửi tất cả cùng lúc”</b> (1 phát); nếu bị báo spam/429 hãy chuyển sang “Song song 5 luồng” hoặc “Tuần tự”.
           </div>
         </div>
       </div>
@@ -709,6 +765,13 @@
     on('ssb-stop', 'click', () => {
       state.stopRequested = true;
       logLine('⏸ Yêu cầu dừng…');
+    });
+    on('ssb-mode', 'change', () => {
+      const m = (root.getElementById('ssb-mode') || {}).value;
+      const dl = root.getElementById('ssb-delay');
+      const lbl = root.getElementById('ssb-delay-label');
+      if (dl) dl.style.display = m === 'seq' ? '' : 'none';
+      if (lbl) lbl.style.display = m === 'seq' ? '' : 'none';
     });
 
     // kéo thả panel
