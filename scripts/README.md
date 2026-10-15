@@ -28,7 +28,9 @@ Phù hợp khi nhiều khách nhắn cùng 1 câu hỏi / cùng 1 tin tự độ
      (nhấp lần 3 = bắt đầu chuỗi mới; Esc = hủy). Nút “Chọn chuỗi (2 nhấp)” cũng làm được điều tương tự.
    - **Chọn theo snippet:** bấm 1 chat bất kỳ (chat đó được chọn) → bấm **“Lấy snippet từ chat đang chọn”**
      (hoặc `Alt+Shift+D`) — mọi chat có snippet giống nhau sẽ được chọn.
-3. Các dòng **viền xanh lá** là chat sẽ được nhận tin (dòng đầu/cuối chuỗi hoặc nguồn snippet viền xanh dương).
+3. Các dòng **viền xanh lá (nền + viền)** là chat sẽ được nhận tin (dòng đầu/cuối chuỗi hoặc nguồn snippet
+   viền xanh dương). Màu này **tự vẽ lại bền vững**: cuộn ra khỏi màn hình rồi quay lại, bấm mở chat rồi
+   bấm ra… màu vẫn còn (script tự tô lại mỗi khi danh sách render).
 4. **Script không bao giờ tự cuộn danh sách** — khi cần quét toàn bộ chat (để chọn chuỗi chính xác
    khắp danh sách / so khớp snippet ngoài vùng đang thấy), bấm **“⚡ Tải danh sách”**: script quét
    siêu nhanh (bước cuộn lớn, chờ tối thiểu), đếm dần trên nút, xong tự cuộn về chỗ cũ.

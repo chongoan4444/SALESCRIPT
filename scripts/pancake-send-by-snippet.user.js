@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Pancake – Gửi 1 câu cho các đoạn chat cùng snippet
 // @namespace    salescript
-// @version      1.5.0
+// @version      1.6.0
 // @description  Chọn chuỗi chat (Alt+Click 2 đầu) hoặc chọn theo snippet trong danh sách Pancake rồi gửi cùng 1 câu cho tất cả.
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -363,15 +363,62 @@
   }
 
   function highlightRows() {
+    // Idempotent: chỉ thêm/bớt class khi khác — an toàn để gọi liên tục (observer/scroll/poll).
     const matchIds = new Set(state.matches.map((m) => m.id));
+    const rootOf = (item) => item.closest('[role="row"]') || item;
     $$('.conversation-list-item').forEach((item) => {
-      item.classList.remove('ssb-match', 'ssb-match-target');
-      if (!state.enabled) return;
-      const info = rowInfo(item);
-      if (!info) return;
-      if (markOf(info)) item.classList.add('ssb-match-target');
-      else if (matchIds.has(info.id)) item.classList.add('ssb-match');
+      let want = '';
+      if (state.enabled) {
+        const info = rowInfo(item);
+        if (info) {
+          if (markOf(info)) want = 'ssb-m-target';
+          else if (matchIds.has(info.id)) want = 'ssb-m-match';
+        }
+      }
+      const paint = (el) => {
+        if (!el || !el.classList) return;
+        const has = el.classList.contains('ssb-m-target') ? 'ssb-m-target'
+          : el.classList.contains('ssb-m-match') ? 'ssb-m-match' : '';
+        if (has !== want) {
+          el.classList.remove('ssb-m-target', 'ssb-m-match');
+          if (want) el.classList.add(want);
+        }
+      };
+      paint(item);
+      paint(rootOf(item)); // tô cả khung dòng (role=row) — tránh bị panel màu của app che
     });
+  }
+
+  // Tô lại màu mỗi khi virtual list render lại dòng (cuộn, bấm chọn chat, app cập nhật…)
+  let hlScheduled = false;
+  function scheduleHighlight() {
+    if (hlScheduled) return;
+    hlScheduled = true;
+    requestAnimationFrame(() => {
+      hlScheduled = false;
+      try { highlightRows(); } catch (e) { /* ignore */ }
+    });
+  }
+
+  function watchList() {
+    const list = $('#conversationList');
+    if (!list) {
+      // danh sách chưa render → thử lại
+      setTimeout(() => { if (!state.destroyed) watchList(); }, 2000);
+      return;
+    }
+    // 1) React thay DOM/class của dòng → tô lại
+    try {
+      const mut = new MutationObserver(() => scheduleHighlight());
+      mut.observe(list, { childList: true, subtree: true, attributes: true, attributeFilter: ['class', 'style'] });
+    } catch (e) { /* ignore */ }
+    // 2) cuộn danh sách → tô lại
+    try {
+      const scroller = getScroller();
+      if (scroller) scroller.addEventListener('scroll', () => scheduleHighlight(), { passive: true });
+    } catch (e) { /* ignore */ }
+    // 3) lưới an toàn: nếu vì lý do gì 1&2 hụt (list bị render lại toàn bộ) thì vẫn tự sửa sau ~0.4s
+    setInterval(() => scheduleHighlight(), 400);
   }
 
   function clip(s, n) {
@@ -956,8 +1003,8 @@
     const st = document.createElement('style');
     st.id = STYLE_ID;
     st.textContent = `
-      .conversation-list-item.ssb-match { outline: 2px solid #22c55e !important; outline-offset: -2px !important; border-radius: 6px; }
-      .conversation-list-item.ssb-match-target { outline: 2px solid #3b82f6 !important; background: rgba(59,130,246,.10) !important; }
+      .ssb-m-match { background: rgba(34,197,94,.16) !important; box-shadow: inset 3px 0 0 0 #22c55e !important; outline: 2px solid #22c55e !important; outline-offset: -2px !important; border-radius: 6px; }
+      .ssb-m-target { background: rgba(59,130,246,.22) !important; box-shadow: inset 3px 0 0 0 #3b82f6 !important; outline: 2px solid #3b82f6 !important; outline-offset: -2px !important; border-radius: 6px; }
     `;
     (document.head || document.documentElement).appendChild(st);
   }
@@ -1081,6 +1128,7 @@
     (document.body || document.documentElement).appendChild(host);
     wireEvents(shadow);
     render();
+    watchList(); // tự tô lại màu khi virtual list render lại dòng
   }
 
   function wireEvents(root) {
@@ -1090,10 +1138,7 @@
     };
     on('ssb-toggle', 'click', () => {
       state.enabled = !state.enabled;
-      if (!state.enabled) {
-        state.pickMode = false;
-        $$('.ssb-match, .ssb-match-target').forEach((el) => el.classList.remove('ssb-match', 'ssb-match-target'));
-      } else highlightRows();
+      highlightRows(); // bật: tô lại / tắt: gỡ hết màu
       render();
     });
     on('ssb-min', 'click', () => {
@@ -1258,6 +1303,7 @@
       el.textContent = state.log.join('\n');
       el.scrollTop = el.scrollHeight;
     }
+    scheduleHighlight(); // mọi thay đổi trạng thái → vẽ lại màu trên danh sách
   }
 
   /* ============================ SỰ KIỆN TOÀN CỤC ============================ */
