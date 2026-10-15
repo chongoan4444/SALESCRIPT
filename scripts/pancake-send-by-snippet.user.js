@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Pancake – Gửi 1 câu cho các đoạn chat cùng snippet
 // @namespace    salescript
-// @version      1.2.0
+// @version      1.3.0
 // @description  Chọn chuỗi chat (Alt+Click 2 đầu) hoặc chọn theo snippet trong danh sách Pancake rồi gửi cùng 1 câu cho tất cả.
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -449,12 +449,14 @@
     render();
   }
 
-  /* ============================ GỬI TIN (API CỦA CHÍNH WEBSITE) ============================ */
+  /* ============================ GỬI TIN (API → EXTENSION → GIAO DIỆN) ============================ */
 
   // Đúng request mà _app-...js gửi khi nhắn tin thường (executeByApi + buildRequestBody):
   //   POST /api/v1/pages/{page_id}/conversations/{conversation.id}/messages?access_token=...
   //   multipart/form-data: action=reply_inbox, message=<text>
-  async function sendOne(conv, text) {
+  // Nếu server từ chối dạng "(#10) ... ứng dụng khác đang kiểm soát thread" (Facebook handover)
+  // thì app tự fallback sang extension — mình làm đúng như vậy ở sendSmart().
+  async function sendViaApi(conv, text) {
     const token = getToken();
     if (!token) {
       return { ok: false, error: 'Không tìm thấy access_token — hãy tải lại trang Pancake rồi thử lại' };
@@ -476,7 +478,7 @@
       let data = {};
       try { data = await res.json(); } catch (e) { /* non-json */ }
       if (res.ok && data && data.success) {
-        return { ok: true, id: data.id || data.message_id || '' };
+        return { ok: true, id: data.id || data.message_id || '', sendBy: 'api' };
       }
       if (res.status === 401 || res.status === 403) {
         capturedToken = null; // token cũ — lần sau tự lấy token mới
@@ -490,6 +492,234 @@
     } catch (e) {
       return { ok: false, error: 'Lỗi mạng: ' + (e && e.message || e) };
     }
+  }
+
+  // Lấy conversation đầy đủ (thread_id, thread_key, from, updated_at…):
+  // ưu tiên redux store của trang, sau đó GET /conversations/{id}
+  async function getFullConversation(conv) {
+    try {
+      const st = window.__pancakeReduxStore__ && window.__pancakeReduxStore__.getState();
+      const list = st && st.conversations && st.conversations.data;
+      if (Array.isArray(list)) {
+        const found = list.find((c) => c && c.id === conv.id);
+        if (found) return found;
+      }
+    } catch (e) { /* ignore */ }
+    try {
+      const token = getToken();
+      if (!token) return null;
+      const res = await fetch(apiBase() + '/v1/pages/' + (conv.pageId || conv.id.split('_')[0])
+        + '/conversations/' + encodeURIComponent(conv.id)
+        + '?access_token=' + encodeURIComponent(token),
+        { headers: { Accept: 'application/json' }, credentials: 'include' });
+      const j = await res.json().catch(() => null);
+      if (j && res.ok) return j.conversation || (j.data && j.data.conversation) || (j.id ? j : (j.data && j.data.id ? j.data : null));
+    } catch (e) { /* ignore */ }
+    return null;
+  }
+
+  function detectPlatform(pageId) {
+    try {
+      const st = window.__pancakeReduxStore__ && window.__pancakeReduxStore__.getState();
+      const pages = st && st.pages;
+      if (!pages) return 'facebook';
+      const map = pages.activatedMap || {};
+      const arr = pages.activated || [];
+      const p = map[pageId] || arr.find((x) => x && x.id === pageId);
+      return (p && p.platform) || 'facebook';
+    } catch (e) {
+      return 'facebook';
+    }
+  }
+
+  // Gửi qua extension Pancake (đường app dùng khi API bị "(#10)" — executeByExtOnce, type REPLY_INBOX_PHOTO)
+  async function sendViaExtension(conv, text) {
+    const adapter = window.__ExtensionAdapter__;
+    if (!adapter || typeof adapter.send !== 'function') {
+      return { ok: false, error: 'Không thấy Extension Pancake', skipExt: true };
+    }
+    try {
+      if (typeof adapter.checkConnection === 'function' && !adapter.checkConnection({ silent: true })) {
+        return { ok: false, error: 'Extension Pancake chưa kết nối', skipExt: true };
+      }
+    } catch (e) { /* cứ thử gửi */ }
+
+    const platform = detectPlatform(conv.pageId || conv.id.split('_')[0]);
+    if (platform !== 'facebook') {
+      return { ok: false, error: 'Extension chỉ áp dụng cho Facebook ở chế độ này', skipExt: true };
+    }
+    const full = await getFullConversation(conv);
+    if (!full) return { ok: false, error: 'Không lấy được thông tin đoạn chat' };
+
+    let threadId = full.thread_id;
+    if (!threadId && typeof window.__syncMissingThreadId__ === 'function') {
+      try {
+        threadId = await window.__syncMissingThreadId__(full.page_id || conv.pageId, full.id || conv.id);
+      } catch (e) { /* ignore */ }
+    }
+    if (!threadId) return { ok: false, error: 'Không tìm thấy thread_id' };
+
+    let globalUserId = null;
+    try {
+      const g1 = window.__GlobalIdCacheTest__, g2 = window.__tempGlobalIdCache__;
+      globalUserId = (g1 && g1.get(full.id || conv.id)) || (g2 && g2.get(full.id || conv.id)) || null;
+    } catch (e) { /* ignore */ }
+
+    const token = getToken();
+    const payload = {
+      pageId: full.page_id || conv.pageId,
+      igPageId: null,
+      accessToken: token,
+      tryResizeImage: true,
+      contentIds: [],
+      type: 'REPLY_INBOX_PHOTO',
+      message: text,
+      attachmentType: 'SEND_TEXT_ONLY',
+      globalUserId,
+      platform: 'facebook',
+      replyMessage: null,
+      files: null,
+      threadId,
+      convId: full.thread_key || null,
+      customerName: (full.from && (full.from.username || full.from.name)) || '',
+      photoUrl: null,
+      isIGD: false,
+      conversationUpdatedTime: Date.parse(String(full.updated_at || '') + 'Z'),
+      photoUrls: [],
+      isBusiness: false,
+    };
+    try {
+      const res = await adapter.send(payload, { timeout: 35000 });
+      if (res && res.success) {
+        return { ok: true, id: (res.data && (res.data.timestamp || res.data.convId)) || '', sendBy: 'extension' };
+      }
+      return { ok: false, error: 'Extension không gửi được' };
+    } catch (e) {
+      return { ok: false, error: 'Extension lỗi: ' + (e && e.message || e) };
+    }
+  }
+
+  function waitFor(fn, timeout) {
+    return new Promise((resolve) => {
+      const t0 = Date.now();
+      const tick = () => {
+        let v = null;
+        try { v = fn(); } catch (e) { /* ignore */ }
+        if (v) return resolve(v);
+        if (Date.now() - t0 >= timeout) return resolve(null);
+        setTimeout(tick, 120);
+      };
+      tick();
+    });
+  }
+
+  function findRowEl(convId) {
+    return document.getElementById(convId)
+      || document.querySelector('[id^="' + convId + '__"]')
+      || null;
+  }
+
+  async function scrollToRow(convId) {
+    let el = findRowEl(convId);
+    if (el) return el;
+    const scroller = getScroller();
+    if (!scroller) return null;
+    scroller.scrollTop = 0;
+    await sleep(320);
+    let guard = 0;
+    while (guard++ < 300) {
+      el = findRowEl(convId);
+      if (el) return el;
+      const prev = scroller.scrollTop;
+      scroller.scrollTop = prev + Math.max(180, Math.round(scroller.clientHeight * 0.7));
+      if (scroller.scrollTop === prev) {
+        try {
+          scroller.dispatchEvent(new WheelEvent('wheel', { deltaY: 220, bubbles: true, cancelable: true }));
+        } catch (e) { /* ignore */ }
+        await sleep(360);
+        if (scroller.scrollTop === prev && !findRowEl(convId)) break; // hết cuộn
+      }
+      await sleep(280);
+    }
+    return findRowEl(convId);
+  }
+
+  // Gửi qua giao diện thật: mở chat → điền #replyBoxComposer → Enter
+  // (đúng chuỗi thao tác mà người dùng vẫn làm — app tự dùng đường socket/extension bên trong)
+  async function sendViaUI(conv, text) {
+    if (state.stopRequested) return { ok: false, error: 'Đã dừng' };
+    const rowWrap = await scrollToRow(conv.id);
+    if (!rowWrap) return { ok: false, error: 'Không tìm thấy dòng chat trong danh sách' };
+    const item = (rowWrap.classList && rowWrap.classList.contains('conversation-list-item'))
+      ? rowWrap
+      : (rowWrap.querySelector && rowWrap.querySelector('.conversation-list-item')) || rowWrap;
+    item.click();
+    const ta = await waitFor(() => {
+      const t = document.getElementById('replyBoxComposer');
+      return t && t.isConnected ? t : null;
+    }, 6000);
+    if (!ta) return { ok: false, error: 'Không mở được khung chat' };
+    await sleep(300);
+
+    const setter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value').set;
+    setter.call(ta, text);
+    ta.dispatchEvent(new Event('input', { bubbles: true }));
+    await sleep(180);
+    if (ta.value.trim() !== text.trim()) {
+      return { ok: false, error: 'UI: không điền được nội dung vào ô chat' };
+    }
+
+    const pressEnter = () => {
+      ['keydown', 'keypress', 'keyup'].forEach((type) => {
+        const ev = new KeyboardEvent(type, { key: 'Enter', code: 'Enter', bubbles: true, cancelable: true });
+        try {
+          Object.defineProperty(ev, 'keyCode', { get: () => 13 });
+          Object.defineProperty(ev, 'which', { get: () => 13 });
+        } catch (e) { /* ignore */ }
+        ta.dispatchEvent(ev);
+      });
+    };
+    pressEnter();
+    // app xóa ô chat sau khi gửi — nếu vẫn còn chữ thì thử Enter lần nữa
+    let sent = await waitFor(() => {
+      const t = document.getElementById('replyBoxComposer');
+      return !t || !t.value.trim() || t.value.trim() !== text.trim();
+    }, 8000);
+    if (!sent) {
+      pressEnter();
+      sent = await waitFor(() => {
+        const t = document.getElementById('replyBoxComposer');
+        return !t || !t.value.trim() || t.value.trim() !== text.trim();
+      }, 8000);
+    }
+    if (!sent) return { ok: false, error: 'UI: ô chat không gửi đi' };
+    return { ok: true, id: '', sendBy: 'ui' };
+  }
+
+  // UI chỉ mở được 1 chat mỗi lần → xếp hàng tuần tự
+  let uiLock = Promise.resolve();
+  function sendViaUIQueued(conv, text) {
+    const run = uiLock.then(() => sendViaUI(conv, text));
+    uiLock = run.then(() => {}, () => {});
+    return run;
+  }
+
+  // API (nhanh) → Extension (đường app tự fallback khi "(#10)") → Giao diện (cuối cùng)
+  async function sendOne(conv, text) {
+    const a = await sendViaApi(conv, text);
+    if (a.ok) return a;
+    if (a.error && a.error.indexOf('Token') === 0) return a;
+
+    const b = await sendViaExtension(conv, text);
+    if (b.ok) return b;
+    if (state.stopRequested) return { ok: false, error: 'Đã dừng' };
+
+    const c = await sendViaUIQueued(conv, text);
+    if (c.ok) return c;
+    return {
+      ok: false,
+      error: 'API: ' + a.error + ' | Ext: ' + (b.skipExt ? 'bỏ qua' : b.error) + ' | UI: ' + c.error,
+    };
   }
 
   async function sendToAll() {
@@ -532,7 +762,8 @@
       done++;
       if (r.ok) {
         ok++;
-        logLine('✅ [' + done + '/' + targets.length + '] ' + (c.name || c.id) + ' — đã gửi');
+        const via = r.sendBy === 'extension' ? ' — qua Extension' : r.sendBy === 'ui' ? ' — qua giao diện' : '';
+        logLine('✅ [' + done + '/' + targets.length + '] ' + (c.name || c.id) + ' — đã gửi' + via);
       } else {
         fail++;
         logLine('❌ [' + done + '/' + targets.length + '] ' + (c.name || c.id) + ' — ' + r.error);
@@ -697,6 +928,7 @@
             • Dòng viền <b style="color:#22c55e">xanh lá</b> = sẽ được gửi; <b style="color:#3b82f6">xanh dương</b> = đầu/cuối chuỗi hoặc nguồn snippet.<br>
             • Chat gắn nhãn <b style="color:#f59e0b">[bình luận]</b> mặc định bỏ tick (reply_inbox không áp dụng cho bình luận).<br>
             • Gửi qua API <code style="color:#94a3b8">POST /v1/pages/.../messages</code> (action=reply_inbox) — đúng request website tự dùng, không cần mở từng chat.<br>
+            • Nếu API bị chặn <code style="color:#94a3b8">(#10) app khác kiểm soát thread</code> (bot đang giữ quyền) → script tự gửi tiếp qua <b>Extension</b>, rồi qua <b>giao diện</b> — log ghi rõ kênh đã gửi.<br>
             • Tốc độ mặc định <b>“Gửi tất cả cùng lúc”</b> (1 phát); nếu bị báo spam/429 hãy chuyển sang “Song song 5 luồng” hoặc “Tuần tự”.
           </div>
         </div>
@@ -952,6 +1184,9 @@
     state,
     getToken,
     sendOne,
+    sendViaApi,
+    sendViaExtension,
+    sendViaUI,
     scanFullList,
     visibleRows,
     computeMatches,

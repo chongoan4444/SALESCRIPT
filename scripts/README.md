@@ -45,11 +45,21 @@ Phím tắt: `Alt+Shift+B` ẩn/hiện panel, `Alt+Shift+D` lấy snippet từ c
 
 | Phần source | Nội dung được dùng |
 |---|---|
-| `html.txt`, `html2.txt`, `html3.txt`, `html comment list` | Cấu trúc DOM danh sách đoạn chat: `#conversationList` → `<div id="{pageId}_{conversationId}">` → `.conversation-list-item` với `.name-text`, `.time-modul`, `.snippet-text`; chat đang chọn có class `selected`. Icon `static/images/envelope*.svg` = chat Inbox, `static/images/comments.svg` = chat Bình luận (script phân biệt để cảnh báo). |
-| `_app-9331d46f21a84eb1.v6.js` | Cách website tự gửi tin (`executeByApi` + `buildRequestBody` + `objectToFormData`): `POST {api}/v1/pages/{page_id}/conversations/{id}/messages?access_token=…` với body `multipart/form-data` gồm `action=reply_inbox`, `message=…`; `getHostname()` → `https://pancake.vn/api`; kiểm tra token bằng `GET /v1/users/get_auth/`. |
+| `html.txt`, `html2.txt`, `html3.txt`, `html comment list` | Cấu trúc DOM danh sách đoạn chat: `#conversationList` → `<div id="{pageId}_{conversationId}">` → `.conversation-list-item` với `.name-text`, `.time-modul`, `.snippet-text`; chat đang chọn có class `selected`. Icon `static/images/envelope*.svg` = chat Inbox, `static/images/comments.svg` = chat Bình luận (script phân biệt để cảnh báo). Ô soạn tin `#replyBoxComposer` (gửi bằng phím Enter). |
+| `_app-9331d46f21a84eb1.v6.js` | Cách website tự gửi tin: `executeByApi` → `POST {api}/v1/pages/{page_id}/conversations/{id}/messages?access_token=…` (`action=reply_inbox`, `multipart/form-data`); khi server trả lỗi dạng `(#10)/(#551)/(#613)…` (`canFallbackToExt`) app tự fallback sang `executeByExt` (extension message `type:"REPLY_INBOX_PHOTO"`, `attachmentType:"SEND_TEXT_ONLY"`) rồi `executeBySocketFB`. Script tái hiện đúng3 tầng đó, dùng các biến toàn cục app expose sẵn: `__pancakeReduxStore__`, `__ExtensionAdapter__`, `__GlobalIdCacheTest__`, `__tempGlobalIdCache__`, `__syncMissingThreadId__`. |
 | `pancake.vn2.har` | Xác nhận `access_token` (JWT) được gửi trong query string của mọi request `/api/v1/…` — script lấy token trực tiếp từ request thật của trang (hook fetch/XHR, `performance` entries, `__NEXT_DATA__`, URL ảnh trong DOM). |
 
-Không dùng selector bịa: mọi class/id ở trên đều lấy trực tiếp từ source.
+Không dùng selector bịa: mọi class/id/đường API ở trên đều lấy trực tiếp từ source.
+
+## 3 tầng gửi (tự động dự phòng)
+
+1. **API** — nhanh nhất, gửi song song nhiều chat cùng lúc.
+2. **Extension Pancake** — nếu API bị Facebook từ chối `"(#10) … một ứng dụng khác hiện đang kiểm soát thread này"`
+   (khi bot/app khác đang giữ quyền thread — đúng lỗi app cũng gặp và cũng tự fallback như vậy).
+   Yêu cầu đã cài **extension Pancake V2** và đang đăng nhập Facebook trong trình duyệt.
+3. **Giao diện** — cuối cùng: tự mở chat → điền ô chat → Enter (giống bạn gửi thủ công).
+
+Log từng dòng ghi rõ kênh đã gửi: `— đã gửi`, `— qua Extension`, `— qua giao diện`.
 
 ## Lưu ý
 
@@ -58,6 +68,8 @@ Không dùng selector bịa: mọi class/id ở trên đều lấy trực tiếp
 - **Chuỗi chọn** lấy theo thứ tự trên→dưới của danh sách đoạn chat tại thời điểm chọn.
 - Gửi tin đi qua **cùng API mà Pancake dùng** khi nhân viên bấm Gửi trong ô chat
   (`#replyBoxComposer` → `action=reply_inbox`), nên tin hiện trong lịch sử chat như 1 tin nhắn bình thường.
+  Nếu API bị chặn (lỗi `#10` do bot/app khác giữ quyền thread), script tự chuyển sang gửi qua
+  **Extension Pancake** và sau đó qua **giao diện** — hãy cài extension Pancake V2 để dùng tầng dự phòng này.
 - Đoạn chat loại **COMMENT** (bình luận bài viết) có thể bị API từ chối với `reply_inbox`;
   chat nào lỗi sẽ hiện rõ trong log (thường chỉ gặp với chat Inbox là mượt).
 - Nếu log báo **token hết hạn** → tải lại trang Pancake rồi chạy lại (token mới được script tự bắt).
