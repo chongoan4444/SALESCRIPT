@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE
 // @namespace    salescript
-// @version      1.22.1
+// @version      1.23.0
 // @description  BOTFAKE — chọn chuỗi chat (Alt+Click 2 đầu) hoặc theo snippet trong Pancake rồi gửi cùng 1 câu (kèm ảnh nếu muốn) cho tất cả.
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -1639,17 +1639,17 @@
         .hint { color: #64748b; font-size: 10px; line-height: 1.5; }
         .empty { color: #64748b; padding: 10px; text-align: center; }
         .count { color: #38bdf8; font-weight: 700; }
-        #ssb-bubble { display: none; background: transparent; border: none; padding: 0; cursor: pointer;
+        #ssb-bubble { display: none; background: transparent; border: none; padding: 0; cursor: grab;
                       line-height: 0; filter: drop-shadow(0 8px 18px rgba(88,101,242,.45));
                       transition: transform .15s ease; }
         #ssb-bubble:hover { transform: scale(1.1) rotate(-4deg); }
-        #ssb-bubble:active { transform: scale(.96); }
+        #ssb-bubble:active { transform: scale(.96); cursor: grabbing; }
         #ssb-bubble svg { width: 52px; height: 52px; display: block; }
         .title .logo { width: 17px; height: 17px; vertical-align: -3px; margin-right: 3px; }
       </style>
       <div class="wrap" id="ssb-wrap">
         <div class="head" id="ssb-head">
-          <span class="title"><svg class="logo" viewBox="0 0 50 52" width="17" height="17" xmlns="http://www.w3.org/2000/svg"><path d="M10 2 L14 11" stroke="#5865F2" stroke-width="5" stroke-linecap="round" fill="none"/><path d="M40 2 L36 11" stroke="#5865F2" stroke-width="5" stroke-linecap="round" fill="none"/><rect x="0" y="12" width="50" height="40" rx="6" fill="#5865F2"/><rect x="12" y="31" width="12" height="4" rx="2" fill="#fff"/><rect x="26" y="31" width="12" height="4" rx="2" fill="#fff"/></svg>BOTFAKE <span style="color:#64748b;font-weight:400;font-size:11px">v1.22.1</span></span>
+          <span class="title"><svg class="logo" viewBox="0 0 50 52" width="17" height="17" xmlns="http://www.w3.org/2000/svg"><path d="M10 2 L14 11" stroke="#5865F2" stroke-width="5" stroke-linecap="round" fill="none"/><path d="M40 2 L36 11" stroke="#5865F2" stroke-width="5" stroke-linecap="round" fill="none"/><rect x="0" y="12" width="50" height="40" rx="6" fill="#5865F2"/><rect x="12" y="31" width="12" height="4" rx="2" fill="#fff"/><rect x="26" y="31" width="12" height="4" rx="2" fill="#fff"/></svg>BOTFAKE <span style="color:#64748b;font-weight:400;font-size:11px">v1.23.0</span></span>
           <button class="badge on" id="ssb-toggle" title="Bật/tắt tính năng">BẬT</button>
           <button class="minibtn" id="ssb-close" title="Tắt panel (F5 hoặc Alt+Shift+B để hiện lại)">✕</button>
           <button class="minibtn" id="ssb-min" title="Thu nhỏ">—</button>
@@ -1739,6 +1739,7 @@
       if (bubble) bubble.style.display = 'block';
     });
     on('ssb-bubble', 'click', () => {
+      if (justDragged) return; // vừa KÉO bóng xong → không mở panel
       // bấm bóng logo → mở lại panel đầy đủ
       const wrapEl = root.getElementById('ssb-wrap');
       const bubble = root.getElementById('ssb-bubble');
@@ -1892,26 +1893,45 @@
       logLine('⏸ Yêu cầu dừng…');
     });
 
-    // kéo thả panel
+    // kéo thả panel (header) VÀ bong bóng logo — di chuyển >4px mới tính là KÉO
+    // (để bấm vào bóng vẫn mở panel, kéo bóng chỉ dời chỗ)
     const head = root.getElementById('ssb-head');
+    const bubbleEl = root.getElementById('ssb-bubble');
     const wrap = root.getElementById('ssb-wrap');
     let drag = null;
-    head.addEventListener('mousedown', (e) => {
-      if (e.target.tagName === 'BUTTON') return;
+    let justDragged = false;
+    const startDrag = (e) => {
       const hostEl = document.getElementById(PANEL_ID);
       const rect = hostEl.getBoundingClientRect();
-      drag = { x: e.clientX, y: e.clientY, r: rect };
+      drag = { x: e.clientX, y: e.clientY, r: rect, moved: false };
       e.preventDefault();
+    };
+    head.addEventListener('mousedown', (e) => {
+      if (e.target.tagName === 'BUTTON') return;
+      startDrag(e);
     });
+    if (bubbleEl) bubbleEl.addEventListener('mousedown', startDrag);
     window.addEventListener('mousemove', (e) => {
       if (!drag) return;
+      if (!drag.moved && Math.abs(e.clientX - drag.x) + Math.abs(e.clientY - drag.y) > 4) drag.moved = true;
+      if (!drag.moved) return;
       const hostEl = document.getElementById(PANEL_ID);
+      if (!hostEl) return;
       hostEl.style.right = 'auto';
       hostEl.style.bottom = 'auto';
-      hostEl.style.left = Math.max(0, drag.r.left + e.clientX - drag.x) + 'px';
-      hostEl.style.top = Math.max(0, drag.r.top + e.clientY - drag.y) + 'px';
+      // giữ panel/bóng luôn ló ≥40px trong màn hình (không kéo mất hẳn ra ngoài)
+      const left = Math.min(Math.max(0, drag.r.left + e.clientX - drag.x), Math.max(0, window.innerWidth - 40));
+      const top = Math.min(Math.max(0, drag.r.top + e.clientY - drag.y), Math.max(0, window.innerHeight - 40));
+      hostEl.style.left = left + 'px';
+      hostEl.style.top = top + 'px';
     });
-    window.addEventListener('mouseup', () => { drag = null; });
+    window.addEventListener('mouseup', () => {
+      if (drag && drag.moved) {
+        justDragged = true; // nuốt click ngay sau khi kéo — không mở panel khi dời bóng
+        setTimeout(() => { justDragged = false; }, 150);
+      }
+      drag = null;
+    });
     void wrap;
   }
 
