@@ -34,11 +34,14 @@ Phù hợp khi nhiều khách nhắn cùng 1 câu hỏi / cùng 1 tin tự độ
    Nút **“⬇ Từ đây xuống cuối”**: chọn tất cả chat từ chat đang mở (đang được chọn trong app) trở xuống
    cuối danh sách (tự tải danh sách nếu chưa tải).
 4. **Script không bao giờ tự cuộn danh sách** — khi cần quét toàn bộ chat (để chọn chuỗi chính xác
-   khắp danh sách / so khớp snippet ngoài vùng đang thấy), bấm **“⚡ Tải danh sách”**: script quét
-   siêu nhanh (bước cuộn lớn, chờ tối thiểu), đếm dần trên nút, xong tự cuộn về chỗ cũ.
-   Chuỗi **hàng nghìn chat** vẫn chạy tốt: quét nghìn chat mất ~15–30 giây (app tải dần theo cuộn —
-   đếm số chat hiện trên nút để theo dõi), sau đó chọn chuỗi/gửi bình thường.
-   Với chuỗi ≥150 chat nên chọn tốc độ **“Song song 5 luồng”** để không bị Facebook chặn (429).
+   khắp danh sách / so khớp snippet ngoài vùng đang thấy), bấm **“⚡ Tải danh sách”**:
+   - **Tải qua API trước (siêu nhanh)** — đúng request mà app Pancake tự gọi
+     (`GET /api/v1/conversations` + phân trang `next_cursor`): 2000–3000 chat chỉ mất vài giây,
+     **không cuộn gì cả**. Tự kiểm tra khớp với màn hình; nếu không khớp (ví dụ bạn đang bật bộ lọc
+     tag/loại) thì tự chuyển sang quét giao diện cho đúng những gì đang thấy.
+   - **Quét giao diện** (dự phòng): bước cuộn lớn, chờ tối thiểu, đếm dần trên nút, xong tự cuộn về chỗ cũ.
+   Chuỗi **hàng nghìn chat** vẫn chạy tốt. Với chuỗi ≥150 chat nên chọn tốc độ **“Song song 5 luồng”**
+   để không bị Facebook chặn (429).
 5. Bỏ tick chat nào không muốn gửi trong danh sách mục 2.
 6. Nhập **1 câu** cần gửi vào mục 3 → chọn **tốc độ gửi** → bấm **“Gửi 1 câu cho tất cả”** → xác nhận.
    - **🚀 Gửi tất cả cùng lúc** (mặc định): bắn mọi request song song — xong trong 1 phát.

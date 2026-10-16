@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Pancake – Gửi 1 câu cho các đoạn chat cùng snippet
 // @namespace    salescript
-// @version      1.10.0
+// @version      1.11.0
 // @description  Chọn chuỗi chat (Alt+Click 2 đầu) hoặc chọn theo snippet trong danh sách Pancake rồi gửi cùng 1 câu cho tất cả.
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -242,6 +242,20 @@
     return '';
   }
 
+  // So khớp snippet giữa dạng hiển thị trên màn hình (bị cắt "…") và dạng đầy đủ từ API
+  function sameSnippet(a, b) {
+    a = String(a || '').replace(/\s+/g, ' ').trim();
+    b = String(b || '').replace(/\s+/g, ' ').trim();
+    if (!a || !b) return false;
+    if (a === b) return true;
+    const cut = /(\.{3}|…)$/;
+    const aCut = cut.test(a), bCut = cut.test(b);
+    const a2 = a.replace(cut, ''), b2 = b.replace(cut, '');
+    if (aCut && b.startsWith(a2)) return true;
+    if (bCut && a.startsWith(b2)) return true;
+    return a2 === b2;
+  }
+
   function computeMatches() {
     const before = new Map(state.matches.map((m) => [m.id, m]));
     const list = [];
@@ -256,7 +270,7 @@
     };
     if (state.mode === 'snippet' && state.target) {
       sourceRows().forEach((r) => {
-        if (r.snippet && r.snippet === state.target.snippet) push(r);
+        if (sameSnippet(r.snippetRaw || r.snippet, state.target.snippetRaw || state.target.snippet)) push(r);
       });
     } else if (state.mode === 'range' && state.rangeStart && state.rangeEnd) {
       const aId = state.rangeStart.id, bId = state.rangeEnd.id;
@@ -427,6 +441,92 @@
     return s.length > n ? s.slice(0, n - 1) + '…' : s;
   }
 
+  /* ============================ TẢI DANH SÁCH QUA API (siêu nhanh) ============================ */
+
+  // Đúng request mà app tự gọi khi tải/tải thêm danh sách (buildConversationsRequest trong bundle):
+  //   GET /api/v1/conversations?pages[p]=…&current_count=…&next_cursor=…&unread_first=true
+  //       &mode=OR&tags="ALL"&except_tags=[]&access_token=…&cursor_mode=true&from_platform=web
+  // Phản hồi: { conversations, next_cursor, pages_with_current_count, success }
+  function fmtApiTime(iso) {
+    if (!iso) return '';
+    const d = new Date(/[zZ+]|\+\d{2}:?\d{2}$/.test(iso) ? iso : iso + 'Z'); // updated_at là UTC, không kèm Z
+    if (isNaN(d.getTime())) return String(iso).slice(0, 16).replace('T', ' ');
+    const p = (n) => String(n).padStart(2, '0');
+    return p(d.getHours()) + ':' + p(d.getMinutes()) + ' ' + p(d.getDate()) + '/' + p(d.getMonth() + 1);
+  }
+
+  function convApiRow(c, order) {
+    const from = c.from || {};
+    const cust = (c.customers && c.customers[0]) || {};
+    return {
+      id: String(c.id || ''),
+      name: c.name || from.name || from.username || cust.name || String(c.id || ''),
+      snippet: c.snippet || '',
+      snippetRaw: c.snippet || '',
+      time: fmtApiTime(c.updated_at),
+      type: String(c.type || '').toLowerCase() === 'comment' ? 'comment' : 'inbox',
+      order,
+    };
+  }
+
+  async function fetchJson(url) {
+    const r = await fetch(url, { credentials: 'include' });
+    if (!r.ok) return null;
+    let txt = await r.text();
+    try { return JSON.parse(txt); } catch (e) {
+      try { return JSON.parse(atob(txt)); } catch (e2) { return null; } // 1 số bản trả body base64
+    }
+  }
+
+  async function loadListViaApi(onProgress) {
+    const token = getToken();
+    if (!token) return { ok: false, error: 'Không lấy được access token' };
+    // các page đang kích hoạt — như app (state.pages.activatedMap)
+    let pageIds = [];
+    try {
+      const st = window.__pancakeReduxStore__.getState();
+      pageIds = Object.keys((st.pages && st.pages.activatedMap) || {});
+    } catch (e) { /* ignore */ }
+    if (!pageIds.length) return { ok: false, error: 'Không xác định được page đang bật' };
+
+    const rows = [];
+    const seen = new Set();
+    let cursor = null;
+    let pageCount = {};
+    let guard = 0;
+
+    while (guard++ < 300) {
+      const q = new URLSearchParams();
+      pageIds.forEach((p) => q.append('pages[' + p + ']', String(pageCount[p] || 0)));
+      if (rows.length) {
+        q.append('current_count', String(rows.length));
+        if (cursor) q.append('next_cursor', cursor);
+      }
+      q.append('unread_first', 'true');
+      q.append('mode', 'OR');
+      q.append('tags', JSON.stringify('ALL'));
+      q.append('except_tags', JSON.stringify([]));
+      q.append('access_token', token);
+      q.append('cursor_mode', 'true');
+      q.append('from_platform', 'web');
+
+      const j = await fetchJson(location.origin + '/api/v1/conversations?' + q.toString());
+      if (!j || j.success === false) return { ok: false, error: 'API danh sách trả lỗi ở trang ' + guard };
+      const convs = j.conversations || [];
+      convs.forEach((c) => {
+        const id = String(c.id || '');
+        if (!id || seen.has(id)) return;
+        seen.add(id);
+        rows.push(convApiRow(c, rows.length));
+      });
+      if (j.pages_with_current_count) pageCount = j.pages_with_current_count;
+      cursor = j.next_cursor || null;
+      if (onProgress) onProgress(rows.length);
+      if (!cursor || !convs.length) break;
+    }
+    return { ok: true, rows };
+  }
+
   /* ============================ QUÉT TOÀN BỘ DANH SÁCH ============================ */
 
   function getScroller() {
@@ -448,10 +548,51 @@
       return;
     }
     const btn = shadow && shadow.getElementById('ssb-scan');
+    const setBtn = (t) => { if (btn) btn.textContent = t; };
+
+    // 1) TẢI QUA API — siêu nhanh, không cuộn (đúng request app dùng để tải danh sách)
+    logLine('⚡ Đang tải danh sách qua API…');
+    setBtn('⏳ API…');
+    const api = await loadListViaApi((n) => setBtn('⏳ ' + n + ' chat…'));
+    if (api && api.ok && api.rows.length) {
+      // kiểm tra khớp với các dòng đang thấy trên màn hình:
+      //  - thiếu dòng nào → API khác màn hình → quét giao diện
+      //  - các dòng liền nhau trên màn hình mà lệch thứ tự xa trong API → có bộ lọc → quét giao diện
+      const vis = visibleRows();
+      const byId = new Map(api.rows.map((r) => [r.id, r]));
+      let missing = 0, scattered = 0;
+      for (let i = 0; i < vis.length; i++) {
+        if (!byId.has(vis[i].id)) missing++;
+        if (i > 0) {
+          const a = byId.get(vis[i - 1].id), b = byId.get(vis[i].id);
+          if (a && b && Math.abs(a.order - b.order) > 3) scattered++;
+        }
+      }
+      if (!vis.length || (missing === 0 && scattered <= 2)) {
+        const found = new Map(api.rows.map((r) => [r.id, { ...r }]));
+        // cập nhật tên/giờ/loại theo app cho các dòng đang thấy trên màn hình
+        vis.forEach((r) => {
+          if (found.has(r.id)) found.set(r.id, { ...found.get(r.id), ...r });
+        });
+        let ord = 0;
+        found.forEach((v) => { v.order = ord++; });
+        state.allRows = found;
+        setBtn('⚡ Tải danh sách (' + found.size + ' chat)');
+        logLine('⚡ Tải qua API: ' + found.size + ' chat — không cần cuộn');
+        computeMatches();
+        render();
+        return;
+      }
+      logLine('⚠ Danh sách API không khớp màn hình (có thể đang bật bộ lọc) — chuyển sang quét giao diện…');
+    } else {
+      logLine('⚠ ' + ((api && api.error) || 'Tải API thất bại') + ' — chuyển sang quét giao diện…');
+    }
+
+    // 2) QUÉT GIAO DIỆN (dự phòng) — luôn khớp đúng những gì đang thấy trên màn hình
     const savedTop = scroller.scrollTop;
     const found = new Map();
     let guard = 0;
-    logLine('⚡ Đang tải danh sách đoạn chat…');
+    logLine('⚡ Đang quét danh sách trên giao diện…');
 
     const collect = () => {
       let added = 0;
@@ -463,7 +604,6 @@
       });
       return added;
     };
-    const setBtn = (t) => { if (btn) btn.textContent = t; };
 
     scroller.scrollTop = 0;
     await sleep(150);
@@ -944,7 +1084,7 @@
       </style>
       <div class="wrap" id="ssb-wrap">
         <div class="head" id="ssb-head">
-          <span class="title">💬 Gửi 1 câu theo snippet <span style="color:#64748b;font-weight:400;font-size:11px">v1.10.0</span></span>
+          <span class="title">💬 Gửi 1 câu theo snippet <span style="color:#64748b;font-weight:400;font-size:11px">v1.11.0</span></span>
           <button class="badge on" id="ssb-toggle" title="Bật/tắt tính năng">BẬT</button>
           <button class="minibtn" id="ssb-min" title="Thu nhỏ">—</button>
         </div>
@@ -986,7 +1126,7 @@
           <div class="log" id="ssb-log"></div>
           <div class="hint">
             • <b>Alt+Click lần 1</b> = đầu chuỗi → <b>giữ Alt + nhấp lần 2</b> = cuối chuỗi: chọn tất cả chat ở giữa (chuỗi chọn). Nhấp lần 3 = bắt đầu chuỗi mới.<br>
-            • Bấm <b>“⚡ Tải danh sách”</b> khi cần quét toàn bộ chat (siêu nhanh) — script <b>không bao giờ tự cuộn</b> khi bạn không bấm; nên bấm1 lần để chọn chuỗi/so khớp chính xác khắp danh sách.<br>
+            • Bấm <b>“⚡ Tải danh sách”</b> để tải toàn bộ chat: <b>tải qua API trước (siêu nhanh, không cuộn)</b>, nếu API không khớp màn hình (đang bật bộ lọc) thì tự quét giao diện. Nên bấm 1 lần để chọn chuỗi/so khớp chính xác khắp danh sách.<br>
             • Hoặc bấm <b>“Lấy snippet từ chat đang chọn”</b> để gửi cho các chat cùng snippet. Bấm <b>“⬇ Từ đây xuống cuối”</b> để chọn tất cả chat từ chat đang mở trở xuống cuối danh sách.<br>
             • Dòng viền <b style="color:#22c55e">xanh lá</b> = sẽ được gửi; <b style="color:#3b82f6">xanh dương</b> = đầu/cuối chuỗi hoặc nguồn snippet.<br>
             • Chat gắn nhãn <b style="color:#f59e0b">[bình luận]</b> mặc định bỏ tick (reply_inbox không áp dụng cho bình luận).<br>
