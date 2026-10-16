@@ -88,7 +88,8 @@ Tự động tăng tốc: sau lần đầu API bị `(#10)`, các chat còn lạ
 kênh gửi thành công được **ghi nhớ** (session) nên lần gửi sau vào thẳng kênh đó. Log từng dòng ghi rõ
 kênh: `— đã gửi`, `— qua Socket`, `— qua Extension`.
 
-**Gửi kèm ảnh (📷 Chọn ảnh):** đúng chuỗi app dùng khi gửi ảnh — upload file lên `POST /v1/contents`
+**Gửi kèm ảnh (📷 Chọn ảnh / Ctrl+V):** chọn file ảnh, hoặc copy ảnh (screenshot, ảnh trên web…)
+rồi **Ctrl+V** dán thẳng vào trang — ảnh dán không có tên file sẽ tự đặt `clipboard.png`. Đúng chuỗi app dùng khi gửi ảnh — upload file lên `POST /v1/contents`
 (1 lần) → gắn attachment Facebook qua `POST /v1/pages/{p}/contents/facebook` (1 lần/page) →
 gửi qua **API** (`attachment_id` + `content_url`) hoặc **Extension** (`REPLY_INBOX_PHOTO`,
 `attachmentType:"PHOTO"`). Kênh gửi ảnh là **API → Extension** (Socket không hỗ trợ ảnh).

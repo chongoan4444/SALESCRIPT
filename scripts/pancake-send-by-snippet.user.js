@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE
 // @namespace    salescript
-// @version      1.17.0
+// @version      1.18.0
 // @description  BOTFAKE — chọn chuỗi chat (Alt+Click 2 đầu) hoặc theo snippet trong Pancake rồi gửi cùng 1 câu (kèm ảnh nếu muốn) cho tất cả.
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -1335,7 +1335,7 @@
       </style>
       <div class="wrap" id="ssb-wrap">
         <div class="head" id="ssb-head">
-          <span class="title">🤖 BOTFAKE <span style="color:#64748b;font-weight:400;font-size:11px">v1.17.0</span></span>
+          <span class="title">🤖 BOTFAKE <span style="color:#64748b;font-weight:400;font-size:11px">v1.18.0</span></span>
           <button class="badge on" id="ssb-toggle" title="Bật/tắt tính năng">BẬT</button>
           <button class="minibtn" id="ssb-close" title="Tắt panel (F5 hoặc Alt+Shift+B để hiện lại)">✕</button>
           <button class="minibtn" id="ssb-min" title="Thu nhỏ">—</button>
@@ -1367,7 +1367,7 @@
             <div class="row" style="align-items:center">
               <input type="file" id="ssb-img" accept="image/*" style="display:none">
               <button class="b b-gray" id="ssb-img-pick">📷 Chọn ảnh (tùy chọn)</button>
-              <span class="hint" id="ssb-img-info">Chưa chọn ảnh</span>
+              <span class="hint" id="ssb-img-info">Chưa chọn — copy ảnh rồi Ctrl+V để dán</span>
               <button class="b b-gray" id="ssb-img-clear" style="display:none">✕ Bỏ ảnh</button>
             </div>
             <div class="row" style="align-items:center">
@@ -1455,6 +1455,33 @@
     on('ssb-img-clear', 'click', () => {
       if (imgInput) imgInput.value = '';
       setImg(null);
+    });
+    // Ctrl+V: copy ảnh (screenshot, ảnh trên web…) rồi dán thẳng vào trang
+    document.addEventListener('paste', (e) => {
+      try {
+        const items = e.clipboardData && e.clipboardData.items;
+        if (!items) return;
+        // đang gõ trong ô nhập của app (composer/comment…) → để app tự xử lý, không cướp paste
+        const t = e.target;
+        const editable = t && (t.tagName === 'TEXTAREA' || t.tagName === 'INPUT' || t.isContentEditable);
+        if (editable && !(t && t.id === PANEL_ID)) return;
+        let file = null;
+        for (let i = 0; i < items.length; i++) {
+          const it = items[i];
+          if (it && it.kind === 'file' && it.type && it.type.indexOf('image/') === 0) {
+            file = it.getAsFile();
+            if (file) break;
+          }
+        }
+        if (!file) return; // clipboard không có ảnh → paste chữ bình thường
+        e.preventDefault();
+        if (!file.name) {
+          // bitmap copy (screenshot) thường không có tên file
+          try { file = new File([file], 'clipboard.png', { type: file.type || 'image/png' }); } catch (e2) { /* giữ file gốc */ }
+        }
+        setImg(file);
+        logLine('📷 Đã dán ảnh từ clipboard: ' + (file.name || 'ảnh'));
+      } catch (err) { /* ignore */ }
     });
     on('ssb-use-selected', 'click', () => {
       const info = selectedRowInfo();
