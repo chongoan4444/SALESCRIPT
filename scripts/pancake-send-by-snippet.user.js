@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE
 // @namespace    salescript
-// @version      1.18.0
+// @version      1.19.0
 // @description  BOTFAKE — chọn chuỗi chat (Alt+Click 2 đầu) hoặc theo snippet trong Pancake rồi gửi cùng 1 câu (kèm ảnh nếu muốn) cho tất cả.
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -263,7 +263,7 @@
       const old = before.get(r.id);
       list.push({
         ...r,
-        checked: old ? old.checked : (r.type !== 'comment'), // bình luận: mặc định bỏ tick (reply_inbox không áp dụng)
+        checked: old ? old.checked : (r.type !== 'comment'), // bình luận: mặc định bỏ tick (gửi = trả lời bình luận công khai)
         isTarget: !!markOf(r),
         mark: markOf(r),
       });
@@ -772,12 +772,176 @@
 
   /* ============================ GỬI TIN (API → EXTENSION → GIAO DIỆN) ============================ */
 
+  /* ============================ CHAT BÌNH LUẬN (type COMMENT) ============================
+     Chat bình luận KHÔNG gửi được reply_inbox (Facebook trả "(#551) Người này hiện không có mặt").
+     Đúng đường app dùng khi nhân viên bấm gửi trong chat bình luận (CommentSender trong _app):
+       - executeByApi:  POST …/conversations/{id}/messages  (JSON)
+                        { action:"reply_comment", message_id, parent_id, post_id, message, content_url? }
+                        hoặc action:"reply_post" khi chat = chính bài viết của khách
+       - executeByExtOnce: type "SEND_COMMENT" {pageId, fbPageId, postId, commentId, message, photoUrl?}
+     "message_id/parent_id" = bình luận của khách mới nhất — đúng bộ lọc sendToInbox trong _app. */
+
+  // Tên page + linked_fb_page (SEND_COMMENT cần currentPageName/linkedFbPage — lấy từ redux store trang)
+  function pageMeta(pageId) {
+    try {
+      const st = window.__pancakeReduxStore__ && window.__pancakeReduxStore__.getState();
+      const pages = st && st.pages;
+      const map = (pages && pages.activatedMap) || {};
+      const arr = (pages && pages.activated) || [];
+      const p = map[pageId] || arr.find((x) => x && x.id === pageId) || {};
+      return {
+        name: p.name || '',
+        fbPageId: (p.platform_extra_info && p.platform_extra_info.linked_fb_page) || null,
+      };
+    } catch (e) { return { name: '', fbPageId: null }; }
+  }
+
+  // Lấy bình luận của khách để trả lời — đúng request + bộ lọc của app (sendToInbox):
+  // GET …/conversations/{id}/messages?customer_id=…&user_view=true&is_new_api=true&separate_pos=true
+  // lọc: tin của khách (from ≠ page), chưa xóa, không SYSTEM_MESSAGE → lấy mới nhất
+  async function fetchCommentTarget(full, pageId, convId) {
+    const token = getToken();
+    if (!token) return null;
+    const customerId = (full.from && full.from.id) || '';
+    const url = apiBase() + '/v1/pages/' + pageId
+      + '/conversations/' + encodeURIComponent(convId)
+      + '/messages?customer_id=' + encodeURIComponent(customerId)
+      + '&access_token=' + encodeURIComponent(token)
+      + '&user_view=true&is_new_api=true&separate_pos=true';
+    const res = await fetchJson(url, 2);
+    if (!res.ok || !res.data) return null;
+    const j = res.data;
+    if (j.success === false) return null;
+    const msgs = j.messages || (j.data && j.data.messages) || [];
+    return msgs.slice().reverse().find((m) => m && m.from && m.from.id !== pageId
+      && !m.is_removed && m.type !== 'SYSTEM_MESSAGE') || null;
+  }
+
+  // Body đúng CommentSender.executeByApi (user_selected_reply_to: app bỏ qua khi không chọn sẵn)
+  function buildCommentBody(action, target, post, text, photo) {
+    const body = { action };
+    if (action === 'reply_comment') {
+      body.message_id = target.id;
+      body.parent_id = target.parent_id;
+    }
+    if (post && post.id) body.post_id = post.id;
+    body.message = text == null ? '' : text;
+    if (photo && photo.url) body.content_url = photo.url;
+    return body;
+  }
+
+  async function sendCommentViaApi(conv, text, photo) {
+    const token = getToken();
+    if (!token) {
+      return { ok: false, error: 'Không tìm thấy access_token — hãy tải lại trang Pancake rồi thử lại' };
+    }
+    const full = await getFullConversation(conv) || {};
+    const convId = full.id || conv.id;
+    const pageId = full.page_id || conv.pageId || String(conv.id).split('_')[0];
+    const post = full.post || (full.post_id ? { id: full.post_id } : null);
+    // CommentSender constructor: chat = chính bài viết của khách → "reply_post", không thì "reply_comment"
+    const action = (post && !post.admin_creator && post.from && String(post.id) === String(convId))
+      ? 'reply_post' : 'reply_comment';
+    let target = null;
+    if (action === 'reply_comment') {
+      target = await fetchCommentTarget(full, pageId, convId);
+      if (!target) {
+        return { ok: false, sent: false, error: 'Không tìm thấy bình luận của khách để trả lời' };
+      }
+    }
+    const body = buildCommentBody(action, target || {}, post, text, photo);
+    const url = apiBase() + '/v1/pages/' + pageId
+      + '/conversations/' + encodeURIComponent(convId)
+      + '/messages?access_token=' + encodeURIComponent(token);
+    try {
+      const res = await fetch(url, {
+        method: 'POST',
+        headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+        credentials: 'include',
+      });
+      let data = {};
+      let parsed = true;
+      try { data = await res.json(); } catch (e) { parsed = false; }
+      if (res.ok && data && data.success) {
+        return { ok: true, id: data.id || data.message_id || '', sendBy: 'api', sent: true };
+      }
+      if (res.status === 401 || res.status === 403) {
+        capturedToken = null;
+        return { ok: false, sent: false, error: 'Token hết hạn/không hợp lệ (' + res.status + ') — tải lại trang rồi thử lại' };
+      }
+      if ((res.ok && (!parsed || !data || data.success === undefined)) || res.status >= 500) {
+        return { ok: false, sent: 'maybe', error: 'API không trả kết quả rõ (' + res.status + ')' };
+      }
+      return {
+        ok: false,
+        sent: false,
+        error: (data && (data.message || data.error)) || ('HTTP ' + res.status),
+        code: data && data.message_code,
+      };
+    } catch (e) {
+      return { ok: false, sent: 'maybe', error: 'Lỗi mạng: ' + (e && e.message || e) };
+    }
+  }
+
+  // Fallback qua extension — đúng CommentSender.executeByExtOnce (type SEND_COMMENT)
+  async function sendCommentViaExtension(conv, text, photo) {
+    const adapter = window.__ExtensionAdapter__;
+    if (!adapter || typeof adapter.send !== 'function') {
+      return { ok: false, error: 'Không thấy Extension Pancake', skipExt: true };
+    }
+    try {
+      if (typeof adapter.checkConnection === 'function' && !adapter.checkConnection({ silent: true })) {
+        return { ok: false, error: 'Extension Pancake chưa kết nối', skipExt: true };
+      }
+    } catch (e) { /* cứ thử gửi */ }
+    const token = getToken();
+    if (!token) return { ok: false, error: 'Không tìm thấy access_token' };
+    const full = await getFullConversation(conv) || {};
+    const convId = full.id || conv.id;
+    const pageId = full.page_id || conv.pageId || String(conv.id).split('_')[0];
+    const post = full.post || (full.post_id ? { id: full.post_id } : null);
+    if (!post || !post.id) return { ok: false, sent: false, error: 'Chat không có post_id để trả lời bình luận' };
+    const target = await fetchCommentTarget(full, pageId, convId);
+    if (!target) return { ok: false, sent: false, error: 'Không tìm thấy bình luận của khách để trả lời' };
+    const meta = pageMeta(pageId);
+    const payload = {
+      type: 'SEND_COMMENT',
+      pageId,
+      fbPageId: meta.fbPageId,
+      // đúng cách app rút id dạng số từ post/bình luận (executeByExtOnce): last(part khi tách "_")
+      postId: String(post.id).split('_').pop(),
+      commentId: String(target.parent_id || target.id || '').split('_').pop(),
+      stickerId: null,
+      message: text,
+      mentions: null,
+      platform: 'facebook',
+      currentPageName: meta.name,
+      conversationId: convId,
+      accessToken: token,
+    };
+    if (photo && photo.url) payload.photoUrl = photo.url;
+    try {
+      const res = await adapter.send(payload, { timeout: 35000 });
+      if (res && res.success) {
+        return { ok: true, id: (res.data && (res.data.timestamp || res.data.id)) || '', sendBy: 'extension', sent: true };
+      }
+      if (res && res.success === false) {
+        return { ok: false, sent: false, error: 'Extension không gửi được' };
+      }
+      return { ok: false, sent: 'maybe', error: 'Extension không phản hồi' };
+    } catch (e) {
+      return { ok: false, sent: 'maybe', error: 'Extension lỗi: ' + (e && e.message || e) };
+    }
+  }
+
   // Đúng request mà _app-...js gửi khi nhắn tin thường (executeByApi + buildRequestBody):
   //   POST /api/v1/pages/{page_id}/conversations/{conversation.id}/messages?access_token=...
   //   multipart/form-data: action=reply_inbox, message=<text>
   // Nếu server từ chối dạng "(#10) ... ứng dụng khác đang kiểm soát thread" (Facebook handover)
   // thì app tự fallback sang extension — mình làm đúng như vậy ở sendSmart().
   async function sendViaApi(conv, text, photo) {
+    if (conv.type === 'comment') return sendCommentViaApi(conv, text, photo); // chat bình luận → reply_comment
     const token = getToken();
     if (!token) {
       return { ok: false, error: 'Không tìm thấy access_token — hãy tải lại trang Pancake rồi thử lại' };
@@ -949,6 +1113,7 @@
 
   // Gửi qua extension Pancake (đường app dùng khi API bị "(#10)" — executeByExtOnce, type REPLY_INBOX_PHOTO)
   async function sendViaExtension(conv, text, photo) {
+    if (conv.type === 'comment') return sendCommentViaExtension(conv, text, photo); // chat bình luận → SEND_COMMENT
     const adapter = window.__ExtensionAdapter__;
     if (!adapter || typeof adapter.send !== 'function') {
       return { ok: false, error: 'Không thấy Extension Pancake', skipExt: true };
@@ -1079,7 +1244,8 @@
       ext: () => sendViaExtension(conv, text, photo),
     };
     // ảnh: socket không hỗ trợ → api → ext
-    const order = photo ? ['api', 'ext'] : ['api', 'socket', 'ext'];
+    const order = photo ? ['api', 'ext']
+      : (conv.type === 'comment' ? ['api', 'ext'] : ['api', 'socket', 'ext']); // bình luận: không có thread messenger
     const hint = channelHints[conv.id];
     let seq = (hint && order.indexOf(hint) > -1)
       ? [hint].concat(order.filter((x) => x !== hint))
@@ -1134,7 +1300,7 @@
       + (targets.length > MAX_NAME_LIST ? ', …' : '');
     const nComment = targets.filter((m) => m.type === 'comment').length;
     const warnComment = nComment
-      ? '\n\n⚠ Trong đó ' + nComment + ' chat loại BÌNH LUẬN — API reply_inbox có thể không áp dụng cho các chat này!'
+      ? '\n\n⚠ Trong đó ' + nComment + ' chat loại BÌNH LUẬN — sẽ gửi dưới dạng TRẢ LỜI BÌNH LUẬN (công khai dưới bài viết)!'
       : '';
     const imgNote = imgState ? '\n\n📷 Kèm ảnh: ' + (imgState.name || 'ảnh') : '';
     if (!confirm('Gửi ' + (text ? '1 câu' : 'ảnh') + ' tới ' + targets.length + ' đoạn chat đã chọn?\n\n“'
@@ -1335,7 +1501,7 @@
       </style>
       <div class="wrap" id="ssb-wrap">
         <div class="head" id="ssb-head">
-          <span class="title">🤖 BOTFAKE <span style="color:#64748b;font-weight:400;font-size:11px">v1.18.0</span></span>
+          <span class="title">🤖 BOTFAKE <span style="color:#64748b;font-weight:400;font-size:11px">v1.19.0</span></span>
           <button class="badge on" id="ssb-toggle" title="Bật/tắt tính năng">BẬT</button>
           <button class="minibtn" id="ssb-close" title="Tắt panel (F5 hoặc Alt+Shift+B để hiện lại)">✕</button>
           <button class="minibtn" id="ssb-min" title="Thu nhỏ">—</button>
@@ -1655,7 +1821,7 @@
                 : m.mark === 'end' ? ' <span style="color:#3b82f6">(cuối chuỗi)</span>'
                 : m.mark === 'target' ? ' <span style="color:#3b82f6">(nguồn snippet)</span>' : ''
               }${
-                m.type === 'comment' ? ' <span style="color:#f59e0b" title="Bình luận bài viết — reply_inbox có thể không áp dụng; mặc định bỏ tick">[bình luận]</span>'
+                m.type === 'comment' ? ' <span style="color:#f59e0b" title="Bình luận bài viết — gửi bằng TRẢ LỜI BÌNH LUẬN công khai; mặc định bỏ tick">[bình luận]</span>'
                 : (m.type === 'inbox' ? '' : ' <span style="color:#64748b" title="Không xác định loại">[?]</span>')
               }</span><br>
               <span class="sn">${esc(clip(m.snippetRaw || m.snippet, 90))}</span>

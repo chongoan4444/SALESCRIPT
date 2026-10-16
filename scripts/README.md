@@ -105,8 +105,11 @@ Không tải được ảnh thì **HỦY gửi** — không bao giờ gửi thi�
   Nếu API bị chặn (lỗi `#10` do bot/app khác giữ quyền thread), script tự chuyển sang gửi qua
   **Socket** (đúng đường gửi tay — nhanh), rồi **Extension Pancake**. Tin không gửi được qua cả 3 kênh
   sẽ báo lỗi trong log — script **không nhảy vào từng chat để gửi tay** nữa.
-- Đoạn chat loại **COMMENT** (bình luận bài viết) có thể bị API từ chối với `reply_inbox`;
-  chat nào lỗi sẽ hiện rõ trong log (thường chỉ gặp với chat Inbox là mượt).
+- Đoạn chat loại **COMMENT** (bình luận bài viết) được gửi bằng **cơ chế riêng của app** —
+  `action=reply_comment` (trả lời bình luận mới nhất của khách, công khai dưới bài viết) hoặc
+  `action=reply_post`, fallback qua Extension (`SEND_COMMENT`) — **không** dùng `reply_inbox`
+  (Facebook từ chối `(#551) Người này hiện không có mặt` với chat bình luận). Mặc định các chat
+  này bị bỏ tick — muốn gửi thì tự tick chọn; hộp xác nhận sẽ ghi rõ "TRẢ LỜI BÌNH LUẬN".
 - Nếu log báo **token hết hạn** → tải lại trang Pancake rồi chạy lại (token mới được script tự bắt).
 - Nên chạy với 1 tab Pancake; đừng gửi quá nhanh (để nguyên giãn cách ≥ 1000 ms) để tránh bị Facebook
   chặn do spam.
