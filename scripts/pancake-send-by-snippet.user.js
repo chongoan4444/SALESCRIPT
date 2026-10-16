@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Pancake – Gửi 1 câu cho các đoạn chat cùng snippet
 // @namespace    salescript
-// @version      1.16.0
+// @version      1.16.1
 // @description  Chọn chuỗi chat (Alt+Click 2 đầu) hoặc chọn theo snippet trong danh sách Pancake rồi gửi cùng 1 câu cho tất cả.
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -469,13 +469,36 @@
     };
   }
 
-  async function fetchJson(url) {
-    const r = await fetch(url, { credentials: 'include' });
-    if (!r.ok) return null;
-    let txt = await r.text();
-    try { return JSON.parse(txt); } catch (e) {
-      try { return JSON.parse(atob(txt)); } catch (e2) { return null; } // 1 số bản trả body base64
+  // GET an toàn: tự thử lại khi bị rate-limit (429)/5xx/lỗi mạng; trả lỗi kèm chi tiết
+  async function fetchJson(url, tries) {
+    const max = tries || 3;
+    let lastErr = '';
+    for (let t = 1; t <= max; t++) {
+      try {
+        const r = await fetch(url, { credentials: 'include', cache: 'no-store' });
+        if (r.status === 429 || r.status >= 500) {
+          lastErr = 'HTTP ' + r.status;
+          if (t < max) { await sleep(800 * t); continue; }
+          return { ok: false, error: lastErr };
+        }
+        if (!r.ok) {
+          const body = (await r.text() || '').slice(0, 140);
+          return { ok: false, error: 'HTTP ' + r.status + (body ? ' · ' + body : '') };
+        }
+        const txt = await r.text();
+        if (!txt || !txt.trim()) return { ok: true, data: { conversations: [] } }; // body rỗng = hết dữ liệu
+        try { return { ok: true, data: JSON.parse(txt) }; } catch (e) {
+          try { return { ok: true, data: JSON.parse(atob(txt)) }; } catch (e2) {
+            return { ok: false, error: 'Phản hồi không phải JSON' };
+          }
+        }
+      } catch (e) {
+        lastErr = 'Lỗi mạng: ' + (e && e.message || e);
+        if (t < max) { await sleep(800 * t); continue; }
+        return { ok: false, error: lastErr };
+      }
     }
+    return { ok: false, error: lastErr || 'Không tải được' };
   }
 
   // Đọc tham số danh sách GIỐNG app (eU → buildConversationsRequest trong bundle):
@@ -574,8 +597,12 @@
       }
       if (!ids.length) return { ok: false, error: 'Không xác định được page đang xem' };
 
-      const j = await fetchJson(url);
-      if (!j || j.success === false) return { ok: false, error: 'API danh sách trả lỗi ở trang ' + guard };
+      const res = await fetchJson(url, 3);
+      if (!res.ok) return { ok: false, error: 'API danh sách lỗi trang ' + guard + ': ' + res.error };
+      const j = res.data || {};
+      if (j.success === false) {
+        return { ok: false, error: 'API danh sách lỗi trang ' + guard + ': ' + (j.message || j.error || 'success=false') };
+      }
       const convs = j.conversations || [];
       convs.forEach((c) => {
         const id = String(c.id || '');
@@ -583,10 +610,14 @@
         seen.add(id);
         rows.push(convApiRow(c, rows.length));
       });
-      if (j.pages_with_current_count) pageCount = j.pages_with_current_count;
+      // GỘP DỒN số đếm theo page (server cần số luỹ kế — ghi đè sẽ hỏng từ trang sau)
+      if (j.pages_with_current_count && typeof j.pages_with_current_count === 'object') {
+        pageCount = Object.assign({}, pageCount, j.pages_with_current_count);
+      }
       cursor = j.next_cursor || null;
       if (onProgress) onProgress(rows.length);
       if (!cursor || !convs.length) break;
+      await sleep(120); // nghỉ nhẹ giữa các trang — tránh bị rate-limit
     }
     return { ok: true, rows };
   }
@@ -1201,7 +1232,7 @@
       </style>
       <div class="wrap" id="ssb-wrap">
         <div class="head" id="ssb-head">
-          <span class="title">💬 Gửi 1 câu theo snippet <span style="color:#64748b;font-weight:400;font-size:11px">v1.16.0</span></span>
+          <span class="title">💬 Gửi 1 câu theo snippet <span style="color:#64748b;font-weight:400;font-size:11px">v1.16.1</span></span>
           <button class="badge on" id="ssb-toggle" title="Bật/tắt tính năng">BẬT</button>
           <button class="minibtn" id="ssb-close" title="Tắt panel (F5 hoặc Alt+Shift+B để hiện lại)">✕</button>
           <button class="minibtn" id="ssb-min" title="Thu nhỏ">—</button>
