@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Pancake – Gửi 1 câu cho các đoạn chat cùng snippet
 // @namespace    salescript
-// @version      1.9.0
+// @version      1.9.1
 // @description  Chọn chuỗi chat (Alt+Click 2 đầu) hoặc chọn theo snippet trong danh sách Pancake rồi gửi cùng 1 câu cho tất cả.
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -944,7 +944,7 @@
       </style>
       <div class="wrap" id="ssb-wrap">
         <div class="head" id="ssb-head">
-          <span class="title">💬 Gửi 1 câu theo snippet</span>
+          <span class="title">💬 Gửi 1 câu theo snippet <span style="color:#64748b;font-weight:400;font-size:11px">v1.9.1</span></span>
           <button class="badge on" id="ssb-toggle" title="Bật/tắt tính năng">BẬT</button>
           <button class="minibtn" id="ssb-min" title="Thu nhỏ">—</button>
         </div>
@@ -972,7 +972,9 @@
             <div class="label">3) Câu cần gửi</div>
             <textarea id="ssb-msg" placeholder="Nhập 1 câu sẽ gửi cho tất cả đoạn chat ở trên…"></textarea>
             <div class="row" style="align-items:center">
-              <span class="hint">Gửi theo lượt: ≤100 tin → 1 lượt; &gt;100 tin → 200 tin/lượt, cách nhau 500ms</span>
+              <span class="hint">Số tin mỗi lượt:</span>
+              <input type="number" id="ssb-wave" value="200" min="1" step="50" style="width:84px">
+              <span class="hint">— các lượt cách nhau 500ms</span>
             </div>
             <div class="row" style="align-items:center">
               <button class="b b-green" id="ssb-send" style="margin-left:auto">Gửi 1 câu cho tất cả</button>
