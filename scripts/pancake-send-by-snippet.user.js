@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Pancake – Gửi 1 câu cho các đoạn chat cùng snippet
 // @namespace    salescript
-// @version      1.11.0
+// @version      1.12.0
 // @description  Chọn chuỗi chat (Alt+Click 2 đầu) hoặc chọn theo snippet trong danh sách Pancake rồi gửi cùng 1 câu cho tất cả.
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -958,17 +958,30 @@
       : '🚀 Bắt đầu gửi ' + targets.length + ' chat (1 lượt — ' + WAVE_SIZE + ' tin/lượt)…');
 
     let ok = 0, fail = 0, done = 0;
+    const failedList = [];
 
-    const sendOneAndLog = async (c) => {
+    const sendOneAndLog = async (c, retry) => {
       const r = await sendOne(c, text);
+      const via = r.ok ? (r.sendBy === 'socket' ? ' — qua Socket'
+        : r.sendBy === 'extension' ? ' — qua Extension' : '') : '';
+      if (retry) {
+        // lượt gửi lại: chỉ gửi lại 1 lần — fail lần 2 thì chịu
+        if (r.ok) {
+          ok++;
+          fail = Math.max(0, fail - 1);
+          logLine('✅ [gửi lại] ' + (c.name || c.id) + ' — đã gửi' + via);
+        } else {
+          logLine('❌ [gửi lại] ' + (c.name || c.id) + ' — ' + r.error);
+        }
+        return r;
+      }
       done++;
       if (r.ok) {
         ok++;
-        const via = r.sendBy === 'socket' ? ' — qua Socket'
-          : r.sendBy === 'extension' ? ' — qua Extension' : '';
         logLine('✅ [' + done + '/' + targets.length + '] ' + (c.name || c.id) + ' — đã gửi' + via);
       } else {
         fail++;
+        failedList.push(c);
         logLine('❌ [' + done + '/' + targets.length + '] ' + (c.name || c.id) + ' — ' + r.error);
       }
       setProgress(done, targets.length);
@@ -976,10 +989,10 @@
     };
 
     // 1 lượt = bắn song song toàn bộ số tin trong lượt
-    const sendBatch = async (batch) => {
+    const sendBatch = async (batch, retry) => {
       await runPool(batch, async (c) => {
         if (state.stopRequested) return null;
-        const r = await sendOneAndLog(c);
+        const r = await sendOneAndLog(c, retry);
         if (!r.ok && r.error && r.error.indexOf('Token') === 0) {
           logLine('⛔ Dừng sớm vì token không còn hợp lệ.');
           state.stopRequested = true;
@@ -988,18 +1001,29 @@
       }, Math.max(1, batch.length));
     };
 
-    if (useWaves) {
-      const totalWaves = Math.ceil(targets.length / WAVE_SIZE);
-      for (let i = 0; i < targets.length && !state.stopRequested; i += WAVE_SIZE) {
-        await sendBatch(targets.slice(i, i + WAVE_SIZE));
-        const waveNo = Math.ceil(Math.min(i + WAVE_SIZE, targets.length) / WAVE_SIZE);
-        if (i + WAVE_SIZE < targets.length && !state.stopRequested) {
+    const runWaves = async (list, retry) => {
+      const totalWaves = Math.ceil(list.length / WAVE_SIZE);
+      for (let i = 0; i < list.length && !state.stopRequested; i += WAVE_SIZE) {
+        await sendBatch(list.slice(i, i + WAVE_SIZE), retry);
+        const waveNo = Math.ceil(Math.min(i + WAVE_SIZE, list.length) / WAVE_SIZE);
+        if (i + WAVE_SIZE < list.length && !state.stopRequested) {
           logLine('🌊 Lượt ' + waveNo + '/' + totalWaves + ' xong (' + done + ' tin) — nghỉ ' + WAVE_GAP + 'ms rồi lượt tiếp…');
           await sleep(WAVE_GAP);
         }
       }
-    } else {
-      await sendBatch(targets);
+    };
+
+    if (useWaves) await runWaves(targets, false);
+    else await sendBatch(targets, false);
+
+    // Gửi lại 1 lần các tin báo thất bại (nếu có)
+    if (failedList.length && !state.stopRequested) {
+      const retryTargets = failedList.slice();
+      failedList.length = 0;
+      logLine('🔄 Gửi lại ' + retryTargets.length + ' tin thất bại (1 lần)…');
+      await runWaves(retryTargets, true);
+      if (fail > 0) logLine('🔄 Gửi lại xong — vẫn còn ' + fail + ' tin không gửi được.');
+      else logLine('🔄 Gửi lại xong — tất cả đã thành công.');
     }
 
     state.sending = false;
@@ -1078,13 +1102,14 @@
         .log { background: #0b1220; border: 1px solid #334155; border-radius: 8px; padding: 8px;
                max-height: 150px; overflow: auto; font-size: 10.5px; line-height: 1.55; color: #cbd5e1;
                white-space: pre-wrap; word-break: break-word; }
+        .log.big { max-height: 420px; }
         .hint { color: #64748b; font-size: 10px; line-height: 1.5; }
         .empty { color: #64748b; padding: 10px; text-align: center; }
         .count { color: #38bdf8; font-weight: 700; }
       </style>
       <div class="wrap" id="ssb-wrap">
         <div class="head" id="ssb-head">
-          <span class="title">💬 Gửi 1 câu theo snippet <span style="color:#64748b;font-weight:400;font-size:11px">v1.11.0</span></span>
+          <span class="title">💬 Gửi 1 câu theo snippet <span style="color:#64748b;font-weight:400;font-size:11px">v1.12.0</span></span>
           <button class="badge on" id="ssb-toggle" title="Bật/tắt tính năng">BẬT</button>
           <button class="minibtn" id="ssb-min" title="Thu nhỏ">—</button>
         </div>
@@ -1122,6 +1147,10 @@
               <button class="b b-red" id="ssb-stop" disabled>Dừng</button>
             </div>
           </div>
+          <div class="row" style="align-items:center;justify-content:space-between">
+            <span class="label">LOG</span>
+            <button class="minibtn" id="ssb-logzoom" title="Phóng to / thu nhỏ bảng log">⛶ Phóng to log</button>
+          </div>
           <div class="prog"><i id="ssb-bar"></i></div>
           <div class="log" id="ssb-log"></div>
           <div class="hint">
@@ -1132,7 +1161,7 @@
             • Chat gắn nhãn <b style="color:#f59e0b">[bình luận]</b> mặc định bỏ tick (reply_inbox không áp dụng cho bình luận).<br>
             • Gửi qua API <code style="color:#94a3b8">POST /v1/pages/.../messages</code> (action=reply_inbox) — đúng request website tự dùng, không cần mở từng chat.<br>
             • Nếu API bị chặn <code style="color:#94a3b8">(#10) app khác kiểm soát thread</code> → tự gửi tiếp qua <b>Socket</b> (đúng đường gửi tay của app), rồi <b>Extension</b> — log ghi rõ kênh đã gửi. Kênh tốt được ghi nhớ cho lần sau.<br>
-            • <b>Chỉ gửi hàng loạt theo lượt</b>: chỉnh <b>“Số tin mỗi lượt”</b> (mặc định 200) — các lượt cách nhau <b>500ms</b>. Số tin ≤ số/lượt thì gửi 1 lượt. Không còn cơ chế gửi từng con qua giao diện.
+            • <b>Chỉ gửi hàng loạt theo lượt</b>: chỉnh <b>“Số tin mỗi lượt”</b> (mặc định 200) — các lượt cách nhau <b>500ms</b>. Số tin ≤ số/lượt thì gửi 1 lượt. Không còn cơ chế gửi từng con qua giao diện. Tin báo ❌ sẽ được <b>tự gửi lại 1 lần</b> khi chạy xong.<br>
           </div>
         </div>
       </div>
@@ -1156,6 +1185,13 @@
     on('ssb-min', 'click', () => {
       const body = root.getElementById('ssb-body');
       body.style.display = body.style.display === 'none' ? 'flex' : 'none';
+    });
+    on('ssb-logzoom', 'click', () => {
+      const el = root.getElementById('ssb-log');
+      const btn = root.getElementById('ssb-logzoom');
+      if (!el) return;
+      const big = el.classList.toggle('big');
+      if (btn) btn.textContent = big ? '🗕 Thu nhỏ log' : '⛶ Phóng to log';
     });
     on('ssb-use-selected', 'click', () => {
       const info = selectedRowInfo();
