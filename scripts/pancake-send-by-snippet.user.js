@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Pancake – Gửi 1 câu cho các đoạn chat cùng snippet
 // @namespace    salescript
-// @version      1.14.0
+// @version      1.14.1
 // @description  Chọn chuỗi chat (Alt+Click 2 đầu) hoặc chọn theo snippet trong danh sách Pancake rồi gửi cùng 1 câu cho tất cả.
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -1182,15 +1182,16 @@
         .log { background: #0b1220; border: 1px solid #334155; border-radius: 8px; padding: 8px;
                max-height: 150px; overflow: auto; font-size: 10.5px; line-height: 1.55; color: #cbd5e1;
                white-space: pre-wrap; word-break: break-word; }
-        .log.big { height: 420px; max-height: 420px; }
-        .wrap.logbig .body { max-height: 84vh; }
+        .log.big { position: fixed; left: 24px; top: 10vh; width: min(640px, 62vw); height: 72vh;
+                   max-height: none; z-index: 2147483646; font-size: 12px; line-height: 1.6;
+                   box-shadow: 0 12px 40px rgba(0,0,0,.55); }
         .hint { color: #64748b; font-size: 10px; line-height: 1.5; }
         .empty { color: #64748b; padding: 10px; text-align: center; }
         .count { color: #38bdf8; font-weight: 700; }
       </style>
       <div class="wrap" id="ssb-wrap">
         <div class="head" id="ssb-head">
-          <span class="title">💬 Gửi 1 câu theo snippet <span style="color:#64748b;font-weight:400;font-size:11px">v1.14.0</span></span>
+          <span class="title">💬 Gửi 1 câu theo snippet <span style="color:#64748b;font-weight:400;font-size:11px">v1.14.1</span></span>
           <button class="badge on" id="ssb-toggle" title="Bật/tắt tính năng">BẬT</button>
           <button class="minibtn" id="ssb-close" title="Tắt panel (F5 hoặc Alt+Shift+B để hiện lại)">✕</button>
           <button class="minibtn" id="ssb-min" title="Thu nhỏ">—</button>
@@ -1271,10 +1272,9 @@
     on('ssb-logzoom', 'click', () => {
       const el = root.getElementById('ssb-log');
       const btn = root.getElementById('ssb-logzoom');
-      const wrap = root.getElementById('ssb-wrap');
       if (!el) return;
+      // bật: bảng log tách ra thành cửa sổ lớn nổi trên trang — panel giữ nguyên
       const big = el.classList.toggle('big');
-      if (wrap) wrap.classList.toggle('logbig', big); // nới panel để thấy hết khung log
       if (btn) btn.textContent = big ? '🗕 Thu nhỏ log' : '⛶ Phóng to log';
     });
     on('ssb-close', 'click', () => {

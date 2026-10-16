@@ -73,7 +73,7 @@ Không dùng selector bịa: mọi class/id/đường API ở trên đều lấy
 **Không còn cơ chế gửi từng con** (đã bỏ gửi tuần tự và tầng giao diện “nhảy vào từng chat”).
 Gửi theo lượt: chỉnh **“Số tin mỗi lượt”** ngay trên panel (mặc định **200 tin/lượt**, các lượt cách
 nhau **500ms**; số tin ≤ số/lượt thì gửi 1 lượt). Mỗi lượt bắn song song toàn bộ. Bấm
-**“⛶ Phóng to log”** để mở rộng bảng log (khung log cao cố định 420px, panel tự nới thêm);
+**“⛶ Phóng to log”** để bung bảng log thành **cửa sổ lớn nổi trên trang** (không làm panel cao thêm);
 bấm **“🗕 Thu nhỏ log”** để thu về. Nút **✕** trên tiêu đề panel để tắt hẳn panel —
 **F5** (hoặc **Alt+Shift+B**) để hiện lại.
 
