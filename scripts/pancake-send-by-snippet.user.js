@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE
 // @namespace    salescript
-// @version      1.19.0
+// @version      1.20.0
 // @description  BOTFAKE — chọn chuỗi chat (Alt+Click 2 đầu) hoặc theo snippet trong Pancake rồi gửi cùng 1 câu (kèm ảnh nếu muốn) cho tất cả.
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -772,6 +772,62 @@
 
   /* ============================ GỬI TIN (API → EXTENSION → GIAO DIỆN) ============================ */
 
+  // Đọc conversation từ redux store của trang (KHÔNG gọi mạng) — có đủ last_customer_interactive_at, customers…
+  function peekConv(conv) {
+    try {
+      const st = window.__pancakeReduxStore__ && window.__pancakeReduxStore__.getState();
+      const list = st && st.conversations && st.conversations.data;
+      if (Array.isArray(list)) {
+        const found = list.find((c) => c && c.id === conv.id);
+        if (found) return found;
+      }
+    } catch (e) { /* ignore */ }
+    return null;
+  }
+
+  // Cờ is_record_ctx_7_days — đúng điều kiện hàm dr() trong _app (gửi ngoài cửa sổ 24h
+  // cho khách từ quảng cáo trong 7 ngày, page phải bật platform_extra_info.ctx_7_days_enabled):
+  //  1) khách ≥1 ngày không tương tác (hoặc không rõ thời điểm)
+  //  2) page bật ctx_7_days_enabled
+  //  3) khách có ad_clicks (click quảng cáo) mới nhất ≤7 ngày
+  function isRecordCtx7Days(full) {
+    try {
+      if (!full) return false;
+      const st = window.__pancakeReduxStore__ && window.__pancakeReduxStore__.getState();
+      if (!st) return false;
+      const idle = full.last_customer_interactive_at;
+      if (idle) {
+        const t = Date.parse(/[zZ+]|\+\d{2}:?\d{2}$/.test(idle) ? idle : idle + 'Z');
+        if (!isNaN(t) && (Date.now() - t) < 86400000) return false; // mới tương tác <1 ngày
+      }
+      const pages = st.pages || {};
+      const map = pages.activatedMap || {};
+      const arr = pages.activated || [];
+      const p = map[full.page_id] || arr.find((x) => x && x.id === full.page_id);
+      if (!p || !p.platform_extra_info || !p.platform_extra_info.ctx_7_days_enabled) return false;
+      let clicks = null;
+      const mc = st.messages && st.messages.customers;
+      const custId = (full.customers && full.customers[0] && full.customers[0].id) || (full.from && full.from.id);
+      const custFb = full.from && full.from.id;
+      if (Array.isArray(mc)) {
+        const c = mc.find((x) => x && (x.id === custId || x.id === custFb || x.fb_id === custFb));
+        if (c && Array.isArray(c.ad_clicks)) clicks = c.ad_clicks;
+      }
+      if (!clicks && full.customers && full.customers[0] && Array.isArray(full.customers[0].ad_clicks)) {
+        clicks = full.customers[0].ad_clicks;
+      }
+      if (!clicks || !clicks.length) return false;
+      let latest = 0;
+      clicks.forEach((x) => {
+        if (!x || !x.inserted_at) return;
+        if (!['ads', null, undefined].includes(x.type)) return;
+        const t = Date.parse(/[zZ+]|\+\d{2}:?\d{2}$/.test(x.inserted_at) ? x.inserted_at : x.inserted_at + 'Z');
+        if (!isNaN(t) && t > latest) latest = t;
+      });
+      return !!latest && (Date.now() - latest) <= 7 * 86400000;
+    } catch (e) { return false; }
+  }
+
   /* ============================ CHAT BÌNH LUẬN (type COMMENT) ============================
      Chat bình luận KHÔNG gửi được reply_inbox (Facebook trả "(#551) Người này hiện không có mặt").
      Đúng đường app dùng khi nhân viên bấm gửi trong chat bình luận (CommentSender trong _app):
@@ -953,6 +1009,8 @@
     const fd = new FormData();
     fd.append('action', 'reply_inbox');
     fd.append('message', text);
+    // cờ is_record_ctx_7_days (dr() trong _app) — cửa sổ quảng cáo 7 ngày cho khách từ ads
+    if (isRecordCtx7Days(peekConv(conv) || conv)) fd.append('is_record_ctx_7_days', 'true');
     if (photo && photo.fbId) {
       // đúng field khi gửi ảnh qua API (buildRequestBody — case PHOTO, facebook, 1 ảnh)
       fd.append('attachment_id', photo.fbId);
@@ -1058,11 +1116,12 @@
     } catch (e) { /* ignore */ }
     if (typeof window.findGlobalIdForConv === 'function' && threadId) {
       try {
+        // đúng tham số app gửi cho GET_GLOBAL_ID_FOR_CONV (concurrentlyGetGLobalId trong _app)
         const gid = await window.findGlobalIdForConv({
           pageId: full.page_id,
           threadId,
           threadKey: full.thread_key || null,
-          isBusiness: false,
+          isBusiness: true,
           conversationUpdatedTime: Date.parse(String(full.updated_at || '') + 'Z'),
           customerName: (full.from && (full.from.username || full.from.name)) || '',
           convType: 'INBOX',
@@ -1143,6 +1202,14 @@
     const globalUserId = gid || null;
 
     const token = getToken();
+    // ảnh gửi qua Extension: app upload attachment MỚI với reusable=false (executeByExtOnce)
+    // — KHÔNG dùng lại attachment reusable=true (FB web từ chối → "Extension không gửi được")
+    let files;
+    if (photo) {
+      const up = await uploadPhotoForPage(full.page_id || conv.pageId, photo, { reusable: false });
+      if (!up.ok) return { ok: false, sent: false, error: 'Không gắn được ảnh cho Extension (' + up.error + ')' };
+      files = [up.fbId];
+    }
     const payload = {
       pageId: full.page_id || conv.pageId,
       igPageId: null,
@@ -1155,16 +1222,17 @@
       globalUserId,
       platform: 'facebook',
       replyMessage: null,
-      files: photo && photo.fbId ? [photo.fbId] : null,
       threadId,
       convId: full.thread_key || null,
       customerName: (full.from && (full.from.username || full.from.name)) || '',
-      photoUrl: photo ? photo.url : null,
       isIGD: false,
       conversationUpdatedTime: Date.parse(String(full.updated_at || '') + 'Z'),
       photoUrls: photo ? [photo.url] : [],
       isBusiness: false,
     };
+    // đúng shape app: chỉ có files/photoUrl khi gửi ảnh (text-only: app để undefined → bỏ key)
+    if (files) payload.files = files;
+    if (photo) payload.photoUrl = photo.url;
     try {
       const res = await adapter.send(payload, { timeout: 35000 });
       if (res && res.success) {
@@ -1208,15 +1276,23 @@
     }
   }
 
-  async function uploadPhotoForPage(pageId, photo) {
+  // Đúng hàm N (upload gắn attachment) trong _app:
+  //   POST /v1/pages/{p}/contents/facebook?access_token=…&is_reusable={reusable}&async=false
+  //   body: content_ids=[contentId] (hoặc urls), thêm conv_id khi có
+  //   → { fb_ids }  — app: đường API dùng reusable=true, đường Extension dùng reusable=false (mới 100%)
+  async function uploadPhotoForPage(pageId, photo, opts) {
+    const o = opts || {};
+    const reusable = o.reusable !== false;
     const token = getToken();
     if (!token) return { ok: false, error: 'Không có access token' };
     try {
       const fd = new FormData();
       if (photo.id) fd.append('content_ids', JSON.stringify([photo.id]));
       else fd.append('urls', JSON.stringify([photo.url]));
+      if (o.convId) fd.append('conv_id', String(o.convId));
       const res = await fetch(apiBase() + '/v1/pages/' + pageId
-        + '/contents/facebook?access_token=' + encodeURIComponent(token) + '&is_reusable=true&async=false', {
+        + '/contents/facebook?access_token=' + encodeURIComponent(token)
+        + '&is_reusable=' + (reusable ? 'true' : 'false') + '&async=false', {
         method: 'POST', body: fd, credentials: 'include', headers: { Accept: 'application/json' },
       });
       const j = await res.json().catch(() => null);
@@ -1501,7 +1577,7 @@
       </style>
       <div class="wrap" id="ssb-wrap">
         <div class="head" id="ssb-head">
-          <span class="title">🤖 BOTFAKE <span style="color:#64748b;font-weight:400;font-size:11px">v1.19.0</span></span>
+          <span class="title">🤖 BOTFAKE <span style="color:#64748b;font-weight:400;font-size:11px">v1.20.0</span></span>
           <button class="badge on" id="ssb-toggle" title="Bật/tắt tính năng">BẬT</button>
           <button class="minibtn" id="ssb-close" title="Tắt panel (F5 hoặc Alt+Shift+B để hiện lại)">✕</button>
           <button class="minibtn" id="ssb-min" title="Thu nhỏ">—</button>
