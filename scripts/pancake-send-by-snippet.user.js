@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE
 // @namespace    salescript
-// @version      1.20.0
+// @version      1.21.0
 // @description  BOTFAKE — chọn chuỗi chat (Alt+Click 2 đầu) hoặc theo snippet trong Pancake rồi gửi cùng 1 câu (kèm ảnh nếu muốn) cho tất cả.
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -855,7 +855,9 @@
   // Lấy bình luận của khách để trả lời — đúng request + bộ lọc của app (sendToInbox):
   // GET …/conversations/{id}/messages?customer_id=…&user_view=true&is_new_api=true&separate_pos=true
   // lọc: tin của khách (from ≠ page), chưa xóa, không SYSTEM_MESSAGE → lấy mới nhất
-  async function fetchCommentTarget(full, pageId, convId) {
+  async function fetchCommentTarget(full, pageId, convId, ctx) {
+    ctx = ctx || {};
+    if (ctx.targetLoaded) return ctx.target || null;
     const token = getToken();
     if (!token) return null;
     const customerId = (full.from && full.from.id) || '';
@@ -869,8 +871,11 @@
     const j = res.data;
     if (j.success === false) return null;
     const msgs = j.messages || (j.data && j.data.messages) || [];
-    return msgs.slice().reverse().find((m) => m && m.from && m.from.id !== pageId
+    const target = msgs.slice().reverse().find((m) => m && m.from && m.from.id !== pageId
       && !m.is_removed && m.type !== 'SYSTEM_MESSAGE') || null;
+    ctx.target = target;
+    ctx.targetLoaded = true;
+    return target;
   }
 
   // Body đúng CommentSender.executeByApi (user_selected_reply_to: app bỏ qua khi không chọn sẵn)
@@ -886,12 +891,13 @@
     return body;
   }
 
-  async function sendCommentViaApi(conv, text, photo) {
+  async function sendCommentViaApi(conv, text, photo, ctx) {
+    ctx = ctx || {};
     const token = getToken();
     if (!token) {
       return { ok: false, error: 'Không tìm thấy access_token — hãy tải lại trang Pancake rồi thử lại' };
     }
-    const full = await getFullConversation(conv) || {};
+    const full = await ctxFull(conv, ctx) || {};
     const convId = full.id || conv.id;
     const pageId = full.page_id || conv.pageId || String(conv.id).split('_')[0];
     const post = full.post || (full.post_id ? { id: full.post_id } : null);
@@ -900,7 +906,7 @@
       ? 'reply_post' : 'reply_comment';
     let target = null;
     if (action === 'reply_comment') {
-      target = await fetchCommentTarget(full, pageId, convId);
+      target = await fetchCommentTarget(full, pageId, convId, ctx);
       if (!target) {
         return { ok: false, sent: false, error: 'Không tìm thấy bình luận của khách để trả lời' };
       }
@@ -941,7 +947,8 @@
   }
 
   // Fallback qua extension — đúng CommentSender.executeByExtOnce (type SEND_COMMENT)
-  async function sendCommentViaExtension(conv, text, photo) {
+  async function sendCommentViaExtension(conv, text, photo, ctx) {
+    ctx = ctx || {};
     const adapter = window.__ExtensionAdapter__;
     if (!adapter || typeof adapter.send !== 'function') {
       return { ok: false, error: 'Không thấy Extension Pancake', skipExt: true };
@@ -953,12 +960,12 @@
     } catch (e) { /* cứ thử gửi */ }
     const token = getToken();
     if (!token) return { ok: false, error: 'Không tìm thấy access_token' };
-    const full = await getFullConversation(conv) || {};
+    const full = await ctxFull(conv, ctx) || {};
     const convId = full.id || conv.id;
     const pageId = full.page_id || conv.pageId || String(conv.id).split('_')[0];
     const post = full.post || (full.post_id ? { id: full.post_id } : null);
     if (!post || !post.id) return { ok: false, sent: false, error: 'Chat không có post_id để trả lời bình luận' };
-    const target = await fetchCommentTarget(full, pageId, convId);
+    const target = await fetchCommentTarget(full, pageId, convId, ctx);
     if (!target) return { ok: false, sent: false, error: 'Không tìm thấy bình luận của khách để trả lời' };
     const meta = pageMeta(pageId);
     const payload = {
@@ -996,8 +1003,8 @@
   //   multipart/form-data: action=reply_inbox, message=<text>
   // Nếu server từ chối dạng "(#10) ... ứng dụng khác đang kiểm soát thread" (Facebook handover)
   // thì app tự fallback sang extension — mình làm đúng như vậy ở sendSmart().
-  async function sendViaApi(conv, text, photo) {
-    if (conv.type === 'comment') return sendCommentViaApi(conv, text, photo); // chat bình luận → reply_comment
+  async function sendViaApi(conv, text, photo, ctx) {
+    if (conv.type === 'comment') return sendCommentViaApi(conv, text, photo, ctx || {}); // chat bình luận → reply_comment
     const token = getToken();
     if (!token) {
       return { ok: false, error: 'Không tìm thấy access_token — hãy tải lại trang Pancake rồi thử lại' };
@@ -1092,6 +1099,12 @@
     return null;
   }
 
+  // Lấy conversation 1 lần cho MỌI kênh trong cùng lượt gửi (ctx dùng chung) — đỡ gọi lại nhiều lần
+  async function ctxFull(conv, ctx) {
+    if (!ctx.fullLoaded) { ctx.full = await getFullConversation(conv); ctx.fullLoaded = true; }
+    return ctx.full || null;
+  }
+
   function detectPlatform(pageId) {
     try {
       const st = window.__pancakeReduxStore__ && window.__pancakeReduxStore__.getState();
@@ -1106,54 +1119,90 @@
     }
   }
 
-  // Tìm globalId (PSID) của khách — đúng đường app: cache → findGlobalIdForConv (extension GET_GLOBAL_ID_FOR_CONV)
+  // Kết quả ĐẦU TIÊN khác null trong nhiều promise — giống helper oV trong _app
+  function firstNonNull(promises) {
+    return new Promise((resolve) => {
+      let left = promises.length;
+      let done = false;
+      if (!left) { resolve(null); return; }
+      promises.forEach((pr) => {
+        Promise.resolve(pr).then((v) => {
+          if (!done && v) { done = true; resolve(v); return; }
+          if (!done && --left === 0) resolve(null);
+        }, () => {
+          if (!done && --left === 0) resolve(null);
+        });
+      });
+    });
+  }
+
+  // Tìm globalId (PSID) của khách — CHẠY ĐUA đúng như concurrentlyGetGLobalId trong _app:
+  // cache → song song [Extension GET_GLOBAL_ID_FOR_CONV, WebSocket __MqttHelper__.findGlobalId]
+  // → ai trả kết quả trước thì dùng (WS thường có cache IndexedDB → trả gần như ngay)
   async function resolveGlobalId(full, threadId, cacheKey) {
     const key = (full && full.id) || cacheKey;
+    const pageId = (full && full.page_id) || String(cacheKey || '').split('_')[0];
     try {
       const g1 = window.__GlobalIdCacheTest__, g2 = window.__tempGlobalIdCache__;
       const cached = (g1 && g1.get(key)) || (g2 && g2.get(key));
       if (cached) return cached;
     } catch (e) { /* ignore */ }
+    const tasks = [];
     if (typeof window.findGlobalIdForConv === 'function' && threadId) {
-      try {
-        // đúng tham số app gửi cho GET_GLOBAL_ID_FOR_CONV (concurrentlyGetGLobalId trong _app)
-        const gid = await window.findGlobalIdForConv({
-          pageId: full.page_id,
-          threadId,
-          threadKey: full.thread_key || null,
-          isBusiness: true,
-          conversationUpdatedTime: Date.parse(String(full.updated_at || '') + 'Z'),
-          customerName: (full.from && (full.from.username || full.from.name)) || '',
-          convType: 'INBOX',
-          postId: null,
-          convId: null,
-        });
-        if (gid) {
-          try { window.__tempGlobalIdCache__ && window.__tempGlobalIdCache__.set(key, gid); } catch (e) { /* ignore */ }
-          return gid;
-        }
-      } catch (e) { /* ignore */ }
+      // đúng tham số app gửi cho GET_GLOBAL_ID_FOR_CONV
+      tasks.push(window.findGlobalIdForConv({
+        pageId: full && full.page_id,
+        threadId,
+        threadKey: (full && full.thread_key) || null,
+        isBusiness: true,
+        conversationUpdatedTime: Date.parse(String((full && full.updated_at) || '') + 'Z'),
+        customerName: (full && full.from && (full.from.username || full.from.name)) || '',
+        convType: 'INBOX',
+        postId: null,
+        convId: null,
+      }).catch(() => null));
     }
-    return null;
+    const mqtt = window.__MqttHelper__;
+    if (mqtt && typeof mqtt.findGlobalId === 'function' && pageId && threadId) {
+      tasks.push(Promise.resolve()
+        .then(() => mqtt.findGlobalId(pageId, threadId))
+        .then((r) => (r && r.success && r.data) || null)
+        .catch(() => null));
+    }
+    const gid = await firstNonNull(tasks);
+    if (gid) {
+      try { window.__tempGlobalIdCache__ && window.__tempGlobalIdCache__.set(key, gid); } catch (e) { /* ignore */ }
+    }
+    return gid || null;
   }
 
   // Gửi qua Facebook WebSocket — ĐÚNG đường "gửi bình thường" mà app/nhân viên vẫn dùng
   // (_app: executeBySocketFB → __MqttHelper__.sendMessage(pageId, globalId, {text}) → publish /ls_req)
-  async function sendViaSocket(conv, text) {
+  async function sendViaSocket(conv, text, ctx) {
+    ctx = ctx || {};
     const helper = window.__MqttHelper__;
     if (!helper || typeof helper.sendMessage !== 'function') {
       return { ok: false, error: 'Không thấy __MqttHelper__' };
     }
     const platform = detectPlatform(conv.pageId || conv.id.split('_')[0]);
     if (platform !== 'facebook') return { ok: false, error: 'Socket chỉ áp dụng cho Facebook' };
-    const full = await getFullConversation(conv);
+    const full = await ctxFull(conv, ctx);
     if (!full) return { ok: false, error: 'Không lấy được thông tin đoạn chat' };
     const pageId = full.page_id || conv.pageId;
-    let threadId = full.thread_id;
-    if (!threadId && typeof window.__syncMissingThreadId__ === 'function') {
-      try { threadId = await window.__syncMissingThreadId__(pageId, full.id || conv.id); } catch (e) { /* ignore */ }
+    if (!ctx.threadResolved) {
+      let threadId = full.thread_id;
+      if (!threadId && typeof window.__syncMissingThreadId__ === 'function') {
+        try { threadId = await window.__syncMissingThreadId__(pageId, full.id || conv.id); } catch (e) { /* ignore */ }
+      }
+      ctx.threadId = threadId || null;
+      ctx.threadResolved = true;
     }
-    const gid = await resolveGlobalId(full, threadId, conv.id);
+    const threadId = ctx.threadId;
+    if (!ctx.gidResolved) {
+      ctx.gid = await resolveGlobalId(full, threadId, conv.id);
+      ctx.gidResolved = true;
+    }
+    const gid = ctx.gid;
     if (!gid) return { ok: false, error: 'Không tìm thấy globalId' };
     try {
       const res = await helper.sendMessage(pageId, gid, { text });
@@ -1171,8 +1220,9 @@
   }
 
   // Gửi qua extension Pancake (đường app dùng khi API bị "(#10)" — executeByExtOnce, type REPLY_INBOX_PHOTO)
-  async function sendViaExtension(conv, text, photo) {
-    if (conv.type === 'comment') return sendCommentViaExtension(conv, text, photo); // chat bình luận → SEND_COMMENT
+  async function sendViaExtension(conv, text, photo, ctx) {
+    ctx = ctx || {};
+    if (conv.type === 'comment') return sendCommentViaExtension(conv, text, photo, ctx); // chat bình luận → SEND_COMMENT
     const adapter = window.__ExtensionAdapter__;
     if (!adapter || typeof adapter.send !== 'function') {
       return { ok: false, error: 'Không thấy Extension Pancake', skipExt: true };
@@ -1187,26 +1237,38 @@
     if (platform !== 'facebook') {
       return { ok: false, error: 'Extension chỉ áp dụng cho Facebook ở chế độ này', skipExt: true };
     }
-    const full = await getFullConversation(conv);
+    const full = await ctxFull(conv, ctx);
     if (!full) return { ok: false, error: 'Không lấy được thông tin đoạn chat' };
 
-    let threadId = full.thread_id;
-    if (!threadId && typeof window.__syncMissingThreadId__ === 'function') {
-      try {
-        threadId = await window.__syncMissingThreadId__(full.page_id || conv.pageId, full.id || conv.id);
-      } catch (e) { /* ignore */ }
+    // ảnh: upload attachment MỚI reusable=false (đúng executeByExtOnce) — KHÔNG dùng lại
+    // attachment reusable=true (FB web từ chối). Upload chạy SONG SONG bước tìm thread/globalId.
+    const photoPrep = photo
+      ? uploadPhotoForPage(full.page_id || conv.pageId, photo, { reusable: false })
+      : null;
+
+    if (!ctx.threadResolved) {
+      let threadId = full.thread_id;
+      if (!threadId && typeof window.__syncMissingThreadId__ === 'function') {
+        try {
+          threadId = await window.__syncMissingThreadId__(full.page_id || conv.pageId, full.id || conv.id);
+        } catch (e) { /* ignore */ }
+      }
+      ctx.threadId = threadId || null;
+      ctx.threadResolved = true;
     }
+    const threadId = ctx.threadId;
     if (!threadId) return { ok: false, error: 'Không tìm thấy thread_id' };
 
-    const gid = await resolveGlobalId(full, threadId, conv.id);
-    const globalUserId = gid || null;
+    if (!ctx.gidResolved) {
+      ctx.gid = await resolveGlobalId(full, threadId, conv.id);
+      ctx.gidResolved = true;
+    }
+    const globalUserId = ctx.gid || null;
 
     const token = getToken();
-    // ảnh gửi qua Extension: app upload attachment MỚI với reusable=false (executeByExtOnce)
-    // — KHÔNG dùng lại attachment reusable=true (FB web từ chối → "Extension không gửi được")
     let files;
     if (photo) {
-      const up = await uploadPhotoForPage(full.page_id || conv.pageId, photo, { reusable: false });
+      const up = await photoPrep;
       if (!up.ok) return { ok: false, sent: false, error: 'Không gắn được ảnh cho Extension (' + up.error + ')' };
       files = [up.fbId];
     }
@@ -1310,14 +1372,17 @@
   // Chống TRÙNG TIN: kênh nào báo "không rõ kết quả" (tin có thể đã đi) → DỪNG ngay,
   // không thử kênh khác, không gửi thêm. Lỗi là lỗi — báo trong log, không gửi lại, không kiểm tra lại.
   async function sendOne(conv, text, photo) {
+    // ngữ cảnh dùng chung cho các kênh của CÙNG 1 chat: conversation, threadId, globalId, bình luận…
+    // mỗi thứ chỉ tải/giải quyết 1 lần (trước đây mỗi kênh tự gọi lại → chậm)
+    const ctx = {};
     const channels = {
       api: async () => {
-        const r = await sendViaApi(conv, text, photo);
+        const r = await sendViaApi(conv, text, photo, ctx);
         if (!r.ok && r.sent !== 'maybe' && isThreadControlError(r.error)) batchSkipApi = true;
         return r;
       },
-      socket: () => sendViaSocket(conv, text),
-      ext: () => sendViaExtension(conv, text, photo),
+      socket: () => sendViaSocket(conv, text, ctx),
+      ext: () => sendViaExtension(conv, text, photo, ctx),
     };
     // ảnh: socket không hỗ trợ → api → ext
     const order = photo ? ['api', 'ext']
@@ -1577,7 +1642,7 @@
       </style>
       <div class="wrap" id="ssb-wrap">
         <div class="head" id="ssb-head">
-          <span class="title">🤖 BOTFAKE <span style="color:#64748b;font-weight:400;font-size:11px">v1.20.0</span></span>
+          <span class="title">🤖 BOTFAKE <span style="color:#64748b;font-weight:400;font-size:11px">v1.21.0</span></span>
           <button class="badge on" id="ssb-toggle" title="Bật/tắt tính năng">BẬT</button>
           <button class="minibtn" id="ssb-close" title="Tắt panel (F5 hoặc Alt+Shift+B để hiện lại)">✕</button>
           <button class="minibtn" id="ssb-min" title="Thu nhỏ">—</button>

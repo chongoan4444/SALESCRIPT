@@ -84,8 +84,11 @@ dòng trùng id, chặn bấm đúp). Khi một kênh báo **“không rõ kết
 **Lỗi là lỗi**: tin báo ❌ (chắc chắn chưa gửi) chỉ bị báo trong log — **không gửi lại, không kiểm tra
 lại** — ưu tiên tốc độ.
 
-Tự động tăng tốc: sau lần đầu API bị `(#10)`, các chat còn lại **bỏ qua API** đi thẳng sang Socket;
-kênh gửi thành công được **ghi nhớ** (session) nên lần gửi sau vào thẳng kênh đó. Log từng dòng ghi rõ
+Tự động tăng tốc: sau lần đầu API bị `(#10)/(#551)…`, các chat còn lại **bỏ qua API** đi thẳng sang Socket;
+kênh gửi thành công được **ghi nhớ** (session) nên lần gửi sau vào thẳng kênh đó.
+Mỗi chat chỉ **tải/giải quyết 1 lần** cho mọi kênh dùng chung (conversation, threadId, globalId, bình luận);
+tìm globalId **chạy đua** WebSocket (`__MqttHelper__.findGlobalId`, có cache) ↔ Extension — ai xong trước dùng trước
+(đúng `concurrentlyGetGLobalId` của app); ảnh cho Extension upload song song bước tìm thread/globalId. Log từng dòng ghi rõ
 kênh: `— đã gửi`, `— qua Socket`, `— qua Extension`.
 
 **Gửi kèm ảnh (📷 Chọn ảnh / Ctrl+V):** chọn file ảnh, hoặc copy ảnh (screenshot, ảnh trên web…)
