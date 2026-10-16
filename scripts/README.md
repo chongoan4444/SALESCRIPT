@@ -44,7 +44,7 @@ Phù hợp khi nhiều khách nhắn cùng 1 câu hỏi / cùng 1 tin tự độ
    Chuỗi **hàng nghìn chat** vẫn chạy tốt. Với chuỗi ≥150 chat nên chọn tốc độ **“Song song 5 luồng”**
    để không bị Facebook chặn (429).
 5. Bỏ tick chat nào không muốn gửi trong danh sách mục 2.
-6. Nhập **1 câu** cần gửi vào mục 3 → chọn **tốc độ gửi** → bấm **“Gửi 1 câu cho tất cả”** → xác nhận.
+6. Nhập **1 câu** cần gửi vào mục 3 → chọn **tốc độ gửi** → bấm **“▶ Chạy”** → xác nhận.
    - **🚀 Gửi tất cả cùng lúc** (mặc định): bắn mọi request song song — xong trong 1 phát.
    - **⚡ Song song 5 luồng**: 5 chat cùng lúc — vẫn nhanh nhưng nhẹ hơn cho server.
    - **🐢 Tuần tự**: gửi lần lượt, có giãn cách (mặc định 300 ms, đổi được) — dành khi bị báo spam/429.
