@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         Pancake – Gửi 1 câu cho các đoạn chat cùng snippet
+// @name         BOTFAKE
 // @namespace    salescript
-// @version      1.16.1
-// @description  Chọn chuỗi chat (Alt+Click 2 đầu) hoặc chọn theo snippet trong danh sách Pancake rồi gửi cùng 1 câu cho tất cả.
+// @version      1.17.0
+// @description  BOTFAKE — chọn chuỗi chat (Alt+Click 2 đầu) hoặc theo snippet trong Pancake rồi gửi cùng 1 câu (kèm ảnh nếu muốn) cho tất cả.
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
 // @match        https://pages.fm/*
@@ -777,7 +777,7 @@
   //   multipart/form-data: action=reply_inbox, message=<text>
   // Nếu server từ chối dạng "(#10) ... ứng dụng khác đang kiểm soát thread" (Facebook handover)
   // thì app tự fallback sang extension — mình làm đúng như vậy ở sendSmart().
-  async function sendViaApi(conv, text) {
+  async function sendViaApi(conv, text, photo) {
     const token = getToken();
     if (!token) {
       return { ok: false, error: 'Không tìm thấy access_token — hãy tải lại trang Pancake rồi thử lại' };
@@ -789,6 +789,12 @@
     const fd = new FormData();
     fd.append('action', 'reply_inbox');
     fd.append('message', text);
+    if (photo && photo.fbId) {
+      // đúng field khi gửi ảnh qua API (buildRequestBody — case PHOTO, facebook, 1 ảnh)
+      fd.append('attachment_id', photo.fbId);
+      fd.append('content_url', photo.url);
+      if (photo.id) fd.append('content_id', photo.id);
+    }
     try {
       const res = await fetch(url, {
         method: 'POST',
@@ -942,7 +948,7 @@
   }
 
   // Gửi qua extension Pancake (đường app dùng khi API bị "(#10)" — executeByExtOnce, type REPLY_INBOX_PHOTO)
-  async function sendViaExtension(conv, text) {
+  async function sendViaExtension(conv, text, photo) {
     const adapter = window.__ExtensionAdapter__;
     if (!adapter || typeof adapter.send !== 'function') {
       return { ok: false, error: 'Không thấy Extension Pancake', skipExt: true };
@@ -977,21 +983,21 @@
       igPageId: null,
       accessToken: token,
       tryResizeImage: true,
-      contentIds: [],
+      contentIds: photo && photo.id ? [photo.id] : [],
       type: 'REPLY_INBOX_PHOTO',
       message: text,
-      attachmentType: 'SEND_TEXT_ONLY',
+      attachmentType: photo ? 'PHOTO' : 'SEND_TEXT_ONLY',
       globalUserId,
       platform: 'facebook',
       replyMessage: null,
-      files: null,
+      files: photo && photo.fbId ? [photo.fbId] : null,
       threadId,
       convId: full.thread_key || null,
       customerName: (full.from && (full.from.username || full.from.name)) || '',
-      photoUrl: null,
+      photoUrl: photo ? photo.url : null,
       isIGD: false,
       conversationUpdatedTime: Date.parse(String(full.updated_at || '') + 'Z'),
-      photoUrls: [],
+      photoUrls: photo ? [photo.url] : [],
       isBusiness: false,
     };
     try {
@@ -1009,21 +1015,71 @@
     }
   }
 
+  /* ============================ ẢNH KÈM THEO ============================ */
+  // Đúng chuỗi app dùng khi gửi ảnh (đã xác minh từ bundle):
+  //  1) POST /v1/contents?access_token=… (field "file")            → { content_url }  (như app upload avatar)
+  //  2) POST /v1/pages/{p}/contents/facebook?is_reusable=true&async=false
+  //       body urls=["content_url"]                                → { fb_ids }       (attachment Facebook)
+  //  3) Gửi: API (attachment_id + content_url) hoặc Extension
+  //       (REPLY_INBOX_PHOTO, attachmentType:"PHOTO", files:[fbId], photoUrl(s))
+
+  async function uploadContentFile(file) {
+    const token = getToken();
+    if (!token) return { ok: false, error: 'Không có access token' };
+    try {
+      const fd = new FormData();
+      fd.append('file', file, file.name || 'image.jpg');
+      fd.append('name', file.name || ('image_' + Date.now() + '.jpg'));
+      const res = await fetch(apiBase() + '/v1/contents?access_token=' + encodeURIComponent(token), {
+        method: 'POST', body: fd, credentials: 'include', headers: { Accept: 'application/json' },
+      });
+      const j = await res.json().catch(() => null);
+      if (res.ok && j && j.success && (j.content_url || j.url)) {
+        return { ok: true, url: j.content_url || j.url, id: j.content_id || j.id || '' };
+      }
+      return { ok: false, error: (j && (j.message || j.error)) || ('HTTP ' + res.status) };
+    } catch (e) {
+      return { ok: false, error: 'Lỗi mạng: ' + (e && e.message || e) };
+    }
+  }
+
+  async function uploadPhotoForPage(pageId, photo) {
+    const token = getToken();
+    if (!token) return { ok: false, error: 'Không có access token' };
+    try {
+      const fd = new FormData();
+      if (photo.id) fd.append('content_ids', JSON.stringify([photo.id]));
+      else fd.append('urls', JSON.stringify([photo.url]));
+      const res = await fetch(apiBase() + '/v1/pages/' + pageId
+        + '/contents/facebook?access_token=' + encodeURIComponent(token) + '&is_reusable=true&async=false', {
+        method: 'POST', body: fd, credentials: 'include', headers: { Accept: 'application/json' },
+      });
+      const j = await res.json().catch(() => null);
+      if (res.ok && j && j.success && Array.isArray(j.fb_ids) && j.fb_ids.length) {
+        return { ok: true, fbId: j.fb_ids[0] };
+      }
+      return { ok: false, error: (j && (j.message || j.error)) || ('HTTP ' + res.status) };
+    } catch (e) {
+      return { ok: false, error: 'Lỗi mạng: ' + (e && e.message || e) };
+    }
+  }
+
   // API (nhanh) → Socket (đường gửi tay) → Extension
   // CHỈ gửi hàng loạt — KHÔNG còn cơ chế gửi từng con qua giao diện.
   // Chống TRÙNG TIN: kênh nào báo "không rõ kết quả" (tin có thể đã đi) → DỪNG ngay,
   // không thử kênh khác, không gửi thêm. Lỗi là lỗi — báo trong log, không gửi lại, không kiểm tra lại.
-  async function sendOne(conv, text) {
+  async function sendOne(conv, text, photo) {
     const channels = {
       api: async () => {
-        const r = await sendViaApi(conv, text);
+        const r = await sendViaApi(conv, text, photo);
         if (!r.ok && r.sent !== 'maybe' && isThreadControlError(r.error)) batchSkipApi = true;
         return r;
       },
       socket: () => sendViaSocket(conv, text),
-      ext: () => sendViaExtension(conv, text),
+      ext: () => sendViaExtension(conv, text, photo),
     };
-    const order = ['api', 'socket', 'ext'];
+    // ảnh: socket không hỗ trợ → api → ext
+    const order = photo ? ['api', 'ext'] : ['api', 'socket', 'ext'];
     const hint = channelHints[conv.id];
     let seq = (hint && order.indexOf(hint) > -1)
       ? [hint].concat(order.filter((x) => x !== hint))
@@ -1055,7 +1111,8 @@
     // document.querySelector sẽ không thấy (đây là nguyên nhân lỗi "Hãy nhập nội dung câu cần gửi")
     const msgEl = shadow && shadow.getElementById('ssb-msg');
     const text = (msgEl && msgEl.value || '').trim();
-    if (!text) { alert('Hãy nhập nội dung câu cần gửi.'); return; }
+    const imgState = state.image || null;
+    if (!text && !imgState) { alert('Hãy nhập nội dung câu cần gửi (hoặc chọn ảnh).'); return; }
     let targets = state.matches.filter((m) => m.checked);
     if (!targets.length) {
       alert('Chưa có đoạn chat nào được chọn.\nHãy chọn snippet (nút "Lấy snippet từ chat đang chọn")\nhoặc chọn chuỗi bằng 2 lần Alt+Click (đầu → cuối).');
@@ -1079,13 +1136,45 @@
     const warnComment = nComment
       ? '\n\n⚠ Trong đó ' + nComment + ' chat loại BÌNH LUẬN — API reply_inbox có thể không áp dụng cho các chat này!'
       : '';
-    if (!confirm('Gửi 1 câu tới ' + targets.length + ' đoạn chat đã chọn?\n\n“'
-      + clip(text, 120) + '”\n\nNhận: ' + names + warnComment)) return;
+    const imgNote = imgState ? '\n\n📷 Kèm ảnh: ' + (imgState.name || 'ảnh') : '';
+    if (!confirm('Gửi ' + (text ? '1 câu' : 'ảnh') + ' tới ' + targets.length + ' đoạn chat đã chọn?\n\n“'
+      + clip(text || '(chỉ gửi ảnh)', 120) + '”' + imgNote + '\n\nNhận: ' + names + warnComment)) return;
 
     state.sending = true;
     state.stopRequested = false;
     batchSkipApi = false;
     render();
+
+    // Chuẩn bị ảnh (nếu có): upload 1 lần → gắn attachment cho từng page
+    let photo = null;
+    const fbIdByPage = {};
+    if (imgState && imgState.file) {
+      logLine('☁️ Đang tải ảnh lên Pancake…');
+      const up = await uploadContentFile(imgState.file);
+      if (!up.ok) {
+        logLine('⛔ Không tải được ảnh (' + up.error + ') — HỦY gửi để tránh gửi thiếu ảnh.');
+        state.sending = false;
+        render();
+        return;
+      }
+      photo = { url: up.url, id: up.id, fbId: '' };
+      logLine('☁️ Ảnh đã tải lên — đang gắn attachment cho từng page…');
+      const pageIds = [];
+      targets.forEach((c) => {
+        const p = c.pageId || String(c.id || '').split('_')[0];
+        if (p && pageIds.indexOf(p) === -1) pageIds.push(p);
+      });
+      for (let i = 0; i < pageIds.length; i++) {
+        if (state.stopRequested) break;
+        const up2 = await uploadPhotoForPage(pageIds[i], photo);
+        if (up2.ok) {
+          fbIdByPage[pageIds[i]] = up2.fbId;
+          logLine('☁️ Page ' + pageIds[i] + ': gắn ảnh OK');
+        } else {
+          logLine('⚠ Page ' + pageIds[i] + ': không gắn được ảnh (' + up2.error + ') — chat page này sẽ báo lỗi');
+        }
+      }
+    }
 
     // Gửi theo lượt: mỗi lượt = "Số tin mỗi lượt" trên panel (mặc định 200), giữa các lượt nghỉ 500ms
     const waveEl = shadow && shadow.getElementById('ssb-wave');
@@ -1099,7 +1188,21 @@
     let ok = 0, fail = 0, done = 0, unsure = 0;
 
     const sendOneAndLog = async (c) => {
-      const r = await sendOne(c, text);
+      let r;
+      if (photo) {
+        const p = c.pageId || String(c.id || '').split('_')[0];
+        const fbId = fbIdByPage[p] || '';
+        if (!fbId) {
+          done++;
+          fail++;
+          logLine('❌ [' + done + '/' + targets.length + '] ' + (c.name || c.id) + ' — không có attachment ảnh cho page này');
+          setProgress(done, targets.length);
+          return { ok: false, sent: false, error: 'Không có attachment ảnh' };
+        }
+        r = await sendOne(c, text, { url: photo.url, id: photo.id, fbId });
+      } else {
+        r = await sendOne(c, text);
+      }
       const via = r.ok ? (r.sendBy === 'socket' ? ' — qua Socket'
         : r.sendBy === 'extension' ? ' — qua Extension' : '') : '';
       done++;
@@ -1232,7 +1335,7 @@
       </style>
       <div class="wrap" id="ssb-wrap">
         <div class="head" id="ssb-head">
-          <span class="title">💬 Gửi 1 câu theo snippet <span style="color:#64748b;font-weight:400;font-size:11px">v1.16.1</span></span>
+          <span class="title">🤖 BOTFAKE <span style="color:#64748b;font-weight:400;font-size:11px">v1.17.0</span></span>
           <button class="badge on" id="ssb-toggle" title="Bật/tắt tính năng">BẬT</button>
           <button class="minibtn" id="ssb-close" title="Tắt panel (F5 hoặc Alt+Shift+B để hiện lại)">✕</button>
           <button class="minibtn" id="ssb-min" title="Thu nhỏ">—</button>
@@ -1262,6 +1365,12 @@
             <div class="label">3) Câu cần gửi</div>
             <textarea id="ssb-msg" placeholder="Nhập 1 câu sẽ gửi cho tất cả đoạn chat ở trên…"></textarea>
             <div class="row" style="align-items:center">
+              <input type="file" id="ssb-img" accept="image/*" style="display:none">
+              <button class="b b-gray" id="ssb-img-pick">📷 Chọn ảnh (tùy chọn)</button>
+              <span class="hint" id="ssb-img-info">Chưa chọn ảnh</span>
+              <button class="b b-gray" id="ssb-img-clear" style="display:none">✕ Bỏ ảnh</button>
+            </div>
+            <div class="row" style="align-items:center">
               <span class="hint">Số tin mỗi lượt:</span>
               <input type="number" id="ssb-wave" value="200" min="1" step="50" style="width:84px">
               <span class="hint">— các lượt cách nhau 500ms</span>
@@ -1286,6 +1395,7 @@
             • Gửi qua API <code style="color:#94a3b8">POST /v1/pages/.../messages</code> (action=reply_inbox) — đúng request website tự dùng, không cần mở từng chat.<br>
             • Nếu API bị chặn <code style="color:#94a3b8">(#10) app khác kiểm soát thread</code> → tự gửi tiếp qua <b>Socket</b> (đúng đường gửi tay của app), rồi <b>Extension</b> — log ghi rõ kênh đã gửi. Kênh tốt được ghi nhớ cho lần sau.<br>
             • <b>Chỉ gửi hàng loạt theo lượt</b>: chỉnh <b>“Số tin mỗi lượt”</b> (mặc định 200) — các lượt cách nhau <b>500ms</b>. Số tin ≤ số/lượt thì gửi 1 lượt. Không còn cơ chế gửi từng con qua giao diện. Lỗi là lỗi — báo ❌ trong log, không gửi lại, không kiểm tra lại.<br>
+            • <b>📷 Chọn ảnh (tùy chọn)</b>: gửi kèm 1 ảnh cho tất cả (tải ảnh lên 1 lần, gửi qua API/Extension — kênh ảnh là API → Extension). Không tải được ảnh thì HỦY gửi.<br>
           </div>
         </div>
       </div>
@@ -1321,6 +1431,30 @@
     on('ssb-close', 'click', () => {
       const host = document.getElementById(PANEL_ID);
       if (host) host.style.display = 'none'; // F5 hoặc Alt+Shift+B để hiện lại
+    });
+    // chọn ảnh kèm theo
+    const imgInput = root.getElementById('ssb-img');
+    const imgInfo = root.getElementById('ssb-img-info');
+    const imgClearBtn = root.getElementById('ssb-img-clear');
+    const setImg = (file) => {
+      if (state.image && state.image.url) { try { URL.revokeObjectURL(state.image.url); } catch (e) { /* ignore */ } }
+      state.image = file ? { file, name: file.name || 'ảnh', url: URL.createObjectURL(file) } : null;
+      if (imgInfo) {
+        imgInfo.textContent = file
+          ? '📷 ' + (file.name || 'ảnh') + ' (' + Math.round((file.size || 0) / 1024) + ' KB)'
+          : 'Chưa chọn ảnh';
+      }
+      if (imgClearBtn) imgClearBtn.style.display = file ? '' : 'none';
+    };
+    on('ssb-img-pick', 'click', () => { if (imgInput) imgInput.click(); });
+    if (imgInput) {
+      imgInput.addEventListener('change', () => {
+        setImg((imgInput.files && imgInput.files[0]) || null);
+      });
+    }
+    on('ssb-img-clear', 'click', () => {
+      if (imgInput) imgInput.value = '';
+      setImg(null);
     });
     on('ssb-use-selected', 'click', () => {
       const info = selectedRowInfo();

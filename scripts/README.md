@@ -1,7 +1,7 @@
-# Script: Gửi 1 câu cho toàn bộ đoạn chat có cùng snippet
+# BOTFAKE — Gửi 1 câu cho toàn bộ đoạn chat có cùng snippet
 
 File: `pancake-send-by-snippet.user.js` — chạy bằng **Tampermonkey** trên trang chat Pancake
-(`/page/conversation`).
+(`/page/conversation`). Gửi **cùng 1 câu** (có thể **kèm 1 ảnh**) cho tất cả đoạn chat đã chọn.
 
 ## Mục đích
 
@@ -87,6 +87,12 @@ lại** — ưu tiên tốc độ.
 Tự động tăng tốc: sau lần đầu API bị `(#10)`, các chat còn lại **bỏ qua API** đi thẳng sang Socket;
 kênh gửi thành công được **ghi nhớ** (session) nên lần gửi sau vào thẳng kênh đó. Log từng dòng ghi rõ
 kênh: `— đã gửi`, `— qua Socket`, `— qua Extension`.
+
+**Gửi kèm ảnh (📷 Chọn ảnh):** đúng chuỗi app dùng khi gửi ảnh — upload file lên `POST /v1/contents`
+(1 lần) → gắn attachment Facebook qua `POST /v1/pages/{p}/contents/facebook` (1 lần/page) →
+gửi qua **API** (`attachment_id` + `content_url`) hoặc **Extension** (`REPLY_INBOX_PHOTO`,
+`attachmentType:"PHOTO"`). Kênh gửi ảnh là **API → Extension** (Socket không hỗ trợ ảnh).
+Không tải được ảnh thì **HỦY gửi** — không bao giờ gửi thiếu ảnh.
 
 ## Lưu ý
 
