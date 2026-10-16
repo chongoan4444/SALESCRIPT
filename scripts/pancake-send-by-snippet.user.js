@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE
 // @namespace    salescript
-// @version      1.25.1
+// @version      1.26.0
 // @description  BOTFAKE — chọn chuỗi chat (Alt+Click 2 đầu) hoặc theo snippet trong Pancake rồi gửi cùng 1 câu (kèm ảnh nếu muốn) cho tất cả.
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -64,8 +64,8 @@
     pickMode: false,
     log: [],
     savedLists: [],         // các list đã lưu [{id,name,items:[{id,pageId,name,snippet,snippetRaw,time,type,platform}]}]
-    loadedListId: null,     // id list đang nạp vào lựa chọn (mode 'saved')
-    loadedName: null,       // tên list đang nạp — hiện ở mục 1
+    listSel: new Set(),     // id các list ĐANG TÍCH — gộp thành lựa chọn để gửi (gửi được nhiều list cùng lúc)
+    loadedName: null,       // tên hiển thị (1 list hoặc "N list: …") — hiện ở mục 1
   };
   state.savedLists = loadSavedLists();
 
@@ -261,9 +261,10 @@
   }
 
   function computeMatches() {
-    if (state.mode === 'saved') return; // đang giữ LIST ĐÃ LƯU nạp vào — không khớp lại theo snippet/chuỗi
-    state.loadedListId = null;
+    if (state.mode === 'saved') return; // đang giữ LIST ĐÃ LƯU đã tích — không khớp lại theo snippet/chuỗi
+    state.listSel = new Set();
     state.loadedName = null;
+    renderSavedLists();
     const before = new Map(state.matches.map((m) => [m.id, m]));
     const list = [];
     const push = (r) => {
@@ -381,8 +382,9 @@
     state.rangeStart = null;
     state.rangeEnd = null;
     state.matches = [];
-    state.loadedListId = null;
+    state.listSel = new Set();
     state.loadedName = null;
+    renderSavedLists();
     highlightRows();
   }
 
@@ -407,18 +409,34 @@
     }
   }
 
-  // Nạp 1 list đã lưu → thành lựa chọn hiện tại (tất cả tick sẵn) để ▶ Chạy gửi
-  function loadSavedList(id) {
-    const l = state.savedLists.find((x) => x.id === id);
-    if (!l) return;
+  // Từ các list ĐANG TÍCH → dựng lựa chọn hiện tại (gộp chat của mọi list, loại trùng id)
+  function rebuildFromLists() {
+    const ids = state.listSel;
+    if (!ids || !ids.size) {
+      state.mode = null;
+      state.loadedName = null;
+      state.matches = [];
+      highlightRows();
+      render();
+      return;
+    }
+    const seen = new Set();
+    const items = [];
+    const names = [];
+    state.savedLists.forEach((l) => {
+      if (!ids.has(l.id)) return;
+      names.push(l.name);
+      l.items.forEach((it) => {
+        if (seen.has(it.id)) return;
+        seen.add(it.id);
+        items.push({ ...it, checked: true, isTarget: false, mark: '' });
+      });
+    });
     state.mode = 'saved';
-    state.target = null;
-    state.rangeStart = null;
-    state.rangeEnd = null;
-    state.loadedListId = l.id;
-    state.loadedName = l.name;
-    state.matches = l.items.map((it) => ({ ...it, checked: true, isTarget: false, mark: '' }));
-    logLine('📚 Đã nạp list “' + l.name + '” — ' + state.matches.length + ' chat sẵn sàng gửi');
+    state.loadedName = names.length > 1
+      ? names.length + ' list: ' + names.slice(0, 2).join(', ') + (names.length > 2 ? '…' : '')
+      : (names[0] || '');
+    state.matches = items;
     highlightRows();
     render();
   }
@@ -428,20 +446,26 @@
     const info = shadow && shadow.getElementById('ssb-sl-info');
     if (info) {
       const nChat = state.savedLists.reduce((n, l) => n + l.items.length, 0);
-      info.textContent = state.savedLists.length + ' list · ' + nChat + ' chat';
+      const nSel = state.listSel ? state.listSel.size : 0;
+      info.textContent = state.savedLists.length + ' list · ' + nChat + ' chat'
+        + (nSel ? ' · đang chọn ' + nSel : '');
     }
     if (!box) return;
     if (!state.savedLists.length) {
       box.innerHTML = '<div class="empty">Chưa có list nào — chọn chat ở mục 1–2 rồi bấm “＋ Tạo list”</div>';
       return;
     }
-    box.innerHTML = state.savedLists.map((l) => `
-      <div class="sl-row${l.id === state.loadedListId ? ' active' : ''}" data-id="${esc(l.id)}" title="Bấm để nạp list này vào danh sách gửi">
+    box.innerHTML = state.savedLists.map((l) => {
+      const sel = !!(state.listSel && state.listSel.has(l.id));
+      return `
+      <div class="sl-row${sel ? ' active' : ''}" data-id="${esc(l.id)}" title="Tích để chọn list này gửi (chọn được nhiều list cùng lúc)">
+        <input type="checkbox" class="sl-cb" ${sel ? 'checked' : ''}>
         <span class="sl-handle" draggable="true" title="Kéo để sắp xếp">⠿</span>
         <span class="sl-name">${esc(l.name)} <span class="sl-n">(${l.items.length})</span></span>
         <button class="sl-btn" data-act="rename" title="Đổi tên">✎</button>
         <button class="sl-btn" data-act="del" title="Xóa list">✕</button>
-      </div>`).join('');
+      </div>`;
+    }).join('');
   }
 
   function highlightRows() {
@@ -1629,16 +1653,16 @@
     }
     logLine('🏁 Hoàn tất: ' + ok + ' thành công, ' + fail + ' lỗi.'
       + (unsure ? ' ' + unsure + ' tin không rõ kết quả (không gửi thêm).' : ''));
-    // LIST ĐÃ LƯU đã nạp để gửi → dùng xong TỰ XÓA (mỗi list chỉ gửi 1 lần — tránh gửi trùng lần sau)
-    if (state.loadedListId) {
-      const lid = state.loadedListId;
-      const l = state.savedLists.find((x) => x.id === lid);
-      state.savedLists = state.savedLists.filter((x) => x.id !== lid);
-      state.loadedListId = null;
+    // LIST ĐÃ LƯU đang tích để gửi → dùng xong TỰ XÓA các list đó (mỗi list chỉ gửi 1 lần — tránh gửi trùng)
+    if (state.listSel && state.listSel.size) {
+      const ids = Array.from(state.listSel);
+      const names = state.savedLists.filter((l) => ids.indexOf(l.id) > -1).map((l) => l.name);
+      state.savedLists = state.savedLists.filter((l) => ids.indexOf(l.id) === -1);
+      state.listSel = new Set();
       state.loadedName = null;
       persistSavedLists();
       renderSavedLists();
-      logLine('🗑 List “' + (l ? l.name : '?') + '” đã gửi xong — tự xóa khỏi LIST ĐÃ LƯU');
+      logLine('🗑 Đã gửi xong — tự xóa ' + names.length + ' list: ' + names.join(', '));
     }
     render();
   }
@@ -1670,7 +1694,8 @@
         :host { all: initial; }
         * { box-sizing: border-box; font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
         .wrap { width: 340px; background: #0f172a; color: #e2e8f0; border: 1px solid #334155;
-                border-radius: 12px; box-shadow: 0 10px 30px rgba(0,0,0,.45); overflow: hidden; font-size: 12px; }
+                border-radius: 12px; box-shadow: 0 10px 30px rgba(0,0,0,.45); overflow: hidden; font-size: 12px;
+                position: relative; display: flex; flex-direction: column; }
         .head { display: flex; align-items: center; gap: 8px; padding: 10px 12px; background: #1e293b; cursor: move; }
         .title { font-weight: 700; font-size: 13px; flex: 1; color: #f8fafc; }
         .badge { font-size: 10px; padding: 2px 8px; border-radius: 999px; cursor: pointer; border: none; }
@@ -1680,7 +1705,7 @@
                    padding: 3px 8px; cursor: pointer; font-size: 11px; }
         .minibtn:hover { background: #475569; }
         .body { padding: 10px 12px; display: flex; flex-direction: column; gap: 8px;
-                max-height: 62vh; overflow: auto; }
+                max-height: 62vh; overflow: auto; flex: 1 1 auto; min-height: 0; }
         .label { color: #94a3b8; font-size: 10px; text-transform: uppercase; letter-spacing: .4px; }
         .snippet-box { background: #1e293b; border: 1px solid #334155; border-radius: 8px;
                        padding: 8px; color: #a7f3d0; word-break: break-word; max-height: 64px; overflow: auto; }
@@ -1714,6 +1739,20 @@
         .log.big { position: fixed; left: 24px; top: 10vh; width: min(640px, 62vw); height: 72vh;
                    max-height: none; z-index: 2147483646; font-size: 12px; line-height: 1.6;
                    box-shadow: 0 12px 40px rgba(0,0,0,.55); }
+        /* tay nắm KÉO THẢ ĐỔI CỠ panel (góc dưới-phải; đúp chuột = về mặc định) */
+        .rs { position: absolute; right: 0; bottom: 0; width: 20px; height: 20px; cursor: nwse-resize;
+              background: linear-gradient(135deg, transparent 55%, #475569 55%, #475569 66%,
+                          transparent 66%, transparent 76%, #475569 76%, #475569 87%, transparent 87%);
+              border-bottom-right-radius: 12px; z-index: 5; }
+        .rs:hover { background: linear-gradient(135deg, transparent 55%, #7dd3fc 55%, #7dd3fc 66%,
+                    transparent 66%, transparent 76%, #7dd3fc 76%, #7dd3fc 87%, transparent 87%); }
+        /* panel đã kéo cỡ → danh sách chat + log giãn ra theo */
+        .wrap.sized .body { max-height: none; }
+        .wrap.sized #ssb-sec-list { flex: 1 1 auto; display: flex; flex-direction: column; min-height: 90px; }
+        .wrap.sized #ssb-sec-list .list { flex: 1 1 auto; max-height: none; min-height: 60px; }
+        .wrap.sized .log { flex: 1 1 auto; max-height: none; min-height: 60px; }
+        .wrap.sized .saved-lists { max-height: none; }
+        .sl-cb { accent-color: #22c55e; margin: 0; cursor: pointer; }
         .hint { color: #64748b; font-size: 10px; line-height: 1.5; }
         .empty { color: #64748b; padding: 10px; text-align: center; }
         .count { color: #38bdf8; font-weight: 700; }
@@ -1739,7 +1778,7 @@
       </style>
       <div class="wrap" id="ssb-wrap">
         <div class="head" id="ssb-head">
-          <span class="title"><svg class="logo" viewBox="0 0 50 52" width="17" height="17" xmlns="http://www.w3.org/2000/svg"><path d="M10 2 L14 11" stroke="#5865F2" stroke-width="5" stroke-linecap="round" fill="none"/><path d="M40 2 L36 11" stroke="#5865F2" stroke-width="5" stroke-linecap="round" fill="none"/><rect x="0" y="12" width="50" height="40" rx="6" fill="#5865F2"/><rect x="12" y="31" width="12" height="4" rx="2" fill="#fff"/><rect x="26" y="31" width="12" height="4" rx="2" fill="#fff"/></svg>BOTFAKE <span style="color:#64748b;font-weight:400;font-size:11px">v1.25.1</span></span>
+          <span class="title"><svg class="logo" viewBox="0 0 50 52" width="17" height="17" xmlns="http://www.w3.org/2000/svg"><path d="M10 2 L14 11" stroke="#5865F2" stroke-width="5" stroke-linecap="round" fill="none"/><path d="M40 2 L36 11" stroke="#5865F2" stroke-width="5" stroke-linecap="round" fill="none"/><rect x="0" y="12" width="50" height="40" rx="6" fill="#5865F2"/><rect x="12" y="31" width="12" height="4" rx="2" fill="#fff"/><rect x="26" y="31" width="12" height="4" rx="2" fill="#fff"/></svg>BOTFAKE <span style="color:#64748b;font-weight:400;font-size:11px">v1.26.0</span></span>
           <button class="badge on" id="ssb-toggle" title="Bật/tắt tính năng">BẬT</button>
           <button class="minibtn" id="ssb-close" title="Tắt panel (F5 hoặc Alt+Shift+B để hiện lại)">✕</button>
           <button class="minibtn" id="ssb-min" title="Thu nhỏ">—</button>
@@ -1759,7 +1798,7 @@
               <button class="b b-gray" id="ssb-clear">Xóa</button>
             </div>
           </div>
-          <div>
+          <div id="ssb-sec-list">
             <div class="label">2) Đoạn chat sẽ gửi (<span class="count" id="ssb-count">0</span>)</div>
             <div class="row" style="margin:4px 0">
               <button class="b b-gray" id="ssb-scan">⚡ Tải danh sách</button>
@@ -1809,6 +1848,7 @@
             • <b>📷 Chọn ảnh (tùy chọn)</b>: gửi kèm 1 ảnh cho tất cả (tải ảnh lên 1 lần, gửi qua API/Extension — kênh ảnh là API → Extension). Không tải được ảnh thì HỦY gửi.<br>
           </div>
         </div>
+        <div class="rs" id="ssb-rs" title="Kéo góc này để đổi cỡ panel — đúp chuột để về mặc định"></div>
       </div>
       <button id="ssb-bubble" type="button" style="display:none" title="Mở panel BOTFAKE (bấm để mở lại)"><svg viewBox="0 0 50 52" width="40" height="40" xmlns="http://www.w3.org/2000/svg"><path d="M10 2 L14 11" stroke="#5865F2" stroke-width="5" stroke-linecap="round" fill="none"/><path d="M40 2 L36 11" stroke="#5865F2" stroke-width="5" stroke-linecap="round" fill="none"/><rect x="0" y="12" width="50" height="40" rx="6" fill="#5865F2"/><rect x="12" y="31" width="12" height="4" rx="2" fill="#fff"/><rect x="26" y="31" width="12" height="4" rx="2" fill="#fff"/></svg></button>
     `;
@@ -2021,20 +2061,25 @@
               l.name = name;
               persistSavedLists();
               renderSavedLists();
-              if (state.loadedListId === l.id) { state.loadedName = name; render(); }
+              if (state.listSel.has(l.id)) rebuildFromLists();
               logLine('✏️ Đã đổi tên list thành “' + name + '”');
             }
           } else if (act === 'del') {
             if (!confirm('Xóa list “' + l.name + '” (' + l.items.length + ' chat)?')) return;
+            const wasSel = state.listSel.has(l.id);
             state.savedLists = state.savedLists.filter((x) => x.id !== id);
-            if (state.loadedListId === id) { state.loadedListId = null; state.loadedName = null; }
+            if (wasSel) { state.listSel.delete(id); rebuildFromLists(); }
             persistSavedLists();
             renderSavedLists();
             logLine('🗑 Đã xóa list “' + l.name + '”');
           }
           return;
         }
-        loadSavedList(id); // bấm vào dòng → nạp list để gửi
+        // bấm vào dòng (hoặc ô tích) → tích/bỏ tích list — chọn được NHIỀU list để gửi cùng lúc
+        if (state.listSel.has(id)) state.listSel.delete(id);
+        else state.listSel.add(id);
+        rebuildFromLists();
+        renderSavedLists();
       });
       slBox.addEventListener('mousedown', (e) => {
         const h = e.target.closest && e.target.closest('.sl-handle');
@@ -2077,6 +2122,50 @@
       });
     }
     renderSavedLists();
+    // ===== KÉO THẢ ĐỔI CỠ PANEL (tay nắm góc dưới-phải; đúp chuột = về mặc định) =====
+    {
+      const rsEl = root.getElementById('ssb-rs');
+      const wrapEl = root.getElementById('ssb-wrap');
+      const applySize = (w, h, save) => {
+        wrapEl.classList.add('sized');
+        wrapEl.style.width = w + 'px';
+        wrapEl.style.height = h + 'px';
+        if (save) {
+          try { localStorage.setItem('ssb_panel_size', JSON.stringify({ w: w, h: h })); } catch (e) { /* ignore */ }
+        }
+      };
+      if (rsEl && wrapEl) {
+        try {
+          const saved = JSON.parse(localStorage.getItem('ssb_panel_size') || 'null');
+          if (saved && saved.w && saved.h) applySize(saved.w, saved.h, false);
+        } catch (e) { /* ignore */ }
+        let rsDrag = null;
+        rsEl.addEventListener('mousedown', (e) => {
+          rsDrag = { x: e.clientX, y: e.clientY, w: wrapEl.offsetWidth, h: wrapEl.offsetHeight };
+          e.preventDefault();
+        });
+        window.addEventListener('mousemove', (e) => {
+          if (!rsDrag) return;
+          const w = Math.max(300, Math.min(window.innerWidth - 24, rsDrag.w + e.clientX - rsDrag.x));
+          const h = Math.max(260, Math.min(window.innerHeight - 24, rsDrag.h + e.clientY - rsDrag.y));
+          applySize(w, h, false);
+        });
+        window.addEventListener('mouseup', () => {
+          if (!rsDrag) return;
+          rsDrag = null;
+          try {
+            localStorage.setItem('ssb_panel_size',
+              JSON.stringify({ w: wrapEl.offsetWidth, h: wrapEl.offsetHeight }));
+          } catch (e) { /* ignore */ }
+        });
+        rsEl.addEventListener('dblclick', () => {
+          wrapEl.classList.remove('sized');
+          wrapEl.style.width = '';
+          wrapEl.style.height = '';
+          try { localStorage.removeItem('ssb_panel_size'); } catch (e) { /* ignore */ }
+        });
+      }
+    }
     on('ssb-send', 'click', () => { sendToAll(); });
     on('ssb-stop', 'click', () => {
       state.stopRequested = true;
