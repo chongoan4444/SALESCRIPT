@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE
 // @namespace    salescript
-// @version      1.21.0
+// @version      1.22.0
 // @description  BOTFAKE — chọn chuỗi chat (Alt+Click 2 đầu) hoặc theo snippet trong Pancake rồi gửi cùng 1 câu (kèm ảnh nếu muốn) cho tất cả.
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -1639,10 +1639,17 @@
         .hint { color: #64748b; font-size: 10px; line-height: 1.5; }
         .empty { color: #64748b; padding: 10px; text-align: center; }
         .count { color: #38bdf8; font-weight: 700; }
+        .bubble { display: none; background: transparent; border: none; padding: 0; cursor: pointer;
+                  line-height: 0; filter: drop-shadow(0 8px 18px rgba(88,101,242,.45));
+                  transition: transform .15s ease; }
+        .bubble:hover { transform: scale(1.1) rotate(-4deg); }
+        .bubble:active { transform: scale(.96); }
+        .bubble svg { width: 52px; height: 52px; }
+        .title .logo { width: 17px; height: 17px; vertical-align: -3px; margin-right: 3px; }
       </style>
       <div class="wrap" id="ssb-wrap">
         <div class="head" id="ssb-head">
-          <span class="title">🤖 BOTFAKE <span style="color:#64748b;font-weight:400;font-size:11px">v1.21.0</span></span>
+          <span class="title"><svg class="logo" viewBox="0 0 50 52" xmlns="http://www.w3.org/2000/svg"><path d="M10 2 L14 11" stroke="#5865F2" stroke-width="5" stroke-linecap="round" fill="none"/><path d="M40 2 L36 11" stroke="#5865F2" stroke-width="5" stroke-linecap="round" fill="none"/><rect x="0" y="12" width="50" height="40" rx="6" fill="#5865F2"/><rect x="12" y="31" width="12" height="4" rx="2" fill="#fff"/><rect x="26" y="31" width="12" height="4" rx="2" fill="#fff"/></svg>BOTFAKE <span style="color:#64748b;font-weight:400;font-size:11px">v1.22.0</span></span>
           <button class="badge on" id="ssb-toggle" title="Bật/tắt tính năng">BẬT</button>
           <button class="minibtn" id="ssb-close" title="Tắt panel (F5 hoặc Alt+Shift+B để hiện lại)">✕</button>
           <button class="minibtn" id="ssb-min" title="Thu nhỏ">—</button>
@@ -1706,6 +1713,7 @@
           </div>
         </div>
       </div>
+      <button id="ssb-bubble" title="Mở panel BOTFAKE (bấm để mở lại)"><svg viewBox="0 0 50 52" xmlns="http://www.w3.org/2000/svg"><path d="M10 2 L14 11" stroke="#5865F2" stroke-width="5" stroke-linecap="round" fill="none"/><path d="M40 2 L36 11" stroke="#5865F2" stroke-width="5" stroke-linecap="round" fill="none"/><rect x="0" y="12" width="50" height="40" rx="6" fill="#5865F2"/><rect x="12" y="31" width="12" height="4" rx="2" fill="#fff"/><rect x="26" y="31" width="12" height="4" rx="2" fill="#fff"/></svg></button>
     `;
     (document.body || document.documentElement).appendChild(host);
     wireEvents(shadow);
@@ -1724,8 +1732,18 @@
       render();
     });
     on('ssb-min', 'click', () => {
-      const body = root.getElementById('ssb-body');
-      body.style.display = body.style.display === 'none' ? 'flex' : 'none';
+      // thu nhỏ = biến panel thành BÓNG LOGO (con quỷ botfake) ở góc màn hình
+      const wrapEl = root.getElementById('ssb-wrap');
+      const bubble = root.getElementById('ssb-bubble');
+      if (wrapEl) wrapEl.style.display = 'none';
+      if (bubble) bubble.style.display = 'block';
+    });
+    on('ssb-bubble', 'click', () => {
+      // bấm bóng logo → mở lại panel đầy đủ
+      const wrapEl = root.getElementById('ssb-wrap');
+      const bubble = root.getElementById('ssb-bubble');
+      if (wrapEl) wrapEl.style.display = '';
+      if (bubble) bubble.style.display = 'none';
     });
     on('ssb-logzoom', 'click', () => {
       const el = root.getElementById('ssb-log');
@@ -2029,7 +2047,16 @@
     }
     if (e.altKey && e.shiftKey && (e.key === 'B' || e.key === 'b')) {
       const host = document.getElementById(PANEL_ID);
-      if (host) host.style.display = host.style.display === 'none' ? '' : 'none';
+      if (host) {
+        const showing = host.style.display === 'none';
+        host.style.display = showing ? '' : 'none';
+        if (showing && shadow) {
+          const wrapEl = shadow.getElementById('ssb-wrap');
+          const bubble = shadow.getElementById('ssb-bubble');
+          if (wrapEl) wrapEl.style.display = '';
+          if (bubble) bubble.style.display = 'none';
+        }
+      }
     }
     if (e.altKey && e.shiftKey && (e.key === 'D' || e.key === 'd')) {
       const info = selectedRowInfo();

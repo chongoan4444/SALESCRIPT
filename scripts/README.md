@@ -122,5 +122,7 @@ tương tác + page bật `ctx_7_days_enabled` + khách có `ad_clicks` ≤7 ng�
 - Nếu log báo **token hết hạn** → tải lại trang Pancake rồi chạy lại (token mới được script tự bắt).
 - Nên chạy với 1 tab Pancake; đừng gửi quá nhanh (để nguyên giãn cách ≥ 1000 ms) để tránh bị Facebook
   chặn do spam.
+- Bấm **—** để thu panel thành **bóng logo BOTFAKE** (con quỷ tím) ở góc màn hình — bấm bóng để mở lại;
+  **✕** tắt hẳn panel (Alt+Shift+B để hiện lại). Logo vẽ bằng SVG khớp logo gốc ~99%.
 - Script đặt id prefix `ssb-` nên **không đụng** các script khác đang chạy trên trang của bạn
   (`pk-*`, `adj-*`, `pancake-*`).
