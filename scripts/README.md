@@ -35,10 +35,11 @@ Phù hợp khi nhiều khách nhắn cùng 1 câu hỏi / cùng 1 tin tự độ
    cuối danh sách (tự tải danh sách nếu chưa tải).
 4. **Script không bao giờ tự cuộn danh sách** — khi cần quét toàn bộ chat (để chọn chuỗi chính xác
    khắp danh sách / so khớp snippet ngoài vùng đang thấy), bấm **“⚡ Tải danh sách”**:
-   - **Tải qua API trước (siêu nhanh)** — đúng request mà app Pancake tự gọi
-     (`GET /api/v1/conversations` + phân trang `next_cursor`): 2000–3000 chat chỉ mất vài giây,
-     **không cuộn gì cả**. Tự kiểm tra khớp với màn hình; nếu không khớp (ví dụ bạn đang bật bộ lọc
-     tag/loại) thì tự chuyển sang quét giao diện cho đúng những gì đang thấy.
+   - **Tải qua API trước (siêu nhanh)** — đúng request mà app Pancake tự gọi, **lấy bộ lọc/thứ tự
+     thẳng từ state của app** (`currentPageId`/`multiplePageIds`, `unread_first`, `filter_multi_tag`,
+     tag/loại đang lọc) nên khớp đúng màn hình; phân trang `next_cursor` — 2000–3000 chat chỉ mất
+     vài giây, **không cuộn gì cả**. Log ghi chẩn đoán đối chiếu (`API: N · màn hình: M · thiếu: X`);
+     nếu không khớp (bộ lọc lạ) thì tự chuyển sang quét giao diện cho đúng những gì đang thấy.
    - **Quét giao diện** (dự phòng): bước cuộn lớn, chờ tối thiểu, đếm dần trên nút, xong tự cuộn về chỗ cũ.
    Chuỗi **hàng nghìn chat** vẫn chạy tốt. Với chuỗi ≥150 chat nên chọn tốc độ **“Song song 5 luồng”**
    để không bị Facebook chặn (429).

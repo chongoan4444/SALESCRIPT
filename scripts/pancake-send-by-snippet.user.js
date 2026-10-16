@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Pancake – Gửi 1 câu cho các đoạn chat cùng snippet
 // @namespace    salescript
-// @version      1.15.0
+// @version      1.16.0
 // @description  Chọn chuỗi chat (Alt+Click 2 đầu) hoặc chọn theo snippet trong danh sách Pancake rồi gửi cùng 1 câu cho tất cả.
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -478,39 +478,103 @@
     }
   }
 
+  // Đọc tham số danh sách GIỐNG app (eU → buildConversationsRequest trong bundle):
+  //   pageIdOrPageIds = pages.multiplePageMode ? pages.multiplePageIds : pages.currentPageId
+  //   pageSettings    = pages.multiplePageMode ? auth.settings : pages.currentSettings
+  //   unreadFirst     = pageSettings.unread_first (tắt nếu sort UNREPLIED_*)
+  //   filterMode      = pageSettings.filter_multi_tag ("OR"/"NONE"/string)
+  //   tags/except     = conversations.filteredTag ?? "ALL"; type = conversations.filteredType
+  const LIST_SPECIAL_TYPES = ['NOT_PRIVATE_REPLY', 'LIVESTREAM_MARKED_ORDER', 'IS_LIVESTREAM_POST_ON',
+    'IS_LIVESTREAM_POST_OFF', 'PERSONAL_MESSAGE', 'GROUP_MESSAGE', 'BIZAI_GENERATING',
+    'BIZAI_NOT_GENERATING', 'BIZAI_TRANSFERRED', 'STRANGER_MESSAGE'];
+
+  function buildListRequest(pageCount, cursor, currentCount, token) {
+    const st = window.__pancakeReduxStore__.getState();
+    const pgs = st.pages || {};
+    const auth = st.auth || {};
+    const cs = st.conversations || {};
+    const multi = !!pgs.multiplePageMode;
+    const ids = multi
+      ? (Array.isArray(pgs.multiplePageIds) ? pgs.multiplePageIds : [])
+      : (pgs.currentPageId ? [pgs.currentPageId] : []);
+    const settings = (multi ? auth.settings : pgs.currentSettings) || {};
+    const ftype = Array.isArray(cs.filteredType) ? cs.filteredType : (cs.filteredType ? [cs.filteredType] : []);
+    let unreadFirst = (settings.unread_first === undefined || settings.unread_first === null)
+      ? true : !!settings.unread_first;
+    if (ftype.indexOf('UNREPLIED_ASC') > -1 || ftype.indexOf('UNREPLIED_SEEN') > -1) unreadFirst = false;
+    let mode;
+    if (multi) mode = pgs.multiPageFilterMode || settings.filter_multi_tag || 'OR';
+    else mode = settings.filter_multi_tag === true ? 'OR'
+      : (settings.filter_multi_tag === false || settings.filter_multi_tag === undefined ? 'NONE' : settings.filter_multi_tag);
+    // tags / except_tags — filteredTag có thể là "ALL" hoặc mảng (có thể lẫn "EXCEPT_TAG_123")
+    let tagsVal = (cs.filteredTag === undefined || cs.filteredTag === null) ? 'ALL' : cs.filteredTag;
+    let exceptIds = [];
+    if (Array.isArray(tagsVal)) {
+      const keep = [];
+      tagsVal.forEach((t) => {
+        const m = /^EXCEPT_TAG_(\d+)$/.exec(String(t));
+        if (m) exceptIds.push(parseInt(m[1], 10));
+        else keep.push(t);
+      });
+      tagsVal = keep;
+    }
+    // types = filteredType bỏ các cờ đặc biệt; cờ → query riêng như app
+    const types = ftype.filter((e) => LIST_SPECIAL_TYPES.indexOf(e) === -1);
+    const q = new URLSearchParams();
+    if (types.length) {
+      q.append('type', types.toString());
+    } else if (ftype.indexOf('NOT_PRIVATE_REPLY') > -1 && ftype.indexOf('COMMENT') > -1) {
+      q.append('is_private_replied', 'false');
+    }
+    if (ftype.indexOf('COMMENT') > -1 && ftype.indexOf('LIVESTREAM_MARKED_ORDER') > -1) q.append('filter_has_livestream_order', 'true');
+    if (ftype.indexOf('IS_LIVESTREAM_POST_ON') > -1) q.append('is_livestream_post', 'true');
+    else if (ftype.indexOf('IS_LIVESTREAM_POST_OFF') > -1) q.append('is_livestream_post', 'false');
+    if (ftype.indexOf('INBOX') > -1 && ftype.indexOf('GROUP_MESSAGE') > -1) q.append('inbox_type', '1');
+    if (ftype.indexOf('INBOX') > -1 && ftype.indexOf('PERSONAL_MESSAGE') > -1) q.append('inbox_type', '');
+    if (ftype.indexOf('INBOX') > -1 && ftype.indexOf('STRANGER_MESSAGE') > -1) q.append('stranger_status', '1');
+    if (ftype.indexOf('INBOX') > -1 && ftype.indexOf('BIZAI_GENERATING') > -1) q.append('bizai_status', '1');
+    if (ftype.indexOf('INBOX') > -1 && ftype.indexOf('BIZAI_NOT_GENERATING') > -1) q.append('bizai_status', '');
+    if (ftype.indexOf('INBOX') > -1 && ftype.indexOf('BIZAI_TRANSFERRED') > -1) q.append('bizai_status', '2');
+    if (cs.filteredTask === 'open' || (cs.filteredTask && cs.filteredTask !== 'close')) q.append('task_opened', 'open');
+    if (cs.filteredAssignee) q.append('assignee_id', JSON.stringify(cs.filteredAssignee));
+    ids.forEach((p) => q.append('pages[' + p + ']', String((pageCount && pageCount[p]) || 0)));
+    if (currentCount) {
+      q.append('current_count', String(currentCount));
+      if (cursor) q.append('next_cursor', cursor);
+    }
+    q.append('unread_first', unreadFirst ? 'true' : 'false');
+    q.append('mode', String(mode));
+    q.append('tags', JSON.stringify(tagsVal));
+    q.append('except_tags', JSON.stringify(exceptIds));
+    q.append('access_token', token);
+    q.append('cursor_mode', 'true');
+    q.append('from_platform', 'web');
+    return { ids, url: location.origin + '/api/v1/conversations?' + q.toString() };
+  }
+
   async function loadListViaApi(onProgress) {
     const token = getToken();
     if (!token) return { ok: false, error: 'Không lấy được access token' };
-    // các page đang kích hoạt — như app (state.pages.activatedMap)
-    let pageIds = [];
-    try {
-      const st = window.__pancakeReduxStore__.getState();
-      pageIds = Object.keys((st.pages && st.pages.activatedMap) || {});
-    } catch (e) { /* ignore */ }
-    if (!pageIds.length) return { ok: false, error: 'Không xác định được page đang bật' };
 
     const rows = [];
     const seen = new Set();
     let cursor = null;
     let pageCount = {};
     let guard = 0;
+    let ids = [];
 
     while (guard++ < 300) {
-      const q = new URLSearchParams();
-      pageIds.forEach((p) => q.append('pages[' + p + ']', String(pageCount[p] || 0)));
-      if (rows.length) {
-        q.append('current_count', String(rows.length));
-        if (cursor) q.append('next_cursor', cursor);
+      let url;
+      try {
+        const req = buildListRequest(pageCount, cursor, rows.length || 0, token);
+        ids = req.ids;
+        url = req.url;
+      } catch (e) {
+        return { ok: false, error: 'Không đọc được bộ lọc của app: ' + (e && e.message || e) };
       }
-      q.append('unread_first', 'true');
-      q.append('mode', 'OR');
-      q.append('tags', JSON.stringify('ALL'));
-      q.append('except_tags', JSON.stringify([]));
-      q.append('access_token', token);
-      q.append('cursor_mode', 'true');
-      q.append('from_platform', 'web');
+      if (!ids.length) return { ok: false, error: 'Không xác định được page đang xem' };
 
-      const j = await fetchJson(location.origin + '/api/v1/conversations?' + q.toString());
+      const j = await fetchJson(url);
       if (!j || j.success === false) return { ok: false, error: 'API danh sách trả lỗi ở trang ' + guard };
       const convs = j.conversations || [];
       convs.forEach((c) => {
@@ -561,14 +625,22 @@
       const vis = visibleRows();
       const byId = new Map(api.rows.map((r) => [r.id, r]));
       let missing = 0, scattered = 0;
+      const missSample = [];
       for (let i = 0; i < vis.length; i++) {
-        if (!byId.has(vis[i].id)) missing++;
+        if (!byId.has(vis[i].id)) {
+          missing++;
+          if (missSample.length < 3) missSample.push(vis[i].id);
+        }
         if (i > 0) {
           const a = byId.get(vis[i - 1].id), b = byId.get(vis[i].id);
           if (a && b && Math.abs(a.order - b.order) > 3) scattered++;
         }
       }
-      if (!vis.length || (missing === 0 && scattered <= 2)) {
+      const scatterLimit = Math.max(2, Math.ceil(vis.length * 0.2));
+      logLine('ℹ API: ' + api.rows.length + ' chat · màn hình: ' + vis.length + ' dòng · thiếu: '
+        + missing + ' · lệch thứ tự: ' + scattered
+        + (missing ? ' · id thiếu: ' + missSample.join(', ') : ''));
+      if (!vis.length || (missing === 0 && scattered <= scatterLimit)) {
         const found = new Map(api.rows.map((r) => [r.id, { ...r }]));
         // cập nhật tên/giờ/loại theo app cho các dòng đang thấy trên màn hình
         vis.forEach((r) => {
@@ -1129,7 +1201,7 @@
       </style>
       <div class="wrap" id="ssb-wrap">
         <div class="head" id="ssb-head">
-          <span class="title">💬 Gửi 1 câu theo snippet <span style="color:#64748b;font-weight:400;font-size:11px">v1.15.0</span></span>
+          <span class="title">💬 Gửi 1 câu theo snippet <span style="color:#64748b;font-weight:400;font-size:11px">v1.16.0</span></span>
           <button class="badge on" id="ssb-toggle" title="Bật/tắt tính năng">BẬT</button>
           <button class="minibtn" id="ssb-close" title="Tắt panel (F5 hoặc Alt+Shift+B để hiện lại)">✕</button>
           <button class="minibtn" id="ssb-min" title="Thu nhỏ">—</button>
