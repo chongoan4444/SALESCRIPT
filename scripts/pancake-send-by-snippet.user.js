@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Pancake – Gửi 1 câu cho các đoạn chat cùng snippet
 // @namespace    salescript
-// @version      1.12.0
+// @version      1.13.0
 // @description  Chọn chuỗi chat (Alt+Click 2 đầu) hoặc chọn theo snippet trong danh sách Pancake rồi gửi cùng 1 câu cho tất cả.
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -694,21 +694,29 @@
         credentials: 'include',
       });
       let data = {};
-      try { data = await res.json(); } catch (e) { /* non-json */ }
+      let parsed = true;
+      try { data = await res.json(); } catch (e) { parsed = false; }
       if (res.ok && data && data.success) {
-        return { ok: true, id: data.id || data.message_id || '', sendBy: 'api' };
+        return { ok: true, id: data.id || data.message_id || '', sendBy: 'api', sent: true };
       }
       if (res.status === 401 || res.status === 403) {
         capturedToken = null; // token cũ — lần sau tự lấy token mới
-        return { ok: false, error: 'Token hết hạn/không hợp lệ (' + res.status + ') — tải lại trang rồi thử lại' };
+        return { ok: false, sent: false, error: 'Token hết hạn/không hợp lệ (' + res.status + ') — tải lại trang rồi thử lại' };
       }
+      // 200 nhưng không đọc được kết quả, hoặc lỗi 5xx → KHÔNG rõ tin đã đi hay chưa
+      if ((res.ok && (!parsed || !data || data.success === undefined)) || res.status >= 500) {
+        return { ok: false, sent: 'maybe', error: 'API không trả kết quả rõ (' + res.status + ')' };
+      }
+      // server trả lời rõ ràng là không gửi được → chắc chắn chưa gửi
       return {
         ok: false,
+        sent: false,
         error: (data && (data.message || data.error)) || ('HTTP ' + res.status),
         code: data && data.message_code,
       };
     } catch (e) {
-      return { ok: false, error: 'Lỗi mạng: ' + (e && e.message || e) };
+      // lỗi mạng: request có thể đã tới server → KHÔNG rõ — không được thử kênh khác
+      return { ok: false, sent: 'maybe', error: 'Lỗi mạng: ' + (e && e.message || e) };
     }
   }
 
@@ -817,10 +825,16 @@
     if (!gid) return { ok: false, error: 'Không tìm thấy globalId' };
     try {
       const res = await helper.sendMessage(pageId, gid, { text });
-      if (res && res.success) return { ok: true, id: gid, sendBy: 'socket' };
-      return { ok: false, error: 'Socket không gửi được' + (res && res.reason ? ' (' + res.reason + ')' : '') };
+      if (res && res.success) return { ok: true, id: gid, sendBy: 'socket', sent: true };
+      const reason = String((res && res.reason) || '');
+      // các lý do CỐT: chắc chắn chưa publish gì → được phép thử kênh khác
+      if (/no_socket_found|getGlobalIdFailed|markOptimisticMessageFailed/i.test(reason)) {
+        return { ok: false, sent: false, error: 'Socket không gửi được (' + reason + ')' };
+      }
+      // còn lại (hết thời gian chờ ACK, sự kiện thay optimistic…): tin CÓ THỂ đã đi → không thử kênh khác
+      return { ok: false, sent: 'maybe', error: 'Socket không rõ kết quả' + (reason ? ' (' + reason + ')' : '') };
     } catch (e) {
-      return { ok: false, error: 'Socket lỗi: ' + (e && e.message || e) };
+      return { ok: false, sent: 'maybe', error: 'Socket lỗi: ' + (e && e.message || e) };
     }
   }
 
@@ -880,22 +894,50 @@
     try {
       const res = await adapter.send(payload, { timeout: 35000 });
       if (res && res.success) {
-        return { ok: true, id: (res.data && (res.data.timestamp || res.data.convId)) || '', sendBy: 'extension' };
+        return { ok: true, id: (res.data && (res.data.timestamp || res.data.convId)) || '', sendBy: 'extension', sent: true };
       }
-      return { ok: false, error: 'Extension không gửi được' };
+      if (res && res.success === false) {
+        return { ok: false, sent: false, error: 'Extension không gửi được' }; // extension trả lời rõ: chưa gửi
+      }
+      // không có phản hồi (timeout/hủy) → extension có thể đã gửi → KHÔNG rõ
+      return { ok: false, sent: 'maybe', error: 'Extension không phản hồi' };
     } catch (e) {
-      return { ok: false, error: 'Extension lỗi: ' + (e && e.message || e) };
+      return { ok: false, sent: 'maybe', error: 'Extension lỗi: ' + (e && e.message || e) };
+    }
+  }
+
+  // Kiểm tra tin đã TỚI THẬT trong đoạn chat chưa (dùng khi kết quả gửi "không rõ"):
+  // lấy lại conversation — snippet = nội dung tin mới nhất. true=đã tới, false=chưa, null=không kiểm chứng được
+  async function verifyDelivery(conv, text) {
+    await sleep(2500); // chờ tin cập nhật lên server
+    try {
+      const token = getToken();
+      if (!token) return null;
+      const res = await fetch(apiBase() + '/v1/pages/' + (conv.pageId || (conv.id || '').split('_')[0])
+        + '/conversations/' + encodeURIComponent(conv.id) + '?access_token=' + encodeURIComponent(token),
+        { headers: { Accept: 'application/json' }, credentials: 'include', cache: 'no-store' });
+      const j = await res.json().catch(() => null);
+      const c = (j && (j.conversation || (j.data && j.data.conversation) || (j.id ? j : null))) || null;
+      if (!c) return null;
+      const n1 = String(c.snippet || '').replace(/\s+/g, ' ').trim();
+      const n2 = String(text || '').replace(/\s+/g, ' ').trim();
+      if (!n1 || !n2) return null;
+      if (n1 === n2 || n2.startsWith(n1) || n1.startsWith(n2)) return true;
+      return false;
+    } catch (e) {
+      return null;
     }
   }
 
   // API (nhanh) → Socket (đường gửi tay) → Extension
   // CHỈ gửi hàng loạt — KHÔNG còn cơ chế gửi từng con qua giao diện.
-  // Có nhớ kênh tốt cho từng chat + bỏ API ngay khi biết thread đang bị "(#10)" kiểm soát
+  // Chống TRÙNG TIN: kênh nào báo "không rõ kết quả" (tin có thể đã đi) → DỪNG ngay,
+  // không thử kênh khác; kết quả không rõ sẽ được xác minh bằng verifyDelivery trước khi gửi lại.
   async function sendOne(conv, text) {
     const channels = {
       api: async () => {
         const r = await sendViaApi(conv, text);
-        if (!r.ok && isThreadControlError(r.error)) batchSkipApi = true;
+        if (!r.ok && r.sent !== 'maybe' && isThreadControlError(r.error)) batchSkipApi = true;
         return r;
       },
       socket: () => sendViaSocket(conv, text),
@@ -915,24 +957,41 @@
       const r = await channels[ch]();
       if (r.ok) {
         markChannel(conv.id, ch);
-        return { ok: true, id: r.id || '', sendBy: r.sendBy || ch };
+        return { ok: true, id: r.id || '', sendBy: r.sendBy || ch, sent: true };
       }
       tried.push((ch === 'ext' ? 'Ext' : ch) + ': ' + (r.error || 'fail'));
+      // "không rõ" = tin CÓ THỂ đã đi — thử tiếp kênh khác sẽ gửi TRÙNG → dừng ngay
+      if (r.sent === 'maybe') {
+        return { ok: false, uncertain: true, sent: 'maybe', error: tried.join(' | ') };
+      }
       if (r.error && r.error.indexOf('Token') === 0) return r; // token hỏng — dừng hẳn
     }
-    return { ok: false, error: tried.join(' | ') };
+    return { ok: false, sent: false, error: tried.join(' | ') };
   }
 
   async function sendToAll() {
+    if (state.sending) return; // chặn bấm đúp / gọi đúp → gửi TRÙNG
     // LƯU Ý: panel nằm trong shadow DOM → phải lấy phần tử qua shadow.getElementById,
     // document.querySelector sẽ không thấy (đây là nguyên nhân lỗi "Hãy nhập nội dung câu cần gửi")
     const msgEl = shadow && shadow.getElementById('ssb-msg');
     const text = (msgEl && msgEl.value || '').trim();
     if (!text) { alert('Hãy nhập nội dung câu cần gửi.'); return; }
-    const targets = state.matches.filter((m) => m.checked);
+    let targets = state.matches.filter((m) => m.checked);
     if (!targets.length) {
       alert('Chưa có đoạn chat nào được chọn.\nHãy chọn snippet (nút "Lấy snippet từ chat đang chọn")\nhoặc chọn chuỗi bằng 2 lần Alt+Click (đầu → cuối).');
       return;
+    }
+    // loại dòng trùng id — 1 chat chỉ được gửi 1 lần
+    {
+      const seenIds = new Set();
+      const uniq = [];
+      targets.forEach((m) => {
+        if (!seenIds.has(m.id)) { seenIds.add(m.id); uniq.push(m); }
+      });
+      if (uniq.length !== targets.length) {
+        logLine('⚠ Loại ' + (targets.length - uniq.length) + ' dòng trùng lặp trong danh sách gửi');
+      }
+      targets = uniq;
     }
     const names = targets.slice(0, MAX_NAME_LIST).map((m) => m.name || m.id).join(', ')
       + (targets.length > MAX_NAME_LIST ? ', …' : '');
@@ -957,19 +1016,35 @@
       ? '🚀 Bắt đầu gửi ' + targets.length + ' chat THEO LƯỢT: mỗi lượt ' + WAVE_SIZE + ' tin, cách nhau ' + WAVE_GAP + 'ms…'
       : '🚀 Bắt đầu gửi ' + targets.length + ' chat (1 lượt — ' + WAVE_SIZE + ' tin/lượt)…');
 
-    let ok = 0, fail = 0, done = 0;
+    let ok = 0, fail = 0, done = 0, unsure = 0;
     const failedList = [];
 
+    // Kết quả "không rõ" (tin có thể đã đi) → XÁC MINH xem tin đã tới chưa rồi mới quyết định.
+    // Tới rồi → tính thành công; chưa tới → đưa vào danh sách gửi lại; không xác minh được → KHÔNG gửi lại (chống trùng).
+    const resolveUncertain = async (c, r) => {
+      logLine('⏳ … không rõ kết quả với ' + (c.name || c.id) + ' — đang kiểm tra tin đã tới chưa…');
+      const v = await verifyDelivery(c, text);
+      if (v === true) return { ok: true, sendBy: 'xác minh', sent: true };
+      if (v === false) return { ok: false, sent: false, error: r.error + ' · xác minh: tin CHƯA tới' };
+      return { ok: false, sent: 'maybe', uncertain: true, error: r.error + ' · không xác minh được' };
+    };
+
     const sendOneAndLog = async (c, retry) => {
-      const r = await sendOne(c, text);
+      let r = await sendOne(c, text);
+      if (r.uncertain) r = await resolveUncertain(c, r);
       const via = r.ok ? (r.sendBy === 'socket' ? ' — qua Socket'
-        : r.sendBy === 'extension' ? ' — qua Extension' : '') : '';
+        : r.sendBy === 'extension' ? ' — qua Extension'
+        : r.sendBy === 'xác minh' ? ' — đã xác minh tin đã tới' : '') : '';
       if (retry) {
         // lượt gửi lại: chỉ gửi lại 1 lần — fail lần 2 thì chịu
         if (r.ok) {
           ok++;
           fail = Math.max(0, fail - 1);
           logLine('✅ [gửi lại] ' + (c.name || c.id) + ' — đã gửi' + via);
+        } else if (r.sent === 'maybe') {
+          fail = Math.max(0, fail - 1);
+          unsure++;
+          logLine('⚠ [gửi lại] ' + (c.name || c.id) + ' — ' + r.error + ' — KHÔNG gửi thêm để tránh trùng');
         } else {
           logLine('❌ [gửi lại] ' + (c.name || c.id) + ' — ' + r.error);
         }
@@ -979,6 +1054,10 @@
       if (r.ok) {
         ok++;
         logLine('✅ [' + done + '/' + targets.length + '] ' + (c.name || c.id) + ' — đã gửi' + via);
+      } else if (r.sent === 'maybe') {
+        unsure++;
+        logLine('⚠ [' + done + '/' + targets.length + '] ' + (c.name || c.id) + ' — ' + r.error
+          + ' — KHÔNG gửi lại để tránh trùng (kiểm tra tay giúp)');
       } else {
         fail++;
         failedList.push(c);
@@ -1030,7 +1109,8 @@
     if (state.stopRequested && done < targets.length) {
       logLine('⏸ Đã dừng sớm sau ' + done + '/' + targets.length + ' chat.');
     }
-    logLine('🏁 Hoàn tất: ' + ok + ' thành công, ' + fail + ' lỗi.');
+    logLine('🏁 Hoàn tất: ' + ok + ' thành công, ' + fail + ' lỗi.'
+      + (unsure ? ' ' + unsure + ' tin không rõ kết quả (đã KHÔNG gửi lại để tránh trùng — nên kiểm tra tay).' : ''));
     render();
   }
 
@@ -1109,7 +1189,7 @@
       </style>
       <div class="wrap" id="ssb-wrap">
         <div class="head" id="ssb-head">
-          <span class="title">💬 Gửi 1 câu theo snippet <span style="color:#64748b;font-weight:400;font-size:11px">v1.12.0</span></span>
+          <span class="title">💬 Gửi 1 câu theo snippet <span style="color:#64748b;font-weight:400;font-size:11px">v1.13.0</span></span>
           <button class="badge on" id="ssb-toggle" title="Bật/tắt tính năng">BẬT</button>
           <button class="minibtn" id="ssb-min" title="Thu nhỏ">—</button>
         </div>

@@ -72,9 +72,15 @@ Không dùng selector bịa: mọi class/id/đường API ở trên đều lấy
 
 **Không còn cơ chế gửi từng con** (đã bỏ gửi tuần tự và tầng giao diện “nhảy vào từng chat”).
 Gửi theo lượt: chỉnh **“Số tin mỗi lượt”** ngay trên panel (mặc định **200 tin/lượt**, các lượt cách
-nhau **500ms**; số tin ≤ số/lượt thì gửi 1 lượt). Mỗi lượt bắn song song toàn bộ. Chat gửi không
-thành công qua cả 3 kênh sẽ báo ❌ kèm lý do trong log và được **tự gửi lại 1 lần** khi chạy xong
-(log ghi rõ `[gửi lại]`). Bấm **“⛶ Phóng to log”** để mở rộng bảng log khi cần đọc kỹ.
+nhau **500ms**; số tin ≤ số/lượt thì gửi 1 lượt). Mỗi lượt bắn song song toàn bộ. Bấm
+**“⛶ Phóng to log”** để mở rộng bảng log khi cần đọc kỹ.
+
+**Chống trùng tin (gửi đúng 1 lần/chat):** mỗi chat chỉ xuất hiện 1 lần trong danh sách gửi (tự loại
+dòng trùng id, chặn bấm đúp). Khi một kênh báo **“không rõ kết quả”** (lỗi mạng/timeout — tin có thể
+đã đi), script **dừng ngay**, không thử kênh khác; sau ~2.5 giây **kiểm tra tin đã tới chưa** qua
+`snippet` của conversation: đã tới → tính thành công, chưa tới → mới đưa vào danh sách **gửi lại 1 lần**.
+Tin không xác minh được thì **không gửi lại** (tránh trùng) — log ghi rõ `⚠` để bạn kiểm tra tay.
+Tin báo ❌ (chắc chắn chưa gửi) sẽ được **tự gửi lại 1 lần** khi chạy xong (log `[gửi lại]`).
 
 Tự động tăng tốc: sau lần đầu API bị `(#10)`, các chat còn lại **bỏ qua API** đi thẳng sang Socket;
 kênh gửi thành công được **ghi nhớ** (session) nên lần gửi sau vào thẳng kênh đó. Log từng dòng ghi rõ
