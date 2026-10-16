@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Pancake – Gửi 1 câu cho các đoạn chat cùng snippet
 // @namespace    salescript
-// @version      1.9.1
+// @version      1.10.0
 // @description  Chọn chuỗi chat (Alt+Click 2 đầu) hoặc chọn theo snippet trong danh sách Pancake rồi gửi cùng 1 câu cho tất cả.
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -944,7 +944,7 @@
       </style>
       <div class="wrap" id="ssb-wrap">
         <div class="head" id="ssb-head">
-          <span class="title">💬 Gửi 1 câu theo snippet <span style="color:#64748b;font-weight:400;font-size:11px">v1.9.1</span></span>
+          <span class="title">💬 Gửi 1 câu theo snippet <span style="color:#64748b;font-weight:400;font-size:11px">v1.10.0</span></span>
           <button class="badge on" id="ssb-toggle" title="Bật/tắt tính năng">BẬT</button>
           <button class="minibtn" id="ssb-min" title="Thu nhỏ">—</button>
         </div>
@@ -955,6 +955,7 @@
             <div class="row" style="margin-top:6px">
               <button class="b b-blue" id="ssb-use-selected">Lấy snippet từ chat đang chọn</button>
               <button class="b b-gray" id="ssb-pick">Chọn chuỗi (2 nhấp)</button>
+              <button class="b b-gray" id="ssb-to-end">⬇ Từ đây xuống cuối</button>
               <button class="b b-gray" id="ssb-clear">Xóa</button>
             </div>
           </div>
@@ -986,7 +987,7 @@
           <div class="hint">
             • <b>Alt+Click lần 1</b> = đầu chuỗi → <b>giữ Alt + nhấp lần 2</b> = cuối chuỗi: chọn tất cả chat ở giữa (chuỗi chọn). Nhấp lần 3 = bắt đầu chuỗi mới.<br>
             • Bấm <b>“⚡ Tải danh sách”</b> khi cần quét toàn bộ chat (siêu nhanh) — script <b>không bao giờ tự cuộn</b> khi bạn không bấm; nên bấm1 lần để chọn chuỗi/so khớp chính xác khắp danh sách.<br>
-            • Hoặc bấm <b>“Lấy snippet từ chat đang chọn”</b> để gửi cho các chat cùng snippet.<br>
+            • Hoặc bấm <b>“Lấy snippet từ chat đang chọn”</b> để gửi cho các chat cùng snippet. Bấm <b>“⬇ Từ đây xuống cuối”</b> để chọn tất cả chat từ chat đang mở trở xuống cuối danh sách.<br>
             • Dòng viền <b style="color:#22c55e">xanh lá</b> = sẽ được gửi; <b style="color:#3b82f6">xanh dương</b> = đầu/cuối chuỗi hoặc nguồn snippet.<br>
             • Chat gắn nhãn <b style="color:#f59e0b">[bình luận]</b> mặc định bỏ tick (reply_inbox không áp dụng cho bình luận).<br>
             • Gửi qua API <code style="color:#94a3b8">POST /v1/pages/.../messages</code> (action=reply_inbox) — đúng request website tự dùng, không cần mở từng chat.<br>
@@ -1027,6 +1028,47 @@
         ? '👉 Chế độ chọn chuỗi: nhấp dòng ĐẦU, rồi nhấp tiếp dòng CUỐI (Esc để hủy)'
         : 'Đã tắt chế độ chọn chuỗi');
       render();
+    });
+    on('ssb-to-end', 'click', async () => {
+      // Chọn TẤT CẢ chat từ chat đang mở (trong app) trở xuống cuối danh sách
+      const info = selectedRowInfo();
+      if (!info) {
+        logLine('⚠ Không có chat nào đang được chọn — hãy bấm mở chat đó trong danh sách trước');
+        render();
+        return;
+      }
+      const btn = root.getElementById('ssb-to-end');
+      if (btn) btn.disabled = true;
+      try {
+        // chưa tải danh sách → tải để "xuống cuối" là xuống tận cuối
+        if (!state.allRows || !state.allRows.size) {
+          logLine('⚡ Chưa tải danh sách — đang tải để chọn tới tận cuối…');
+          await scanFullList();
+        }
+        const rows = sourceRows();
+        const idx = rows.findIndex((r) => r.id === info.id);
+        if (idx < 0) {
+          logLine('⚠ Không tìm thấy chat đang chọn trong danh sách — bấm "⚡ Tải danh sách" rồi làm lại');
+          return;
+        }
+        const last = rows[rows.length - 1];
+        state.mode = 'range';
+        state.target = null;
+        state.rangeStart = {
+          id: info.id, name: info.name, snippet: info.snippet,
+          snippetRaw: info.snippetRaw, time: info.time,
+        };
+        state.rangeEnd = {
+          id: last.id, name: last.name, snippet: last.snippet,
+          snippetRaw: last.snippetRaw, time: last.time,
+        };
+        computeMatches();
+        logLine('⬇ CHỌN TỪ ĐÂY XUỐNG CUỐI: ' + (info.name || info.id) + ' → cuối danh sách — '
+          + state.matches.length + ' chat trong lựa chọn');
+      } finally {
+        if (btn) btn.disabled = false;
+        render();
+      }
     });
     on('ssb-clear', 'click', () => {
       clearSelection();
