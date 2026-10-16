@@ -79,10 +79,9 @@ bấm **“🗕 Thu nhỏ log”** để thu về. Nút **✕** trên tiêu đ�
 
 **Chống trùng tin (gửi đúng 1 lần/chat):** mỗi chat chỉ xuất hiện 1 lần trong danh sách gửi (tự loại
 dòng trùng id, chặn bấm đúp). Khi một kênh báo **“không rõ kết quả”** (lỗi mạng/timeout — tin có thể
-đã đi), script **dừng ngay**, không thử kênh khác; sau ~2.5 giây **kiểm tra tin đã tới chưa** qua
-`snippet` của conversation: đã tới → tính thành công, chưa tới → mới đưa vào danh sách **gửi lại 1 lần**.
-Tin không xác minh được thì **không gửi lại** (tránh trùng) — log ghi rõ `⚠` để bạn kiểm tra tay.
-Tin báo ❌ (chắc chắn chưa gửi) sẽ được **tự gửi lại 1 lần** khi chạy xong (log `[gửi lại]`).
+đã đi), script **dừng ngay**, không thử kênh khác và **không gửi thêm** — ghi `⚠` trong log để bạn biết.
+**Lỗi là lỗi**: tin báo ❌ (chắc chắn chưa gửi) chỉ bị báo trong log — **không gửi lại, không kiểm tra
+lại** — ưu tiên tốc độ.
 
 Tự động tăng tốc: sau lần đầu API bị `(#10)`, các chat còn lại **bỏ qua API** đi thẳng sang Socket;
 kênh gửi thành công được **ghi nhớ** (session) nên lần gửi sau vào thẳng kênh đó. Log từng dòng ghi rõ

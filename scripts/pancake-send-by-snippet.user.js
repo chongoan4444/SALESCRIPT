@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Pancake – Gửi 1 câu cho các đoạn chat cùng snippet
 // @namespace    salescript
-// @version      1.14.1
+// @version      1.15.0
 // @description  Chọn chuỗi chat (Alt+Click 2 đầu) hoặc chọn theo snippet trong danh sách Pancake rồi gửi cùng 1 câu cho tất cả.
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -906,33 +906,10 @@
     }
   }
 
-  // Kiểm tra tin đã TỚI THẬT trong đoạn chat chưa (dùng khi kết quả gửi "không rõ"):
-  // lấy lại conversation — snippet = nội dung tin mới nhất. true=đã tới, false=chưa, null=không kiểm chứng được
-  async function verifyDelivery(conv, text) {
-    await sleep(2500); // chờ tin cập nhật lên server
-    try {
-      const token = getToken();
-      if (!token) return null;
-      const res = await fetch(apiBase() + '/v1/pages/' + (conv.pageId || (conv.id || '').split('_')[0])
-        + '/conversations/' + encodeURIComponent(conv.id) + '?access_token=' + encodeURIComponent(token),
-        { headers: { Accept: 'application/json' }, credentials: 'include', cache: 'no-store' });
-      const j = await res.json().catch(() => null);
-      const c = (j && (j.conversation || (j.data && j.data.conversation) || (j.id ? j : null))) || null;
-      if (!c) return null;
-      const n1 = String(c.snippet || '').replace(/\s+/g, ' ').trim();
-      const n2 = String(text || '').replace(/\s+/g, ' ').trim();
-      if (!n1 || !n2) return null;
-      if (n1 === n2 || n2.startsWith(n1) || n1.startsWith(n2)) return true;
-      return false;
-    } catch (e) {
-      return null;
-    }
-  }
-
   // API (nhanh) → Socket (đường gửi tay) → Extension
   // CHỈ gửi hàng loạt — KHÔNG còn cơ chế gửi từng con qua giao diện.
   // Chống TRÙNG TIN: kênh nào báo "không rõ kết quả" (tin có thể đã đi) → DỪNG ngay,
-  // không thử kênh khác; kết quả không rõ sẽ được xác minh bằng verifyDelivery trước khi gửi lại.
+  // không thử kênh khác, không gửi thêm. Lỗi là lỗi — báo trong log, không gửi lại, không kiểm tra lại.
   async function sendOne(conv, text) {
     const channels = {
       api: async () => {
@@ -1017,50 +994,21 @@
       : '🚀 Bắt đầu gửi ' + targets.length + ' chat (1 lượt — ' + WAVE_SIZE + ' tin/lượt)…');
 
     let ok = 0, fail = 0, done = 0, unsure = 0;
-    const failedList = [];
 
-    // Kết quả "không rõ" (tin có thể đã đi) → XÁC MINH xem tin đã tới chưa rồi mới quyết định.
-    // Tới rồi → tính thành công; chưa tới → đưa vào danh sách gửi lại; không xác minh được → KHÔNG gửi lại (chống trùng).
-    const resolveUncertain = async (c, r) => {
-      logLine('⏳ … không rõ kết quả với ' + (c.name || c.id) + ' — đang kiểm tra tin đã tới chưa…');
-      const v = await verifyDelivery(c, text);
-      if (v === true) return { ok: true, sendBy: 'xác minh', sent: true };
-      if (v === false) return { ok: false, sent: false, error: r.error + ' · xác minh: tin CHƯA tới' };
-      return { ok: false, sent: 'maybe', uncertain: true, error: r.error + ' · không xác minh được' };
-    };
-
-    const sendOneAndLog = async (c, retry) => {
-      let r = await sendOne(c, text);
-      if (r.uncertain) r = await resolveUncertain(c, r);
+    const sendOneAndLog = async (c) => {
+      const r = await sendOne(c, text);
       const via = r.ok ? (r.sendBy === 'socket' ? ' — qua Socket'
-        : r.sendBy === 'extension' ? ' — qua Extension'
-        : r.sendBy === 'xác minh' ? ' — đã xác minh tin đã tới' : '') : '';
-      if (retry) {
-        // lượt gửi lại: chỉ gửi lại 1 lần — fail lần 2 thì chịu
-        if (r.ok) {
-          ok++;
-          fail = Math.max(0, fail - 1);
-          logLine('✅ [gửi lại] ' + (c.name || c.id) + ' — đã gửi' + via);
-        } else if (r.sent === 'maybe') {
-          fail = Math.max(0, fail - 1);
-          unsure++;
-          logLine('⚠ [gửi lại] ' + (c.name || c.id) + ' — ' + r.error + ' — KHÔNG gửi thêm để tránh trùng');
-        } else {
-          logLine('❌ [gửi lại] ' + (c.name || c.id) + ' — ' + r.error);
-        }
-        return r;
-      }
+        : r.sendBy === 'extension' ? ' — qua Extension' : '') : '';
       done++;
       if (r.ok) {
         ok++;
         logLine('✅ [' + done + '/' + targets.length + '] ' + (c.name || c.id) + ' — đã gửi' + via);
-      } else if (r.sent === 'maybe') {
+      } else if (r.uncertain) {
         unsure++;
         logLine('⚠ [' + done + '/' + targets.length + '] ' + (c.name || c.id) + ' — ' + r.error
-          + ' — KHÔNG gửi lại để tránh trùng (kiểm tra tay giúp)');
+          + ' — không rõ tin đã đi chưa (không gửi thêm để tránh trùng)');
       } else {
         fail++;
-        failedList.push(c);
         logLine('❌ [' + done + '/' + targets.length + '] ' + (c.name || c.id) + ' — ' + r.error);
       }
       setProgress(done, targets.length);
@@ -1068,10 +1016,10 @@
     };
 
     // 1 lượt = bắn song song toàn bộ số tin trong lượt
-    const sendBatch = async (batch, retry) => {
+    const sendBatch = async (batch) => {
       await runPool(batch, async (c) => {
         if (state.stopRequested) return null;
-        const r = await sendOneAndLog(c, retry);
+        const r = await sendOneAndLog(c);
         if (!r.ok && r.error && r.error.indexOf('Token') === 0) {
           logLine('⛔ Dừng sớm vì token không còn hợp lệ.');
           state.stopRequested = true;
@@ -1080,10 +1028,10 @@
       }, Math.max(1, batch.length));
     };
 
-    const runWaves = async (list, retry) => {
+    const runWaves = async (list) => {
       const totalWaves = Math.ceil(list.length / WAVE_SIZE);
       for (let i = 0; i < list.length && !state.stopRequested; i += WAVE_SIZE) {
-        await sendBatch(list.slice(i, i + WAVE_SIZE), retry);
+        await sendBatch(list.slice(i, i + WAVE_SIZE));
         const waveNo = Math.ceil(Math.min(i + WAVE_SIZE, list.length) / WAVE_SIZE);
         if (i + WAVE_SIZE < list.length && !state.stopRequested) {
           logLine('🌊 Lượt ' + waveNo + '/' + totalWaves + ' xong (' + done + ' tin) — nghỉ ' + WAVE_GAP + 'ms rồi lượt tiếp…');
@@ -1092,25 +1040,15 @@
       }
     };
 
-    if (useWaves) await runWaves(targets, false);
-    else await sendBatch(targets, false);
-
-    // Gửi lại 1 lần các tin báo thất bại (nếu có)
-    if (failedList.length && !state.stopRequested) {
-      const retryTargets = failedList.slice();
-      failedList.length = 0;
-      logLine('🔄 Gửi lại ' + retryTargets.length + ' tin thất bại (1 lần)…');
-      await runWaves(retryTargets, true);
-      if (fail > 0) logLine('🔄 Gửi lại xong — vẫn còn ' + fail + ' tin không gửi được.');
-      else logLine('🔄 Gửi lại xong — tất cả đã thành công.');
-    }
+    if (useWaves) await runWaves(targets);
+    else await sendBatch(targets);
 
     state.sending = false;
     if (state.stopRequested && done < targets.length) {
       logLine('⏸ Đã dừng sớm sau ' + done + '/' + targets.length + ' chat.');
     }
     logLine('🏁 Hoàn tất: ' + ok + ' thành công, ' + fail + ' lỗi.'
-      + (unsure ? ' ' + unsure + ' tin không rõ kết quả (đã KHÔNG gửi lại để tránh trùng — nên kiểm tra tay).' : ''));
+      + (unsure ? ' ' + unsure + ' tin không rõ kết quả (không gửi thêm).' : ''));
     render();
   }
 
@@ -1191,7 +1129,7 @@
       </style>
       <div class="wrap" id="ssb-wrap">
         <div class="head" id="ssb-head">
-          <span class="title">💬 Gửi 1 câu theo snippet <span style="color:#64748b;font-weight:400;font-size:11px">v1.14.1</span></span>
+          <span class="title">💬 Gửi 1 câu theo snippet <span style="color:#64748b;font-weight:400;font-size:11px">v1.15.0</span></span>
           <button class="badge on" id="ssb-toggle" title="Bật/tắt tính năng">BẬT</button>
           <button class="minibtn" id="ssb-close" title="Tắt panel (F5 hoặc Alt+Shift+B để hiện lại)">✕</button>
           <button class="minibtn" id="ssb-min" title="Thu nhỏ">—</button>
@@ -1244,7 +1182,7 @@
             • Chat gắn nhãn <b style="color:#f59e0b">[bình luận]</b> mặc định bỏ tick (reply_inbox không áp dụng cho bình luận).<br>
             • Gửi qua API <code style="color:#94a3b8">POST /v1/pages/.../messages</code> (action=reply_inbox) — đúng request website tự dùng, không cần mở từng chat.<br>
             • Nếu API bị chặn <code style="color:#94a3b8">(#10) app khác kiểm soát thread</code> → tự gửi tiếp qua <b>Socket</b> (đúng đường gửi tay của app), rồi <b>Extension</b> — log ghi rõ kênh đã gửi. Kênh tốt được ghi nhớ cho lần sau.<br>
-            • <b>Chỉ gửi hàng loạt theo lượt</b>: chỉnh <b>“Số tin mỗi lượt”</b> (mặc định 200) — các lượt cách nhau <b>500ms</b>. Số tin ≤ số/lượt thì gửi 1 lượt. Không còn cơ chế gửi từng con qua giao diện. Tin báo ❌ sẽ được <b>tự gửi lại 1 lần</b> khi chạy xong.<br>
+            • <b>Chỉ gửi hàng loạt theo lượt</b>: chỉnh <b>“Số tin mỗi lượt”</b> (mặc định 200) — các lượt cách nhau <b>500ms</b>. Số tin ≤ số/lượt thì gửi 1 lượt. Không còn cơ chế gửi từng con qua giao diện. Lỗi là lỗi — báo ❌ trong log, không gửi lại, không kiểm tra lại.<br>
           </div>
         </div>
       </div>
