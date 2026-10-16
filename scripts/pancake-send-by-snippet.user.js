@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE
 // @namespace    salescript
-// @version      1.26.0
+// @version      1.26.1
 // @description  BOTFAKE — chọn chuỗi chat (Alt+Click 2 đầu) hoặc theo snippet trong Pancake rồi gửi cùng 1 câu (kèm ảnh nếu muốn) cho tất cả.
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -1748,10 +1748,9 @@
                     transparent 66%, transparent 76%, #7dd3fc 76%, #7dd3fc 87%, transparent 87%); }
         /* panel đã kéo cỡ → danh sách chat + log giãn ra theo */
         .wrap.sized .body { max-height: none; }
-        .wrap.sized #ssb-sec-list { flex: 1 1 auto; display: flex; flex-direction: column; min-height: 90px; }
-        .wrap.sized #ssb-sec-list .list { flex: 1 1 auto; max-height: none; min-height: 60px; }
+        .wrap.sized #ssb-sec-sl { flex: 1 1 auto; display: flex; flex-direction: column; min-height: 90px; }
+        .wrap.sized #ssb-sec-sl .saved-lists { flex: 1 1 auto; max-height: none; min-height: 60px; }
         .wrap.sized .log { flex: 1 1 auto; max-height: none; min-height: 60px; }
-        .wrap.sized .saved-lists { max-height: none; }
         .sl-cb { accent-color: #22c55e; margin: 0; cursor: pointer; }
         .hint { color: #64748b; font-size: 10px; line-height: 1.5; }
         .empty { color: #64748b; padding: 10px; text-align: center; }
@@ -1778,7 +1777,7 @@
       </style>
       <div class="wrap" id="ssb-wrap">
         <div class="head" id="ssb-head">
-          <span class="title"><svg class="logo" viewBox="0 0 50 52" width="17" height="17" xmlns="http://www.w3.org/2000/svg"><path d="M10 2 L14 11" stroke="#5865F2" stroke-width="5" stroke-linecap="round" fill="none"/><path d="M40 2 L36 11" stroke="#5865F2" stroke-width="5" stroke-linecap="round" fill="none"/><rect x="0" y="12" width="50" height="40" rx="6" fill="#5865F2"/><rect x="12" y="31" width="12" height="4" rx="2" fill="#fff"/><rect x="26" y="31" width="12" height="4" rx="2" fill="#fff"/></svg>BOTFAKE <span style="color:#64748b;font-weight:400;font-size:11px">v1.26.0</span></span>
+          <span class="title"><svg class="logo" viewBox="0 0 50 52" width="17" height="17" xmlns="http://www.w3.org/2000/svg"><path d="M10 2 L14 11" stroke="#5865F2" stroke-width="5" stroke-linecap="round" fill="none"/><path d="M40 2 L36 11" stroke="#5865F2" stroke-width="5" stroke-linecap="round" fill="none"/><rect x="0" y="12" width="50" height="40" rx="6" fill="#5865F2"/><rect x="12" y="31" width="12" height="4" rx="2" fill="#fff"/><rect x="26" y="31" width="12" height="4" rx="2" fill="#fff"/></svg>BOTFAKE <span style="color:#64748b;font-weight:400;font-size:11px">v1.26.1</span></span>
           <button class="badge on" id="ssb-toggle" title="Bật/tắt tính năng">BẬT</button>
           <button class="minibtn" id="ssb-close" title="Tắt panel (F5 hoặc Alt+Shift+B để hiện lại)">✕</button>
           <button class="minibtn" id="ssb-min" title="Thu nhỏ">—</button>
@@ -1798,25 +1797,12 @@
               <button class="b b-gray" id="ssb-clear">Xóa</button>
             </div>
           </div>
-          <div id="ssb-sec-list">
-            <div class="label">2) Đoạn chat sẽ gửi (<span class="count" id="ssb-count">0</span>)</div>
-            <div class="row" style="margin:4px 0">
-              <button class="b b-gray" id="ssb-scan">⚡ Tải danh sách</button>
-              <button class="b b-gray" id="ssb-all">Chọn tất cả</button>
-              <button class="b b-gray" id="ssb-none">Bỏ chọn</button>
-            </div>
-            <div class="list" id="ssb-list"><div class="empty">Trống</div></div>
+          <div class="row" style="margin:2px 0 4px;align-items:center">
+            <button class="b b-gray" id="ssb-scan">⚡ Tải danh sách</button>
+            <span class="hint">đã chọn: <span class="count" id="ssb-count">0</span></span>
           </div>
           <div>
-            <div class="label">LIST ĐÃ LƯU</div>
-            <div class="row" style="margin:4px 0;align-items:center">
-              <button class="b b-gray" id="ssb-sl-new">＋ Tạo list từ lựa chọn</button>
-              <span class="hint" id="ssb-sl-info">0 list</span>
-            </div>
-            <div class="saved-lists" id="ssb-sl-box"><div class="empty">Chưa có list nào — chọn chat ở mục 1–2 rồi bấm “＋ Tạo list”</div></div>
-          </div>
-          <div>
-            <div class="label">3) Câu cần gửi</div>
+            <div class="label">2) Câu cần gửi</div>
             <textarea id="ssb-msg" placeholder="Nhập 1 câu sẽ gửi cho tất cả đoạn chat ở trên…"></textarea>
             <div class="row" style="align-items:center">
               <input type="file" id="ssb-img" accept="image/*" style="display:none">
@@ -1830,23 +1816,20 @@
               <span class="hint">— các lượt cách nhau 500ms</span>
             </div>
           </div>
+          <div id="ssb-sec-sl">
+            <div class="label">LIST ĐÃ LƯU</div>
+            <div class="row" style="margin:4px 0;align-items:center">
+              <button class="b b-gray" id="ssb-sl-new">＋ Tạo list từ lựa chọn</button>
+              <span class="hint" id="ssb-sl-info">0 list</span>
+            </div>
+            <div class="saved-lists" id="ssb-sl-box"><div class="empty">Chưa có list nào — chọn chat ở mục 1–2 rồi bấm “＋ Tạo list”</div></div>
+          </div>
           <div class="row" style="align-items:center;justify-content:space-between">
             <span class="label">LOG</span>
             <button class="minibtn" id="ssb-logzoom" title="Phóng to / thu nhỏ bảng log">⛶ Phóng to log</button>
           </div>
           <div class="prog"><i id="ssb-bar"></i></div>
           <div class="log" id="ssb-log"></div>
-          <div class="hint">
-            • <b>Alt+Click lần 1</b> = đầu chuỗi → <b>giữ Alt + nhấp lần 2</b> = cuối chuỗi: chọn tất cả chat ở giữa (chuỗi chọn). Nhấp lần 3 = bắt đầu chuỗi mới.<br>
-            • Bấm <b>“⚡ Tải danh sách”</b> để tải toàn bộ chat: <b>tải qua API trước (siêu nhanh, không cuộn)</b>, nếu API không khớp màn hình (đang bật bộ lọc) thì tự quét giao diện. Nên bấm 1 lần để chọn chuỗi/so khớp chính xác khắp danh sách.<br>
-            • Hoặc bấm <b>“Lấy snippet từ chat đang chọn”</b> để gửi cho các chat cùng snippet. Bấm <b>“⬇ Từ đây xuống cuối”</b> để chọn tất cả chat từ chat đang mở trở xuống cuối danh sách.<br>
-            • Dòng viền <b style="color:#22c55e">xanh lá</b> = sẽ được gửi; <b style="color:#3b82f6">xanh dương</b> = đầu/cuối chuỗi hoặc nguồn snippet.<br>
-            • Chat gắn nhãn <b style="color:#f59e0b">[bình luận]</b> mặc định bỏ tick (reply_inbox không áp dụng cho bình luận).<br>
-            • Gửi qua API <code style="color:#94a3b8">POST /v1/pages/.../messages</code> (action=reply_inbox) — đúng request website tự dùng, không cần mở từng chat.<br>
-            • Nếu API bị chặn <code style="color:#94a3b8">(#10) app khác kiểm soát thread</code> → tự gửi tiếp qua <b>Socket</b> (đúng đường gửi tay của app), rồi <b>Extension</b> — log ghi rõ kênh đã gửi. Kênh tốt được ghi nhớ cho lần sau.<br>
-            • <b>Chỉ gửi hàng loạt theo lượt</b>: chỉnh <b>“Số tin mỗi lượt”</b> (mặc định 200) — các lượt cách nhau <b>500ms</b>. Số tin ≤ số/lượt thì gửi 1 lượt. Không còn cơ chế gửi từng con qua giao diện. Lỗi là lỗi — báo ❌ trong log, không gửi lại, không kiểm tra lại.<br>
-            • <b>📷 Chọn ảnh (tùy chọn)</b>: gửi kèm 1 ảnh cho tất cả (tải ảnh lên 1 lần, gửi qua API/Extension — kênh ảnh là API → Extension). Không tải được ảnh thì HỦY gửi.<br>
-          </div>
         </div>
         <div class="rs" id="ssb-rs" title="Kéo góc này để đổi cỡ panel — đúp chuột để về mặc định"></div>
       </div>
@@ -2009,14 +1992,6 @@
       btn.disabled = true;
       await scanFullList();
       btn.disabled = false;
-      render();
-    });
-    on('ssb-all', 'click', () => {
-      state.matches.forEach((m) => { m.checked = true; });
-      render();
-    });
-    on('ssb-none', 'click', () => {
-      state.matches.forEach((m) => { m.checked = false; });
       render();
     });
     // ===== LIST ĐÃ LƯU =====
