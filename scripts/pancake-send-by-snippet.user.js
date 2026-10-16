@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE
 // @namespace    salescript
-// @version      1.24.0
+// @version      1.25.0
 // @description  BOTFAKE — chọn chuỗi chat (Alt+Click 2 đầu) hoặc theo snippet trong Pancake rồi gửi cùng 1 câu (kèm ảnh nếu muốn) cho tất cả.
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -63,7 +63,11 @@
     stopRequested: false,
     pickMode: false,
     log: [],
+    savedLists: [],         // các list đã lưu [{id,name,items:[{id,pageId,name,snippet,snippetRaw,time,type,platform}]}]
+    loadedListId: null,     // id list đang nạp vào lựa chọn (mode 'saved')
+    loadedName: null,       // tên list đang nạp — hiện ở mục 1
   };
+  state.savedLists = loadSavedLists();
 
   let capturedToken = null; // token lấy từ request thật của trang (fetch/XHR hook)
 
@@ -257,6 +261,9 @@
   }
 
   function computeMatches() {
+    if (state.mode === 'saved') return; // đang giữ LIST ĐÃ LƯU nạp vào — không khớp lại theo snippet/chuỗi
+    state.loadedListId = null;
+    state.loadedName = null;
     const before = new Map(state.matches.map((m) => [m.id, m]));
     const list = [];
     const push = (r) => {
@@ -374,7 +381,67 @@
     state.rangeStart = null;
     state.rangeEnd = null;
     state.matches = [];
+    state.loadedListId = null;
+    state.loadedName = null;
     highlightRows();
+  }
+
+  /* ============================ LIST ĐÃ LƯU (localStorage) ============================ */
+
+  const SL_KEY = 'ssb_saved_lists';
+
+  function loadSavedLists() {
+    try {
+      const arr = JSON.parse(localStorage.getItem(SL_KEY) || '[]');
+      return Array.isArray(arr) ? arr.filter((l) => l && l.id && Array.isArray(l.items)) : [];
+    } catch (e) { return []; }
+  }
+
+  function persistSavedLists() {
+    try {
+      localStorage.setItem(SL_KEY, JSON.stringify(state.savedLists));
+      return true;
+    } catch (e) {
+      logLine('⚠ Không lưu được list vào localStorage: ' + (e && e.message || e));
+      return false;
+    }
+  }
+
+  // Nạp 1 list đã lưu → thành lựa chọn hiện tại (tất cả tick sẵn) để ▶ Chạy gửi
+  function loadSavedList(id) {
+    const l = state.savedLists.find((x) => x.id === id);
+    if (!l) return;
+    state.mode = 'saved';
+    state.target = null;
+    state.rangeStart = null;
+    state.rangeEnd = null;
+    state.loadedListId = l.id;
+    state.loadedName = l.name;
+    state.matches = l.items.map((it) => ({ ...it, checked: true, isTarget: false, mark: '' }));
+    logLine('📚 Đã nạp list “' + l.name + '” — ' + state.matches.length + ' chat sẵn sàng gửi');
+    highlightRows();
+    render();
+  }
+
+  function renderSavedLists() {
+    const box = shadow && shadow.getElementById('ssb-sl-box');
+    const info = shadow && shadow.getElementById('ssb-sl-info');
+    if (info) {
+      const nChat = state.savedLists.reduce((n, l) => n + l.items.length, 0);
+      info.textContent = state.savedLists.length + ' list · ' + nChat + ' chat';
+    }
+    if (!box) return;
+    if (!state.savedLists.length) {
+      box.innerHTML = '<div class="empty">Chưa có list nào — chọn chat ở mục 1–2 rồi bấm “＋ Tạo list”</div>';
+      return;
+    }
+    box.innerHTML = state.savedLists.map((l) => `
+      <div class="sl-row${l.id === state.loadedListId ? ' active' : ''}" data-id="${esc(l.id)}" title="Bấm để nạp list này vào danh sách gửi">
+        <span class="sl-handle" draggable="true" title="Kéo để sắp xếp">⠿</span>
+        <span class="sl-name">${esc(l.name)} <span class="sl-n">(${l.items.length})</span></span>
+        <button class="sl-btn" data-act="rename" title="Đổi tên">✎</button>
+        <button class="sl-btn" data-act="del" title="Xóa list">✕</button>
+      </div>`).join('');
   }
 
   function highlightRows() {
@@ -1646,10 +1713,22 @@
         #ssb-bubble:active { transform: scale(.96); cursor: grabbing; }
         #ssb-bubble svg { width: 40px; height: 40px; display: block; }
         .title .logo { width: 17px; height: 17px; vertical-align: -3px; margin-right: 3px; }
+        .saved-lists { border: 1px solid #334155; border-radius: 8px; max-height: 132px; overflow: auto; background: #0b1220; }
+        .sl-row { display: flex; gap: 6px; align-items: center; padding: 5px 8px; cursor: pointer; border-bottom: 1px solid #1e293b; }
+        .sl-row:last-child { border-bottom: none; }
+        .sl-row:hover { background: #132033; }
+        .sl-row.active { background: #173052; }
+        .sl-row.dragging { opacity: .45; }
+        .sl-handle { cursor: grab; color: #64748b; user-select: none; font-size: 13px; line-height: 1; }
+        .sl-handle:hover { color: #7dd3fc; }
+        .sl-name { flex: 1; color: #f8fafc; font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+        .sl-n { color: #64748b; }
+        .sl-btn { border: none; background: transparent; cursor: pointer; color: #94a3b8; font-size: 12px; padding: 2px 5px; border-radius: 5px; line-height: 1; }
+        .sl-btn:hover { background: #1e293b; color: #f8fafc; }
       </style>
       <div class="wrap" id="ssb-wrap">
         <div class="head" id="ssb-head">
-          <span class="title"><svg class="logo" viewBox="0 0 50 52" width="17" height="17" xmlns="http://www.w3.org/2000/svg"><path d="M10 2 L14 11" stroke="#5865F2" stroke-width="5" stroke-linecap="round" fill="none"/><path d="M40 2 L36 11" stroke="#5865F2" stroke-width="5" stroke-linecap="round" fill="none"/><rect x="0" y="12" width="50" height="40" rx="6" fill="#5865F2"/><rect x="12" y="31" width="12" height="4" rx="2" fill="#fff"/><rect x="26" y="31" width="12" height="4" rx="2" fill="#fff"/></svg>BOTFAKE <span style="color:#64748b;font-weight:400;font-size:11px">v1.24.0</span></span>
+          <span class="title"><svg class="logo" viewBox="0 0 50 52" width="17" height="17" xmlns="http://www.w3.org/2000/svg"><path d="M10 2 L14 11" stroke="#5865F2" stroke-width="5" stroke-linecap="round" fill="none"/><path d="M40 2 L36 11" stroke="#5865F2" stroke-width="5" stroke-linecap="round" fill="none"/><rect x="0" y="12" width="50" height="40" rx="6" fill="#5865F2"/><rect x="12" y="31" width="12" height="4" rx="2" fill="#fff"/><rect x="26" y="31" width="12" height="4" rx="2" fill="#fff"/></svg>BOTFAKE <span style="color:#64748b;font-weight:400;font-size:11px">v1.25.0</span></span>
           <button class="badge on" id="ssb-toggle" title="Bật/tắt tính năng">BẬT</button>
           <button class="minibtn" id="ssb-close" title="Tắt panel (F5 hoặc Alt+Shift+B để hiện lại)">✕</button>
           <button class="minibtn" id="ssb-min" title="Thu nhỏ">—</button>
@@ -1677,6 +1756,14 @@
               <button class="b b-gray" id="ssb-none">Bỏ chọn</button>
             </div>
             <div class="list" id="ssb-list"><div class="empty">Trống</div></div>
+          </div>
+          <div>
+            <div class="label">LIST ĐÃ LƯU</div>
+            <div class="row" style="margin:4px 0;align-items:center">
+              <button class="b b-gray" id="ssb-sl-new">＋ Tạo list từ lựa chọn</button>
+              <span class="hint" id="ssb-sl-info">0 list</span>
+            </div>
+            <div class="saved-lists" id="ssb-sl-box"><div class="empty">Chưa có list nào — chọn chat ở mục 1–2 rồi bấm “＋ Tạo list”</div></div>
           </div>
           <div>
             <div class="label">3) Câu cần gửi</div>
@@ -1881,6 +1968,104 @@
       state.matches.forEach((m) => { m.checked = false; });
       render();
     });
+    // ===== LIST ĐÃ LƯU =====
+    on('ssb-sl-new', 'click', () => {
+      const sel = state.matches.filter((m) => m.checked);
+      if (!sel.length) {
+        alert('Chưa có chat nào được chọn để lưu.\nHãy chọn snippet/chuỗi (mục 1–2) và tick chọn chat rồi thử lại.');
+        return;
+      }
+      const def = 'List ' + (state.savedLists.length + 1);
+      const name = (prompt('Tên list:', def) || '').trim() || def;
+      const l = {
+        id: 'l' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
+        name,
+        items: sel.map((m) => ({
+          id: m.id,
+          pageId: m.pageId || String(m.id).split('_')[0] || '',
+          name: m.name || '', snippet: m.snippet || '', snippetRaw: m.snippetRaw || '',
+          time: m.time || '', type: m.type || '', platform: m.platform || '',
+        })),
+      };
+      state.savedLists.push(l);
+      persistSavedLists();
+      renderSavedLists();
+      logLine('💾 Đã tạo list “' + name + '” (' + l.items.length + ' chat)');
+    });
+    const slBox = root.getElementById('ssb-sl-box');
+    if (slBox) {
+      let slDragId = null;
+      slBox.addEventListener('click', (e) => {
+        const row = e.target.closest && e.target.closest('.sl-row');
+        if (!row) return;
+        const id = row.getAttribute('data-id');
+        const l = state.savedLists.find((x) => x.id === id);
+        if (!l) return;
+        const btn = e.target.closest('.sl-btn');
+        if (btn) {
+          const act = btn.getAttribute('data-act');
+          if (act === 'rename') {
+            const name = (prompt('Đổi tên list:', l.name) || '').trim();
+            if (name && name !== l.name) {
+              l.name = name;
+              persistSavedLists();
+              renderSavedLists();
+              if (state.loadedListId === l.id) { state.loadedName = name; render(); }
+              logLine('✏️ Đã đổi tên list thành “' + name + '”');
+            }
+          } else if (act === 'del') {
+            if (!confirm('Xóa list “' + l.name + '” (' + l.items.length + ' chat)?')) return;
+            state.savedLists = state.savedLists.filter((x) => x.id !== id);
+            if (state.loadedListId === id) { state.loadedListId = null; state.loadedName = null; }
+            persistSavedLists();
+            renderSavedLists();
+            logLine('🗑 Đã xóa list “' + l.name + '”');
+          }
+          return;
+        }
+        loadSavedList(id); // bấm vào dòng → nạp list để gửi
+      });
+      slBox.addEventListener('mousedown', (e) => {
+        const h = e.target.closest && e.target.closest('.sl-handle');
+        if (h) e.preventDefault(); // kéo handle không bị chọn chữ
+      });
+      slBox.addEventListener('dragstart', (e) => {
+        const h = e.target.closest && e.target.closest('.sl-handle');
+        const row = h && h.closest('.sl-row');
+        if (!row) return;
+        slDragId = row.getAttribute('data-id');
+        row.classList.add('dragging');
+        e.dataTransfer.effectAllowed = 'move';
+        try { e.dataTransfer.setData('text/plain', slDragId); } catch (err) { /* ignore */ }
+      });
+      slBox.addEventListener('dragover', (e) => {
+        if (!slDragId) return;
+        e.preventDefault();
+        const row = e.target.closest && e.target.closest('.sl-row');
+        const dragging = slBox.querySelector('.sl-row.dragging');
+        if (!row || !dragging || row === dragging) return;
+        const rect = row.getBoundingClientRect();
+        const after = (e.clientY - rect.top) > rect.height / 2;
+        slBox.insertBefore(dragging, after ? row.nextSibling : row);
+      });
+      slBox.addEventListener('drop', (e) => { if (slDragId) e.preventDefault(); });
+      slBox.addEventListener('dragend', () => {
+        if (!slDragId) return;
+        slDragId = null;
+        // chốt thứ tự theo DOM sau khi kéo
+        const byId = new Map(state.savedLists.map((l) => [l.id, l]));
+        const order = [];
+        slBox.querySelectorAll('.sl-row').forEach((r) => {
+          const l = byId.get(r.getAttribute('data-id'));
+          if (l && order.indexOf(l) === -1) order.push(l);
+        });
+        state.savedLists.forEach((l) => { if (order.indexOf(l) === -1) order.push(l); });
+        state.savedLists = order;
+        persistSavedLists();
+        renderSavedLists();
+      });
+    }
+    renderSavedLists();
     on('ssb-send', 'click', () => { sendToAll(); });
     on('ssb-stop', 'click', () => {
       state.stopRequested = true;
@@ -1968,6 +2153,9 @@
       } else if (state.target) {
         tgt.innerHTML = '🎯 Snippet: <b>' + esc(state.target.name || '?') + '</b> · ' + esc(state.target.time || '') + '<br>'
           + esc(state.target.snippetRaw || state.target.snippet);
+      } else if (state.mode === 'saved' && state.loadedName) {
+        tgt.innerHTML = '📚 List: <b>' + esc(state.loadedName) + '</b><br>' + state.matches.length
+          + ' chat trong list đã lưu — sẵn sàng gửi';
       } else {
         tgt.innerHTML = 'Chưa chọn — <b>Alt+Click 2 lần</b> (đầu → cuối chuỗi) hoặc lấy snippet từ chat đang chọn';
       }

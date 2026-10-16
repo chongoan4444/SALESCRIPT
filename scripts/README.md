@@ -122,6 +122,9 @@ tương tác + page bật `ctx_7_days_enabled` + khách có `ad_clicks` ≤7 ng�
 - Nếu log báo **token hết hạn** → tải lại trang Pancake rồi chạy lại (token mới được script tự bắt).
 - Nên chạy với 1 tab Pancake; đừng gửi quá nhanh (để nguyên giãn cách ≥ 1000 ms) để tránh bị Facebook
   chặn do spam.
+- **LIST ĐÃ LƯU**: sau khi chọn chat (mục 1–2), bấm **＋ Tạo list từ lựa chọn** để lưu thành list
+  (lưu vào trình duyệt — không mất khi tải lại trang). Bấm vào 1 list để **nạp lại và gửi**,
+  ✎ đổi tên, ✕ xóa, kéo **⠿** để sắp xếp thứ tự. Tạo được nhiều list, đổi page vẫn gửi đúng list đã lưu.
 - Bấm **—** để thu panel thành **bóng logo BOTFAKE** (con quỷ tím) — **kéo thả bóng** đi bất kỳ đâu
   (kéo >4px = dời chỗ, bấm thật = mở lại panel);
   **✕** tắt hẳn panel (Alt+Shift+B để hiện lại). Logo vẽ bằng SVG khớp logo gốc ~99%.
