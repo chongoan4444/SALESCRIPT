@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE
 // @namespace    salescript
-// @version      1.40.0
+// @version      1.40.1
 // @description  BOTFAKE — chọn chuỗi chat (Alt+Click 2 đầu) hoặc theo snippet trong Pancake rồi gửi cùng 1 câu (kèm ảnh nếu muốn) cho tất cả.
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -927,10 +927,15 @@
       banIds.forEach((id) => { banIdNum[String(id)] = (typeof id === 'number' || /^\d+$/.test(String(id))) ? Number(id) : id; });
       const tagOf = {}; // convId → TÊN tag cấm mà nó mang (để log cho user soi)
       if (banIds.size) {
-        logLine('🔎 Lọc tag lúc gửi: kiểm tra tag "' + banNames.join('", "') + '" — tải lại 1 lượt…');
+        // ĐÂY LÀ KHO TAG CẤM CỦA TRANG (tag "…chốt"/"chặn" mà shop đã tạo sẵn) — KHÔNG phải
+        // tag đang gắn trên chat nào. Chỉ chat NÀO THẬT SỰ đang gắn 1 trong các tag này mới bị bỏ qua.
+        const preview = banNames.slice(0, 3).map((x) => '"' + x + '"').join(', ')
+          + (banNames.length > 3 ? '… +' + (banNames.length - 3) + ' tag' : '');
+        logLine('🔎 Lọc tag lúc gửi: trang có ' + banNames.length + ' tag cấm (' + preview
+          + ') — CHỈ bỏ qua chat nào THẬT SỰ đang gắn 1 trong các tag này; chat không có tag không bị ảnh hưởng.');
         const res = await loadListViaApi(null, { forceTags: Object.keys(banIdNum).map((k) => banIdNum[k]) });
         if (!res.ok) {
-          logLine('⚠ Không tải lại được tag (' + res.error + ') — chỉ lọc theo icon điện thoại.');
+          logLine('⚠ Không tải lại được tag qua API (' + res.error + ') — vẫn soi tag theo DÒNG CHAT + dữ liệu app.');
         } else {
           // CHỈ tin khi CHÍNH chat đó mang tag cấm trong dữ liệu trả về — nếu server bỏ qua
           // tham số tags mà trả cả danh sách thì vẫn không bỏ sót/không loại oan ai
@@ -2182,9 +2187,11 @@
       const ban = await filterBannedTagTargets(targets);
       const nm = (arr) => arr.slice(0, 20).map((m) => m.name || m.id).join(', ') + (arr.length > 20 ? ', …' : '');
       if (ban.skippedTag.length) {
-        logLine('🧹 Bỏ qua ' + ban.skippedTag.length + ' chat mang tag chốt/chặn: '
+        logLine('🧹 Bỏ qua ' + ban.skippedTag.length + ' chat THẬT SỰ đang gắn tag cấm: '
           + ban.skippedTag.slice(0, 20).map((x) => (x.m.name || x.m.id) + ' (tag "' + x.why + '")').join(', ')
           + (ban.skippedTag.length > 20 ? ', …' : ''));
+      } else {
+        logLine('✅ Không chat nào bị bỏ qua vì tag — không ai trong lô gắn tag "chốt"/"chặn".');
       }
       if (ban.skippedPhone.length) {
         logLine('📞 Bỏ qua ' + ban.skippedPhone.length + ' chat có icon điện thoại (sale đang chăm): ' + nm(ban.skippedPhone));
@@ -2645,7 +2652,7 @@
       </style>
       <div class="wrap" id="ssb-wrap">
         <div class="head" id="ssb-head">
-          <span class="title"><svg class="logo" viewBox="0 0 50 52" width="17" height="17" xmlns="http://www.w3.org/2000/svg"><path d="M10 2 L14 11" stroke="#5865F2" stroke-width="5" stroke-linecap="round" fill="none"/><path d="M40 2 L36 11" stroke="#5865F2" stroke-width="5" stroke-linecap="round" fill="none"/><rect x="0" y="12" width="50" height="40" rx="6" fill="#5865F2"/><rect x="12" y="31" width="12" height="4" rx="2" fill="#fff"/><rect x="26" y="31" width="12" height="4" rx="2" fill="#fff"/></svg>BOTFAKE <span style="color:#64748b;font-weight:400;font-size:11px">v1.40.0</span></span>
+          <span class="title"><svg class="logo" viewBox="0 0 50 52" width="17" height="17" xmlns="http://www.w3.org/2000/svg"><path d="M10 2 L14 11" stroke="#5865F2" stroke-width="5" stroke-linecap="round" fill="none"/><path d="M40 2 L36 11" stroke="#5865F2" stroke-width="5" stroke-linecap="round" fill="none"/><rect x="0" y="12" width="50" height="40" rx="6" fill="#5865F2"/><rect x="12" y="31" width="12" height="4" rx="2" fill="#fff"/><rect x="26" y="31" width="12" height="4" rx="2" fill="#fff"/></svg>BOTFAKE <span style="color:#64748b;font-weight:400;font-size:11px">v1.40.1</span></span>
           <button class="badge on" id="ssb-toggle" title="Bật/tắt tính năng">BẬT</button>
           <button class="minibtn" id="ssb-close" title="Tắt panel (F5 hoặc Alt+Shift+B để hiện lại)">✕</button>
           <button class="minibtn" id="ssb-min" title="Thu nhỏ">—</button>
