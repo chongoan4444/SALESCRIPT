@@ -148,10 +148,16 @@ lại** — ưu tiên tốc độ.
 - **Text luôn đi API-trước — hết vòng vo**: hint/dự đoán không còn ép text vào Socket/Ext (chậm,
   hàng đợi Extension xếp hàng) — gửi thẳng API cookie-auth như gửi tay (HAR 200 chứng minh);
   ảnh mới dùng hint. Bù cũng hết chậm: không dò PSID qua Extension khi kênh chỉ từ chối (cửa sổ).
-- **Tự lọc tag "chốt"/"chặn" lúc gửi**: trước khi bắn, script tải lại tag MỘT LƯỢT (API lọc sẵn theo
-  tag) và tự bỏ qua chat đã bị gắn tag chứa chữ "chốt" (vd "Huyền chốt" — đã chốt đơn) hoặc "chặn"
-  — kể cả khi chat đó được gắn tag SAU khi tải danh sách. Không kiểm tra được tag → vẫn gửi (không
-  bao giờ mất tin vì thiếu dữ liệu).
+- **Tự lọc tag "chốt"/"chặn" lúc gửi — 3 lớp bằng chứng (v1.40.0)**: trước khi bắn, script kiểm tra
+  tag cấm của TỪNG chat qua đủ 3 nguồn — (1) **tag hiển thị ngay trên dòng chat (DOM)** — mắt thấy gì
+  dùng nấy, tag "CHẶN" hiện trên dòng là bị loại cho dù dữ liệu nào khác hỏng; (2) dữ liệu app:
+  `filledTags` (app tự map id → tên tag) hoặc `tags` id + bảng tag trang
+  (`pageSettingTags` — shape `{[pageId]: defs}` lẫn mảng phẳng); (3) tải lại tag 1 lượt qua API lọc
+  sẵn theo id (id giữ dạng **số** như app — id chuỗi bị server bỏ qua). Và **chốt phút chót**: soi lại
+  tag/icon NGAY TRƯỚC khi bắn từng chat — tag gắn sau bước lọc vẫn bị chặn. Không kiểm tra được gì →
+  vẫn gửi (thiếu dữ liệu không được làm mất tin); log kèm tên tag đã khớp để đối chiếu. So khớp tên
+  nguyên từ, không phân biệt hoa/thường, chuẩn hóa Unicode: "CHẶN"/"chặn"/"Chặn tin"/"Huyền chốt" bị
+  loại; "Bình Chánh"/"Chánh"/"chanh" KHÔNG dính (không loại oan).
 - **Bỏ qua chat có icon điện thoại**: chat nào hiện icon 📞 (`phone-green` = `has_phone`, sale đang
   chăm số) cũng bị loại khỏi lô — soi cả icon trên màn hình, dữ liệu live của app lẫn dòng đã lưu.
   Log tách riêng từng nhóm: tag chốt/chặn 🧹 và icon điện thoại 📞.

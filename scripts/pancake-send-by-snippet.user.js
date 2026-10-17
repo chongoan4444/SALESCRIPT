@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE
 // @namespace    salescript
-// @version      1.39.0
+// @version      1.40.0
 // @description  BOTFAKE — chọn chuỗi chat (Alt+Click 2 đầu) hoặc theo snippet trong Pancake rồi gửi cùng 1 câu (kèm ảnh nếu muốn) cho tất cả.
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -720,7 +720,8 @@
     // FORCE lọc theo tag (dùng khi kiểm tra tag "chốt"/"chặn" lúc gửi):
     // server nhận tags=[id…] và tự trả đúng các chat dính 1 trong các tag đó (mode=OR)
     if (opts && Array.isArray(opts.forceTags) && opts.forceTags.length) {
-      tagsVal = opts.forceTags.map(String);
+      // id tag GIỮ DẠNG SỐ y như app (tags=[387] chứ KHÔNG ["387"]) — id chuỗi bị server bỏ qua
+      tagsVal = opts.forceTags.map((x) => (/^\d+$/.test(String(x)) ? Number(x) : String(x)));
       exceptIds = [];
       mode = 'OR';
     }
@@ -813,7 +814,9 @@
   // ("Huyền chốt", "Chặn", "chot don"…). KHÔNG dùng chuỗi con — "Bình Chánh"/"Chánh" (chanh)
   // từng bị hiểu nhầm là "chặn" (chan) → loại oan cả loạt chat sạch.
   function tagBanName(name) {
-    const raw = String(name || '').toLowerCase();
+    // chuẩn hóa NFC trước — tên tag trên DOM có thể ở dạng tổ hợp (NFD) khiến khớp chuỗi trượt
+    let raw = String(name || '').toLowerCase();
+    try { raw = raw.normalize('NFC'); } catch (e) { /* ignore */ }
     if (raw.indexOf('chốt') > -1 || raw.indexOf('chặn') > -1) return true;
     const norm = raw.normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/đ/g, 'd');
     return /\bchot\b/.test(norm) || /\bchan\b/.test(norm);
@@ -841,6 +844,53 @@
     return m.hasPhone === true;
   }
 
+  // Tên tag cấm hiển thị NGAY TRÊN DÒNG CHAT (DOM) — "mắt thấy gì dùng nấy": user thấy tag
+  // "CHẶN" trên dòng mà vẫn bị gửi → đây là bằng chứng trực tiếp, KHÔNG phụ pageSettingTags
+  // hay bất kỳ API nào. Trả về tên tag cấm đầu tiên trên dòng (để log), không thấy → null.
+  function rowBanTagFromDom(m) {
+    try {
+      const el = document.getElementById(String(m.id));
+      if (!el) return null;
+      const spans = el.querySelectorAll('.conversation_tags_item, .list-tags-conv .ant-tag, .ant-tag');
+      for (let i = 0; i < spans.length; i++) {
+        const nm = String((spans[i] && spans[i].textContent) || '').trim();
+        if (nm && tagBanName(nm)) return nm;
+      }
+    } catch (e) { /* ignore */ }
+    return null;
+  }
+
+  // Tag của chat từ dữ liệu app: `filledTags` (app TỰ map id → object tag có text) hoặc
+  // `tags` id + bảng banNameById. Trả về tên tag cấm đầu tiên, sạch → null.
+  function convBanTagFromData(m, banNameById) {
+    const checkIds = (ids) => {
+      for (let k = 0; ids && k < ids.length; k++) {
+        const nm = banNameById && banNameById[String(ids[k])];
+        if (nm) return nm;
+      }
+      return null;
+    };
+    try {
+      const st = window.__pancakeReduxStore__ && window.__pancakeReduxStore__.getState();
+      const lists = st && st.conversations
+        && [st.conversations.data, st.conversations.filteredConversationsCloneList];
+      for (let i = 0; lists && i < lists.length; i++) {
+        const arr = lists[i];
+        if (!Array.isArray(arr)) continue;
+        const hit = arr.find((c) => c && String(c.id) === String(m.id));
+        if (!hit) continue;
+        const ft = Array.isArray(hit.filledTags) ? hit.filledTags : [];
+        for (let k = 0; k < ft.length; k++) {
+          const nm = String((ft[k] && (ft[k].text || ft[k].name || ft[k].title)) || '');
+          if (nm && tagBanName(nm)) return nm;
+        }
+        const idHit = checkIds(hit.tags) || checkIds(m.tags);
+        if (idHit) return idHit;
+      }
+    } catch (e) { /* ignore */ }
+    return checkIds(m && m.tags);
+  }
+
   // Trả { kept, skippedTag, skippedPhone }: CHỈ bỏ qua khi xác nhận dính tag cấm/icon điện thoại;
   // chat không kiểm tra được → GIỮ NGUYÊN (thiếu dữ liệu không được làm mất tin).
   async function filterBannedTagTargets(targets) {
@@ -856,8 +906,12 @@
         const pid = m.pageId || String(m.id || '').split('_')[0];
         if (seenPage[pid]) return;
         seenPage[pid] = 1;
-        (defsByPage[pid] || []).forEach((t) => {
-          const nm = String((t && (t.text || t.name)) || '');
+        // bảng tag trang: { [pageId]: defs } (shape app) hoặc mảng phẳng — thiếu cũng không sao,
+        // tag cấm vẫn bắt được từ filledTags/dòng chat (DOM) ở bước lọc từng chat bên dưới
+        let defs = defsByPage[pid];
+        if (!Array.isArray(defs) && Array.isArray(defsByPage)) defs = defsByPage;
+        (defs || []).forEach((t) => {
+          const nm = String((t && (t.text || t.name || t.title)) || '');
           if (tagBanName(nm)) {
             banIds.add(t.id);
             banNameById[String(t.id)] = nm;
@@ -865,6 +919,9 @@
           }
         });
       });
+      if (!banIds.size) {
+        logLine('⚠ Không có bảng tag của trang — soi tag theo DÒNG CHAT + dữ liệu app (filledTags).');
+      }
       // id tag giữ NGUYÊN dạng số như app (tags:[387,388] — chuỗi sẽ bị server bỏ qua!)
       const banIdNum = {};
       banIds.forEach((id) => { banIdNum[String(id)] = (typeof id === 'number' || /^\d+$/.test(String(id))) ? Number(id) : id; });
@@ -883,8 +940,13 @@
           });
         }
       }
+      // BẰNG CHỨNG ĐỦ 3 LỚP cho từng chat — lớp nào bắt được trước thì dùng, log kèm tên tag:
+      //   1) tag hiển thị TRÊN DÒNG CHAT (DOM) — mắt thấy gì dùng nấy
+      //   2) dữ liệu app: filledTags (app tự map tên) / tags id + bảng tag trang
+      //   3) kết quả tải lại tag theo API (tagOf) — kiểm tra cả khi server lơ tham số lọc
       targets.forEach((m) => {
-        if (tagOf[m.id]) skippedTag.push({ m: m, why: tagOf[m.id] });
+        const why = rowBanTagFromDom(m) || convBanTagFromData(m, banNameById) || tagOf[m.id] || null;
+        if (why) skippedTag.push({ m: m, why: why });
         else if (convHasPhone(m)) skippedPhone.push(m);
         else kept.push(m);
       });
@@ -2209,6 +2271,22 @@
     const quickOn = !!(quickEl0 && quickEl0.checked);
 
     const sendOneAndLog = async (c, gtext) => {
+      // CHỐT PHÚT CHÓT — soi lại tag/icon NGAY TRƯỚC khi bắn từng chat: tag cấm có thể vừa
+      // được gắn SAU bước lọc trước, và đây là lớp an toàn cuối cho mọi lỗ dữ liệu
+      const lateBan = rowBanTagFromDom(c) || convBanTagFromData(c, {});
+      if (lateBan) {
+        done++;
+        logLine('🧹 [' + done + '/' + totalAll + '] ' + (c.name || c.id) + ' — mang tag "' + lateBan
+          + '" lúc gửi — BỎ QUA (không gửi)');
+        setProgress(done, totalAll);
+        return { ok: false, sent: false, skipped: true };
+      }
+      if (convHasPhone(c)) {
+        done++;
+        logLine('📞 [' + done + '/' + totalAll + '] ' + (c.name || c.id) + ' — có icon điện thoại lúc gửi — BỎ QUA (không gửi)');
+        setProgress(done, totalAll);
+        return { ok: false, sent: false, skipped: true };
+      }
       let r;
       if (photo) {
         const p = c.pageId || String(c.id).split('_')[0];
@@ -2567,7 +2645,7 @@
       </style>
       <div class="wrap" id="ssb-wrap">
         <div class="head" id="ssb-head">
-          <span class="title"><svg class="logo" viewBox="0 0 50 52" width="17" height="17" xmlns="http://www.w3.org/2000/svg"><path d="M10 2 L14 11" stroke="#5865F2" stroke-width="5" stroke-linecap="round" fill="none"/><path d="M40 2 L36 11" stroke="#5865F2" stroke-width="5" stroke-linecap="round" fill="none"/><rect x="0" y="12" width="50" height="40" rx="6" fill="#5865F2"/><rect x="12" y="31" width="12" height="4" rx="2" fill="#fff"/><rect x="26" y="31" width="12" height="4" rx="2" fill="#fff"/></svg>BOTFAKE <span style="color:#64748b;font-weight:400;font-size:11px">v1.39.0</span></span>
+          <span class="title"><svg class="logo" viewBox="0 0 50 52" width="17" height="17" xmlns="http://www.w3.org/2000/svg"><path d="M10 2 L14 11" stroke="#5865F2" stroke-width="5" stroke-linecap="round" fill="none"/><path d="M40 2 L36 11" stroke="#5865F2" stroke-width="5" stroke-linecap="round" fill="none"/><rect x="0" y="12" width="50" height="40" rx="6" fill="#5865F2"/><rect x="12" y="31" width="12" height="4" rx="2" fill="#fff"/><rect x="26" y="31" width="12" height="4" rx="2" fill="#fff"/></svg>BOTFAKE <span style="color:#64748b;font-weight:400;font-size:11px">v1.40.0</span></span>
           <button class="badge on" id="ssb-toggle" title="Bật/tắt tính năng">BẬT</button>
           <button class="minibtn" id="ssb-close" title="Tắt panel (F5 hoặc Alt+Shift+B để hiện lại)">✕</button>
           <button class="minibtn" id="ssb-min" title="Thu nhỏ">—</button>
