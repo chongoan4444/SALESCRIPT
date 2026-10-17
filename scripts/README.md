@@ -134,10 +134,12 @@ lại** — ưu tiên tốc độ.
 - **Payload Ext không bao giờ thiếu `convId`**: dòng list cũ/thiếu `thread_key` → tự dẫn xuất `t_` +
   `thread_id` (đúng định dạng của app) hoặc nạp đầy đủ conversation; `conversationUpdatedTime` không
   bao giờ là NaN — hai lý do hay khiến Extension từ chối trong khi gửi tay vẫn chạy.
-- **Gửi API y hệt gửi tay (bản sao curl 2026-10-17)**: `POST .../messages` KHÔNG kèm `access_token`
-  trong URL (auth bằng cookie `jwt` như người thật) và body đúng 3 trường `action → message →
-  send_by_platform` — không thêm `is_record_ctx_7_days`. Trước đây request bị coi là call API/bot nên
-  ngoài cửa sổ 24h là #551, trong khi gửi tay vẫn chạy. Text giờ đi API-trước kể cả ngoài cửa sổ.
+- **Gửi API y hệt 13 request gửi THẬT của app (`tinnhan.har` 2026-10-17)**: `POST .../messages`
+  KHÔNG kèm `access_token` trong URL (auth bằng cookie `jwt` như người thật) và body đúng thứ tự
+  `action → is_record_ctx_7_days (khi dr()) → message → [ảnh] → send_by_platform`. **Bản trước
+  bỏ hẳn `is_record_ctx_7_days` là SỢI** — đối chiếu HAR gửi thật: app luôn kèm cờ này khi dr()
+  đúng, 11/13 request thành công có cờ. THIẾU cờ = bị soi cửa sổ 24h gắt (#551) với **mọi chat
+  ngoài cửa sổ 24h** — đây là "lỗi không gửi được tin" triệt để đã tìm ra. Text luôn đi API-trước.
 - **Gửi xong tự bỏ chọn**: sau lượt gửi, các đoạn chat đã đánh dấu tự được "Xóa" chọn (như bấm nút
   Xóa) — sẵn sàng chọn lượt mới, và bấm chạy lại không bao giờ dính dấu cũ (chống gửi trùng).
 - **Text luôn đi API-trước — hết vòng vo**: hint/dự đoán không còn ép text vào Socket/Ext (chậm,
@@ -172,7 +174,13 @@ Gắn attachment đúng như app: `POST /v1/pages/{p}/contents/facebook` (`conte
 (app không dùng lại attachment tái sử dụng cho Ext — dùng lại sẽ bị từ chối "Extension không gửi được").
 Kèm cờ `is_record_ctx_7_days` khi đủ điều kiện cửa sổ quảng cáo 7 ngày của app (`dr()`: khách ≥1 ngày không
 tương tác + page bật `ctx_7_days_enabled` + khách có `ad_clicks` ≤7 ngày) — cờ này cho phép gửi ngoài cửa sổ
-24h với khách từ quảng cáo, đúng việc gửi tay trong app làm được.
+24h với khách từ quảng cáo, đúng việc gửi tay trong app làm được (đối chiếu `buildRequestBody` trong `_app`:
+`(0,ev.dr)()&&(j.is_record_ctx_7_days=!0)`).
+**Học `globalUserId` đúng từ extension (v1.38.0)**: app sau khi Extension thành công có event
+`update_global_id` — globalId extension trả về có thể ĐÚNG hơn giá trị đoán từ `from_psid` (có khách
+globalId là FBID `1000…` chứ không phải PSID). Script nay: (1) cache `res.data.globalUserId` vào
+`__tempGlobalIdCache__` sau mỗi lần Ext thành công; (2) nếu server "báo gửi thất bại" mà globalId chỉ
+là DOÁN từ `from_psid` → forceFind dò lại id đúng 1 lần rồi kênh sau dùng id vừa dò được.
 
 ## Lưu ý
 

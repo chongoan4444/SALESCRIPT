@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE
 // @namespace    salescript
-// @version      1.37.0
+// @version      1.38.0
 // @description  BOTFAKE — chọn chuỗi chat (Alt+Click 2 đầu) hoặc theo snippet trong Pancake rồi gửi cùng 1 câu (kèm ảnh nếu muốn) cho tất cả.
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -1068,7 +1068,7 @@
       if (!full) return false;
       const st = window.__pancakeReduxStore__ && window.__pancakeReduxStore__.getState();
       if (!st) return false;
-      const idle = full.last_customer_interactive_at;
+      const idle = full.last_customer_interactive_at || full.lastAt || '';
       if (idle) {
         const t = Date.parse(/[zZ+]|\+\d{2}:?\d{2}$/.test(idle) ? idle : idle + 'Z');
         if (!isNaN(t) && (Date.now() - t) < 86400000) return false; // mới tương tác <1 ngày
@@ -1273,11 +1273,13 @@
   }
 
   // Dựng request gửi inbox ĐÚNG app (dùng chung cho sendViaApi và chế độ nhanh)
-  // ĐÚNG request gửi tay THÀNH CÔNG của user (curl 2026-10-17, gửi được cả khi ngoài cửa sổ 24h):
+  // Đối chiếu 13 request gửi THẬT của app trong tinnhan.har (2026-10-17, 11/13 thành công):
   //   POST .../conversations/{id}/messages   (URL KHÔNG kèm access_token — auth bằng COOKIE jwt)
-  //   body: action=reply_inbox → message → [ảnh] → send_by_platform=web
-  // Trước đây URL nhét ?access_token=... và body thêm is_record_ctx_7_days → Pancake coi là call
-  // API/bot nên soi cửa sổ 24h gắt (#551) — trong khi gửi tay (cookie, đúng 3 trường) vẫn chạy.
+  //   body: action=reply_inbox → [is_record_ctx_7_days=true nếu dr()] → message → [ảnh] →
+  //         send_by_platform=web
+  // is_record_ctx_7_days = cờ "cửa sổ 7 ngày quảng cáo" — app thêm đúng khi dr() (xem
+  // buildRequestBody trong _app: (0,ev.dr)()&&(j.is_record_ctx_7_days=!0)). THIẾU cờ này là #551
+  // oan cho mọi chat ngoài cửa sổ 24h; có cờ thì chat ngoài 24h từ quảng cáo ≤7 ngày vẫn gửi được.
   function buildInboxSend(conv, text, photo) {
     const token = getToken();
     if (!token) return { error: 'Không tìm thấy access_token — hãy tải lại trang Pancake rồi thử lại' };
@@ -1287,6 +1289,14 @@
       + '/messages';
     const fd = new FormData();
     fd.append('action', 'reply_inbox');
+    // ĐÚNG buildRequestBody của app: dr() đúng (khách NGOÀI 24h từ quảng cáo ≤7 ngày, page bật
+    // ctx_7_days_enabled) → thêm is_record_ctx_7_days=true — THIẾU field này là #551 oan cho
+    // các chat ngoài cửa sổ 24h (đối chiếu 13 request gửi thật của app trong tinnhan.har
+    // 2026-10-17: field này có ở TẤT CẢ, 11/13 thành công). dr() sai → KHÔNG thêm (như curl cũ).
+    try {
+      const full7 = peekConv(conv) || conv;
+      if (isRecordCtx7Days(full7)) fd.append('is_record_ctx_7_days', 'true');
+    } catch (e) { /* thiếu dữ liệu → gửi như request thường */ }
     fd.append('message', text);
     if (photo && photo.fbId) {
       // đúng field + đúng THỨ TỰ request thật của app khi gửi ảnh (đã so khớp curl):
@@ -1489,7 +1499,7 @@
   // Tìm globalId (PSID) của khách — CHẠY ĐUA đúng như concurrentlyGetGLobalId trong _app:
   // cache → song song [Extension GET_GLOBAL_ID_FOR_CONV, WebSocket __MqttHelper__.findGlobalId]
   // → ai trả kết quả trước thì dùng (WS thường có cache IndexedDB → trả gần như ngay)
-  async function resolveGlobalId(full, threadId, cacheKey, convFromPsid, forceFind) {
+  async function resolveGlobalId(full, threadId, cacheKey, convFromPsid, forceFind, ctx) {
     const key = (full && full.id) || cacheKey;
     const pageId = (full && full.page_id) || (full && full.pageId) || String(cacheKey || '').split('_')[0];
     if (!forceFind) {
@@ -1505,8 +1515,12 @@
       : (psidFromFull(full, pageId) || psidFromFull({ from_psid: convFromPsid || '' }, pageId));
     if (known) {
       try { window.__tempGlobalIdCache__ && window.__tempGlobalIdCache__.set(key, known); } catch (e) { /* ignore */ }
+      // id này là DOÁN từ from_psid — với một số khách globalId thật là FBID chứ không phải PSID
+      // (bằng chứng event update_global_id trong tinnhan.har) → đánh dấu để sai là dò lại ngay
+      if (ctx) ctx.gidFromPsid = true;
       return known;
     }
+    if (ctx) ctx.gidFromPsid = false;
     // thiếu PSID → mới chạy đua dò tìm (đúng như concurrentlyGetGLobalId trong _app):
     // Ext findGlobalIdForConv và __MqttHelper__.findGlobalId chạy song song, ai ra trước dùng trước
     const tasks = [];
@@ -1627,7 +1641,7 @@
     }
     const threadId = ctx.threadId;
     if (!ctx.gidResolved) {
-      ctx.gid = await resolveGlobalId(full, threadId, conv.id, conv.fromPsid, ctx.gidForceFind);
+      ctx.gid = await resolveGlobalId(full, threadId, conv.id, conv.fromPsid, ctx.gidForceFind, ctx);
       ctx.gidResolved = true;
     }
     const gid = ctx.gid;
@@ -1704,7 +1718,7 @@
     if (!threadId) return { ok: false, error: 'Không tìm thấy thread_id' };
 
     if (!ctx.gidResolved) {
-      ctx.gid = await resolveGlobalId(full, threadId, conv.id, conv.fromPsid, ctx.gidForceFind);
+      ctx.gid = await resolveGlobalId(full, threadId, conv.id, conv.fromPsid, ctx.gidForceFind, ctx);
       ctx.gidResolved = true;
     }
     const globalUserId = ctx.gid || null;
@@ -1749,6 +1763,16 @@
     try {
       const res = await adapter.send(payload, { timeout: 35000 });
       if (res && res.success) {
+        // HỌC THEO app (onSuccess → update_global_id): globalUserId extension trả về có thể ĐÚNG
+        // hơn giá trị mình đoán (có khách globalId là FBID 1000… chứ không phải PSID) — cache lại
+        // theo conv id để các lần gửi sau (socket/ext) dùng đúng id, không bị "server báo gửi thất bại"
+        const gidBack = res.data && res.data.globalUserId;
+        if (gidBack && typeof gidBack === 'string') {
+          try {
+            window.__tempGlobalIdCache__ && window.__tempGlobalIdCache__.set(conv.id, gidBack);
+            if (ctx) { ctx.gid = gidBack; ctx.gidResolved = true; ctx.gidFromPsid = false; }
+          } catch (e) { /* ignore */ }
+        }
         return { ok: true, id: (res.data && (res.data.timestamp || res.data.convId)) || '', sendBy: 'extension', sent: true };
       }
       if (res && res.success === false) {
@@ -1932,7 +1956,12 @@
       // CHỈ dò lại PSID khi lỗi đúng nghĩa "không có/không đúng người nhận" (globalId/thread_id).
       // 'server báo gửi thất bại'/'không gửi được' là TỪ CHỐI CỦA KÊNH (cửa sổ/…) — dò PSID chỉ
       // tốn thêm RPC Extension chậm mà không cứu được — trước đây từng làm bước bù chậm như rùa.
-      if (conv.fromPsid && /globalId|thread_id/i.test(r.error || '')) {
+      // dò lại globalId khi: lỗi đúng nghĩa "không có/không đúng người nhận" (globalId/thread_id),
+      // HOẶC server thẳng thừng từ chối tin nhắn mà globalId chỉ là DOÁN từ from_psid — có khách
+      // globalId thật là FBID chứ không phải PSID (event update_global_id trong tinnhan.har).
+      const wrongGid = /globalId|thread_id/i.test(r.error || '')
+        || (ctx.gidFromPsid && /server báo gửi thất bại/.test(r.error || ''));
+      if ((conv.fromPsid || ctx.gidFromPsid) && wrongGid) {
         ctx.gidForceFind = true;
         ctx.gidResolved = false;
       }
@@ -2511,7 +2540,7 @@
       </style>
       <div class="wrap" id="ssb-wrap">
         <div class="head" id="ssb-head">
-          <span class="title"><svg class="logo" viewBox="0 0 50 52" width="17" height="17" xmlns="http://www.w3.org/2000/svg"><path d="M10 2 L14 11" stroke="#5865F2" stroke-width="5" stroke-linecap="round" fill="none"/><path d="M40 2 L36 11" stroke="#5865F2" stroke-width="5" stroke-linecap="round" fill="none"/><rect x="0" y="12" width="50" height="40" rx="6" fill="#5865F2"/><rect x="12" y="31" width="12" height="4" rx="2" fill="#fff"/><rect x="26" y="31" width="12" height="4" rx="2" fill="#fff"/></svg>BOTFAKE <span style="color:#64748b;font-weight:400;font-size:11px">v1.37.0</span></span>
+          <span class="title"><svg class="logo" viewBox="0 0 50 52" width="17" height="17" xmlns="http://www.w3.org/2000/svg"><path d="M10 2 L14 11" stroke="#5865F2" stroke-width="5" stroke-linecap="round" fill="none"/><path d="M40 2 L36 11" stroke="#5865F2" stroke-width="5" stroke-linecap="round" fill="none"/><rect x="0" y="12" width="50" height="40" rx="6" fill="#5865F2"/><rect x="12" y="31" width="12" height="4" rx="2" fill="#fff"/><rect x="26" y="31" width="12" height="4" rx="2" fill="#fff"/></svg>BOTFAKE <span style="color:#64748b;font-weight:400;font-size:11px">v1.38.0</span></span>
           <button class="badge on" id="ssb-toggle" title="Bật/tắt tính năng">BẬT</button>
           <button class="minibtn" id="ssb-close" title="Tắt panel (F5 hoặc Alt+Shift+B để hiện lại)">✕</button>
           <button class="minibtn" id="ssb-min" title="Thu nhỏ">—</button>
