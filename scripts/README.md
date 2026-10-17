@@ -88,6 +88,9 @@ lại** — ưu tiên tốc độ.
 - **Thông minh hơn — đoán trước kênh gửi** (đúng luật app `SEND_MESSAGE_API_TIME_WINDOW`): chat **ngoài cửa sổ 24h**
   (không có ads 7 ngày) → **gửi thẳng Socket/Ext** khỏi bắn API chắc thua `(#551)`; API bị chặn giữa lô `(#10)/(#551)…`
   → chat còn lại đi thẳng; chat đã biết kênh tốt → dùng luôn kênh đó. Ít lỗi hơn hẳn, không phải gửi bù mất thời gian.
+- **Cứu globalId (PSID)**: nếu WS/Ext không tìm ra PSID thì dùng ngay `from_psid` mà API đã trả sẵn trong dữ liệu
+  chat (khỏi dò tìm); Ext bị PSID rỗng thì bỏ qua cho nhanh; Socket/Ext đều thua rõ thì **API là cứu cánh cuối**
+  (chỉ chạy khi chắc chắn chưa gửi gì — không lo trùng).
 
 Tự động tăng tốc: sau lần đầu API bị `(#10)/(#551)…`, các chat còn lại **bỏ qua API** đi thẳng sang Socket;
 kênh gửi thành công được **ghi nhớ** (session) nên lần gửi sau vào thẳng kênh đó.

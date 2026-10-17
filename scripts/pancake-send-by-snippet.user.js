@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE
 // @namespace    salescript
-// @version      1.28.0
+// @version      1.28.1
 // @description  BOTFAKE — chọn chuỗi chat (Alt+Click 2 đầu) hoặc theo snippet trong Pancake rồi gửi cùng 1 câu (kèm ảnh nếu muốn) cho tất cả.
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -557,6 +557,7 @@
       time: fmtApiTime(c.updated_at),
       type: String(c.type || '').toLowerCase() === 'comment' ? 'comment' : 'inbox',
       lastAt: String(c.last_customer_interactive_at || ''), // mốc tương tác cuối của khách — đoán cửa sổ 24h
+      fromPsid: String(c.from_psid || ((c.from || {}).id) || ''), // PSID của khách — có sẵn trong dữ liệu API
       order,
     };
   }
@@ -1271,10 +1272,23 @@
     });
   }
 
+  // PSID dự phòng: API đã trả sẵn from_psid (và from.id — cùng giá trị trong dữ liệu Pancake,
+  // đúng psid mà read_watermarks dùng) — dùng khi WS/Ext không tìm ra, đỡ gửi hỏng oan.
+  function psidFromFull(full, pageId) {
+    try {
+      if (!full) return null;
+      const ok = (v) => {
+        const p = String(v || '');
+        return /^\d{5,}$/.test(p) && p !== String(pageId) ? p : null;
+      };
+      return ok(full.from_psid) || ok(full.from && full.from.id);
+    } catch (e) { return null; }
+  }
+
   // Tìm globalId (PSID) của khách — CHẠY ĐUA đúng như concurrentlyGetGLobalId trong _app:
   // cache → song song [Extension GET_GLOBAL_ID_FOR_CONV, WebSocket __MqttHelper__.findGlobalId]
   // → ai trả kết quả trước thì dùng (WS thường có cache IndexedDB → trả gần như ngay)
-  async function resolveGlobalId(full, threadId, cacheKey) {
+  async function resolveGlobalId(full, threadId, cacheKey, convFromPsid) {
     const key = (full && full.id) || cacheKey;
     const pageId = (full && full.page_id) || String(cacheKey || '').split('_')[0];
     try {
@@ -1304,7 +1318,7 @@
         .then((r) => (r && r.success && r.data) || null)
         .catch(() => null));
     }
-    const gid = await firstNonNull(tasks);
+    const gid = await firstNonNull(tasks) || psidFromFull(full, pageId) || psidFromFull({ from_psid: convFromPsid || '' }, pageId);
     if (gid) {
       try { window.__tempGlobalIdCache__ && window.__tempGlobalIdCache__.set(key, gid); } catch (e) { /* ignore */ }
     }
@@ -1334,7 +1348,7 @@
     }
     const threadId = ctx.threadId;
     if (!ctx.gidResolved) {
-      ctx.gid = await resolveGlobalId(full, threadId, conv.id);
+      ctx.gid = await resolveGlobalId(full, threadId, conv.id, conv.fromPsid);
       ctx.gidResolved = true;
     }
     const gid = ctx.gid;
@@ -1395,10 +1409,14 @@
     if (!threadId) return { ok: false, error: 'Không tìm thấy thread_id' };
 
     if (!ctx.gidResolved) {
-      ctx.gid = await resolveGlobalId(full, threadId, conv.id);
+      ctx.gid = await resolveGlobalId(full, threadId, conv.id, conv.fromPsid);
       ctx.gidResolved = true;
     }
     const globalUserId = ctx.gid || null;
+    if (!globalUserId) {
+      // chắc chắn chưa gửi gì — bỏ Ext (gửi với PSID rỗng cũng thất bại), để kênh sau/API cuối thử
+      return { ok: false, sent: false, error: 'Không có globalId — bỏ qua Ext' };
+    }
 
     const token = getToken();
     let files;
@@ -1524,7 +1542,8 @@
         || (hint && hint !== 'api')
         || (!photo && idleLong && !isRecordCtx7Days(full));
       if (goDirect) {
-        sendOne(conv, text, photo, { skipApi: true }).then((r) => {
+        const directOpts = batchSkipApi ? { skipApi: true } : { directChain: true };
+        sendOne(conv, text, photo, directOpts).then((r) => {
           if (r.ok) return; // gửi được — im lặng (đã báo "đã gửi" trước đó)
           if (r.uncertain) logLine('⚠ ' + (conv.name || conv.id) + ' — ' + r.error + ' (không rõ — không gửi thêm)');
           else logLine('❌ ' + (conv.name || conv.id) + ' — ' + r.error);
@@ -1554,6 +1573,12 @@
       : order.slice();
     if (batchSkipApi) seq = seq.filter((x) => x !== 'api');
     if (opts.skipApi) seq = seq.filter((x) => x !== 'api'); // bước bù nền: api đã thử rồi
+    if (opts.directChain) {
+      // đường gửi thẳng: Socket/Ext trước — API là CỨU CÁCH CUỐI, chỉ được thử khi các kênh
+      // trước đều THUA RÕ (loop chỉ đi tiếp khi chắc chắn chưa gửi → không lo trùng tin)
+      seq = seq.filter((x) => x !== 'api');
+      seq.push('api');
+    }
 
     const tried = [];
     for (let i = 0; i < seq.length; i++) {
@@ -1855,7 +1880,7 @@
       </style>
       <div class="wrap" id="ssb-wrap">
         <div class="head" id="ssb-head">
-          <span class="title"><svg class="logo" viewBox="0 0 50 52" width="17" height="17" xmlns="http://www.w3.org/2000/svg"><path d="M10 2 L14 11" stroke="#5865F2" stroke-width="5" stroke-linecap="round" fill="none"/><path d="M40 2 L36 11" stroke="#5865F2" stroke-width="5" stroke-linecap="round" fill="none"/><rect x="0" y="12" width="50" height="40" rx="6" fill="#5865F2"/><rect x="12" y="31" width="12" height="4" rx="2" fill="#fff"/><rect x="26" y="31" width="12" height="4" rx="2" fill="#fff"/></svg>BOTFAKE <span style="color:#64748b;font-weight:400;font-size:11px">v1.28.0</span></span>
+          <span class="title"><svg class="logo" viewBox="0 0 50 52" width="17" height="17" xmlns="http://www.w3.org/2000/svg"><path d="M10 2 L14 11" stroke="#5865F2" stroke-width="5" stroke-linecap="round" fill="none"/><path d="M40 2 L36 11" stroke="#5865F2" stroke-width="5" stroke-linecap="round" fill="none"/><rect x="0" y="12" width="50" height="40" rx="6" fill="#5865F2"/><rect x="12" y="31" width="12" height="4" rx="2" fill="#fff"/><rect x="26" y="31" width="12" height="4" rx="2" fill="#fff"/></svg>BOTFAKE <span style="color:#64748b;font-weight:400;font-size:11px">v1.28.1</span></span>
           <button class="badge on" id="ssb-toggle" title="Bật/tắt tính năng">BẬT</button>
           <button class="minibtn" id="ssb-close" title="Tắt panel (F5 hoặc Alt+Shift+B để hiện lại)">✕</button>
           <button class="minibtn" id="ssb-min" title="Thu nhỏ">—</button>
@@ -2095,6 +2120,7 @@
           name: m.name || '', snippet: m.snippet || '', snippetRaw: m.snippetRaw || '',
           time: m.time || '', type: m.type || '', platform: m.platform || '',
           lastAt: m.lastAt || '',
+          fromPsid: m.fromPsid || '',
         })),
       };
       state.savedLists.push(l);
