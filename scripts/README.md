@@ -107,6 +107,8 @@ lại** — ưu tiên tốc độ.
   gửi qua Extension không còn thiếu `convId`/`customerName`/`conversationUpdatedTime` (nguyên nhân Ext hay
   "không gửi được"); PSID chỉ lấy từ `from_psid` chính danh; server từ chối người nhận → kênh sau tự dò lại
   PSID chính chủ qua WS/Ext.
+- **Bù Socket hết chậm**: Socket được "làm nóng" ngay từ lúc bắn lô (kết nối + đồng bộ chạy song song
+  các bắn API) — con cần bù Socket chỉ còn ~1–2s thay vì ~10s phí kết nối như trước.
 
 Tự động tăng tốc: sau lần đầu API bị `(#10)/(#551)…`, các chat còn lại **bỏ qua API** đi thẳng sang Socket;
 kênh gửi thành công được **ghi nhớ** (session) nên lần gửi sau vào thẳng kênh đó.
