@@ -85,6 +85,9 @@ dòng trùng id, chặn bấm đúp). Khi một kênh báo **“không rõ kết
 lại** — ưu tiên tốc độ.
 - **⚡ Gửi nhanh** (mặc định bật, ô cạnh thiết lập lượt): bắn API **không chờ server xác nhận** — xong là báo ✅ ngay.
   Chat bị API từ chối RÕ thì tự **bù Socket/Ext trong nền** (log có dòng bù); không rõ kết quả thì bỏ — không gửi lại để tránh trùng.
+- **Thông minh hơn — đoán trước kênh gửi** (đúng luật app `SEND_MESSAGE_API_TIME_WINDOW`): chat **ngoài cửa sổ 24h**
+  (không có ads 7 ngày) → **gửi thẳng Socket/Ext** khỏi bắn API chắc thua `(#551)`; API bị chặn giữa lô `(#10)/(#551)…`
+  → chat còn lại đi thẳng; chat đã biết kênh tốt → dùng luôn kênh đó. Ít lỗi hơn hẳn, không phải gửi bù mất thời gian.
 
 Tự động tăng tốc: sau lần đầu API bị `(#10)/(#551)…`, các chat còn lại **bỏ qua API** đi thẳng sang Socket;
 kênh gửi thành công được **ghi nhớ** (session) nên lần gửi sau vào thẳng kênh đó.
