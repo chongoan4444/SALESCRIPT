@@ -72,9 +72,9 @@ Không dùng selector bịa: mọi class/id/đường API ở trên đều lấy
 3. **Extension Pancake** — đường `executeByExt` của app (`REPLY_INBOX_PHOTO`).
 
 **Không còn cơ chế gửi từng con** (đã bỏ gửi tuần tự và tầng giao diện “nhảy vào từng chat”).
-Gửi theo lượt: chỉnh **“Mỗi lượt: N tin — nghỉ N ms”** ngay trên panel (mặc định **200 tin/lượt, nghỉ 500ms** —
+Gửi theo lượt: chỉnh **“Mỗi lượt: N tin — nghỉ N ms”** ngay trên panel (mặc định **5000 tin/lượt, nghỉ 0ms** —
 cả hai **đều chỉnh được và lưu lại, giữ qua F5**; số tin ≤ số/lượt thì gửi 1 lượt). Mỗi lượt bắn song song toàn bộ. Bấm
-**“⛶ Phóng to log”** / **“⛶ Phóng to list”** để bung bảng log / bảng LIST ĐÃ LƯU thành **cửa sổ lớn
+**“⛶ Phóng to log”** / **“⛶ Phóng to”** (bảng LIST CÂU GỬI) để bung thành **cửa sổ lớn
 nổi trên trang** (không làm panel cao thêm) — cửa sổ **kéo tiêu đề để di chuyển**, **kéo góc dưới-phải
 để phóng to/thu nhỏ** (đúp chuột góc = về mặc định), vị trí + cỡ **lưu giữ qua F5**; bấm **“🗕 Thu nhỏ…”**
 hoặc **✕** trên tiêu đề cửa sổ để thu về đúng chỗ cũ trong panel. Nút **✕** trên tiêu đề panel để tắt
@@ -185,9 +185,14 @@ tương tác + page bật `ctx_7_days_enabled` + khách có `ad_clicks` ≤7 ng�
 - Nếu log báo **token hết hạn** → tải lại trang Pancake rồi chạy lại (token mới được script tự bắt).
 - Nên chạy với 1 tab Pancake; đừng gửi quá nhanh (để nguyên giãn cách ≥ 1000 ms) để tránh bị Facebook
   chặn do spam.
-- **LIST ĐÃ LƯU**: sau khi chọn chat (mục 1), bấm **＋ Tạo list từ lựa chọn** để lưu thành list
-  (lưu vào trình duyệt — không mất khi tải lại trang). **Tích ô chọn** nhiều list để **gửi cùng lúc** (gộp chat, loại trùng),
-  ✎ đổi tên, ✕ xóa, kéo **⠿** để sắp xếp thứ tự. Kéo góc dưới-phải panel để **đổi cỡ bảng** (đúp chuột = về mặc định). Tạo được nhiều list, đổi page vẫn gửi đúng list đã lưu. **Gửi xong thì các list đã tích tự xóa** (mỗi list chỉ gửi 1 lần — chống gửi trùng).
+- **LIST CÂU GỬI** (trước đây là “list”): **1 câu = nội dung cần gửi + các chat nhận**. Sau khi gõ
+  câu cần gửi và chọn chat (mục 1), bấm **＋ Tạo câu gửi** — **câu đang gõ lúc đó được gắn liền với câu
+  lưu** (lưu vào trình duyệt — không mất khi tải lại trang) và **tự gắn với lượt gửi hiện tại**.
+  **Tích ô chọn** nhiều câu để **gửi cùng lúc** — **mỗi câu được gửi đúng chữ của câu đó** (chat lẻ
+  không thuộc câu nào thì dùng ô đang gõ). Bấm **✎** để **sửa tên + nội dung từng câu** (ô nhiều dòng),
+  ✕ xóa, kéo **⠿** để sắp xếp thứ tự. Tích 1 câu → nội dung câu tự nạp vào ô cần gửi.
+  **Gửi xong (kể cả lỗi giữa chừng) thì các câu đã chốt tiêu thụ tự xóa** — danh sách xóa được chốt
+  ngay từ khi bấm Gửi, không phụ thuộc việc giữa chừng bấm tích/bỏ tích (mỗi câu chỉ gửi 1 lần — chống gửi trùng).
 - Bấm **—** để thu panel thành **bóng logo BOTFAKE** (con quỷ tím) — **kéo thả bóng** đi bất kỳ đâu
   (kéo >4px = dời chỗ, bấm thật = mở lại panel);
   **✕** tắt hẳn panel (Alt+Shift+B để hiện lại). Logo vẽ bằng SVG khớp logo gốc ~99%.

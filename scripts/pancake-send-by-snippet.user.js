@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE
 // @namespace    salescript
-// @version      1.35.0
+// @version      1.36.0
 // @description  BOTFAKE — chọn chuỗi chat (Alt+Click 2 đầu) hoặc theo snippet trong Pancake rồi gửi cùng 1 câu (kèm ảnh nếu muốn) cho tất cả.
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -267,7 +267,7 @@
   }
 
   function computeMatches() {
-    if (state.mode === 'saved') return; // đang giữ LIST ĐÃ LƯU đã tích — không khớp lại theo snippet/chuỗi
+    if (state.mode === 'saved') return; // đang giữ LIST CÂU GỬI đã tích — không khớp lại theo snippet/chuỗi
     state.listSel = new Set();
     state.loadedName = null;
     renderSavedLists();
@@ -394,14 +394,17 @@
     highlightRows();
   }
 
-  /* ============================ LIST ĐÃ LƯU (localStorage) ============================ */
+  /* ============================ LIST CÂU GỬI (localStorage) ============================ */
 
   const SL_KEY = 'ssb_saved_lists';
 
   function loadSavedLists() {
     try {
       const arr = JSON.parse(localStorage.getItem(SL_KEY) || '[]');
-      return Array.isArray(arr) ? arr.filter((l) => l && l.id && Array.isArray(l.items)) : [];
+      if (!Array.isArray(arr)) return [];
+      // câu cũ (lưu trước khi có text) → nội dung rỗng — vẫn gửi được bằng ô đang gõ
+      return arr.filter((l) => l && l.id && Array.isArray(l.items))
+        .map((l) => ({ ...l, text: String(l.text || '') }));
     } catch (e) { return []; }
   }
 
@@ -410,12 +413,12 @@
       localStorage.setItem(SL_KEY, JSON.stringify(state.savedLists));
       return true;
     } catch (e) {
-      logLine('⚠ Không lưu được list vào localStorage: ' + (e && e.message || e));
+      logLine('⚠ Không lưu được câu vào localStorage: ' + (e && e.message || e));
       return false;
     }
   }
 
-  // Từ các list ĐANG TÍCH → dựng lựa chọn hiện tại (gộp chat của mọi list, loại trùng id)
+  // Từ các câu ĐANG TÍCH → dựng lựa chọn hiện tại (gộp chat của mọi câu, loại trùng id)
   function rebuildFromLists() {
     const ids = state.listSel;
     if (!ids || !ids.size) {
@@ -435,14 +438,21 @@
       l.items.forEach((it) => {
         if (seen.has(it.id)) return;
         seen.add(it.id);
-        items.push({ ...it, checked: true, isTarget: false, mark: '' });
+        // listId: chat thuộc câu nào — lúc gửi sẽ gửi ĐÚNG nội dung của câu đó
+        items.push({ ...it, checked: true, isTarget: false, mark: '', listId: l.id });
       });
     });
     state.mode = 'saved';
     state.loadedName = names.length > 1
-      ? names.length + ' list: ' + names.slice(0, 2).join(', ') + (names.length > 2 ? '…' : '')
+      ? names.length + ' câu: ' + names.slice(0, 2).join(', ') + (names.length > 2 ? '…' : '')
       : (names[0] || '');
     state.matches = items;
+    // tích đúng 1 câu → gắn luôn NỘI DUNG câu vào ô cần gửi (chữ đã lưu khi tạo/sửa)
+    if (ids.size === 1) {
+      const only = state.savedLists.find((x) => x.id === Array.from(ids)[0]);
+      const msgEl = shadow && shadow.getElementById('ssb-msg');
+      if (only && msgEl) msgEl.value = String(only.text || '');
+    }
     highlightRows();
     render();
   }
@@ -453,25 +463,85 @@
     if (info) {
       const nChat = state.savedLists.reduce((n, l) => n + l.items.length, 0);
       const nSel = state.listSel ? state.listSel.size : 0;
-      info.textContent = state.savedLists.length + ' list · ' + nChat + ' chat'
+      info.textContent = state.savedLists.length + ' câu · ' + nChat + ' chat'
         + (nSel ? ' · đang chọn ' + nSel : '');
     }
     if (!box) return;
     if (!state.savedLists.length) {
-      box.innerHTML = '<div class="empty">Chưa có list nào — chọn chat ở mục 1–2 rồi bấm “＋ Tạo list”</div>';
+      box.innerHTML = '<div class="empty">Chưa có câu nào — chọn chat + gõ câu cần gửi rồi bấm “＋ Tạo câu gửi”</div>';
       return;
     }
     box.innerHTML = state.savedLists.map((l) => {
       const sel = !!(state.listSel && state.listSel.has(l.id));
+      const tt = 'Tích để chọn câu này gửi (chọn được nhiều câu cùng lúc)'
+        + (l.text ? '\nNội dung: ' + clip(l.text, 90) : '\n(chưa có nội dung — bấm ✎ để thêm)');
       return `
-      <div class="sl-row${sel ? ' active' : ''}" data-id="${esc(l.id)}" title="Tích để chọn list này gửi (chọn được nhiều list cùng lúc)">
+      <div class="sl-row${sel ? ' active' : ''}" data-id="${esc(l.id)}" title="${esc(tt)}">
         <input type="checkbox" class="sl-cb" ${sel ? 'checked' : ''}>
         <span class="sl-handle" draggable="true" title="Kéo để sắp xếp">⠿</span>
         <span class="sl-name">${esc(l.name)} <span class="sl-n">(${l.items.length})</span></span>
-        <button class="sl-btn" data-act="rename" title="Đổi tên">✎</button>
-        <button class="sl-btn" data-act="del" title="Xóa list">✕</button>
+        <button class="sl-btn" data-act="edit" title="Sửa tên + nội dung câu">✎</button>
+        <button class="sl-btn" data-act="del" title="Xóa câu">✕</button>
       </div>`;
     }).join('');
+  }
+
+  // Sửa 1 câu: đổi TÊN + đổi NỘI DUNG (ô nhiều dòng — prompt() của trình duyệt không làm được)
+  function openCauEditor(l) {
+    if (!shadow || !l) return;
+    if (shadow.getElementById('ssb-edit-ov')) return; // đã mở 1 hộp thoại
+    const ov = document.createElement('div');
+    ov.id = 'ssb-edit-ov';
+    ov.className = 'edit-ov';
+    const card = document.createElement('div');
+    card.className = 'edit-card';
+    const title = document.createElement('div');
+    title.className = 'edit-title';
+    title.textContent = '✎ Sửa câu';
+    const lb1 = document.createElement('div');
+    lb1.className = 'label';
+    lb1.textContent = 'TÊN CÂU';
+    const nameEl = document.createElement('input');
+    nameEl.type = 'text';
+    nameEl.value = l.name || '';
+    const lb2 = document.createElement('div');
+    lb2.className = 'label';
+    lb2.textContent = 'NỘI DUNG CÂU SẼ GỬI';
+    const textEl = document.createElement('textarea');
+    textEl.value = String(l.text || '');
+    const row = document.createElement('div');
+    row.className = 'row';
+    row.style.justifyContent = 'flex-end';
+    const btnCancel = document.createElement('button');
+    btnCancel.className = 'b b-gray';
+    btnCancel.textContent = 'Hủy';
+    const btnSave = document.createElement('button');
+    btnSave.className = 'b b-green';
+    btnSave.textContent = '💾 Lưu';
+    row.appendChild(btnCancel);
+    row.appendChild(btnSave);
+    card.appendChild(title); card.appendChild(lb1); card.appendChild(nameEl);
+    card.appendChild(lb2); card.appendChild(textEl); card.appendChild(row);
+    ov.appendChild(card);
+    shadow.appendChild(ov);
+    const close = () => { ov.remove(); };
+    btnCancel.addEventListener('click', close);
+    ov.addEventListener('mousedown', (e) => { if (e.target === ov) close(); });
+    const save = () => {
+      const newName = (nameEl.value || '').trim() || l.name;
+      const newText = textEl.value;
+      const changed = newName !== l.name || newText !== (l.text || '');
+      l.name = newName;
+      l.text = newText;
+      persistSavedLists();
+      renderSavedLists();
+      if (state.listSel.has(l.id)) rebuildFromLists(); // câu đang tích → ô cần gửi cập nhật theo
+      close();
+      if (changed) logLine('✏️ Đã sửa câu “' + l.name + '”');
+    };
+    btnSave.addEventListener('click', save);
+    nameEl.addEventListener('keydown', (e) => { if (e.key === 'Enter') save(); });
+    nameEl.focus();
   }
 
   function highlightRows() {
@@ -1884,14 +1954,31 @@
     } catch (e) { /* ignore */ }
   }
 
+  // Nhóm chat theo NỘI DUNG sẽ gửi: chat thuộc câu nào → ĐÚNG chữ của câu đó;
+  // chat lẻ (không thuộc câu nào) → câu đang gõ trên ô textarea. Trả về [{text, list}].
+  function buildSendGroups(matches, savedLists, typedText) {
+    const cauById = {};
+    (savedLists || []).forEach((l) => { cauById[l.id] = l; });
+    const cauTextOf = (m) => {
+      const l = (m && m.listId) ? cauById[m.listId] : null;
+      return (l && l.text && String(l.text).trim()) ? String(l.text) : '';
+    };
+    const map = new Map();
+    (matches || []).forEach((m) => {
+      const t = cauTextOf(m) || typedText;
+      if (!map.has(t)) map.set(t, []);
+      map.get(t).push(m);
+    });
+    return Array.from(map.entries()).map((en) => ({ text: en[0], list: en[1] }));
+  }
+
   async function sendToAll() {
     if (state.sending) return; // chặn bấm đúp / gọi đúp → gửi TRÙNG
     // LƯU Ý: panel nằm trong shadow DOM → phải lấy phần tử qua shadow.getElementById,
     // document.querySelector sẽ không thấy (đây là nguyên nhân lỗi "Hãy nhập nội dung câu cần gửi")
     const msgEl = shadow && shadow.getElementById('ssb-msg');
-    const text = (msgEl && msgEl.value || '').trim();
+    const typedText = (msgEl && msgEl.value || '').trim();
     const imgState = state.image || null;
-    if (!text && !imgState) { alert('Hãy nhập nội dung câu cần gửi (hoặc chọn ảnh).'); return; }
     let targets = state.matches.filter((m) => m.checked);
     if (!targets.length) {
       alert('Chưa có đoạn chat nào được chọn.\nHãy chọn snippet (nút "Lấy snippet từ chat đang chọn")\nhoặc chọn chuỗi bằng 2 lần Alt+Click (đầu → cuối).');
@@ -1909,6 +1996,10 @@
       }
       targets = uniq;
     }
+    // nội dung sẽ gửi: câu đã tích → chữ của TỪNG CÂU; chat lẻ → ô đang gõ
+    let sendGroups = buildSendGroups(targets, state.savedLists, typedText);
+    const textsAll = sendGroups.map((g) => g.text).filter((t) => t && t.trim());
+    if (!textsAll.length && !imgState) { alert('Hãy nhập nội dung câu cần gửi (hoặc chọn ảnh).'); return; }
     const names = targets.slice(0, MAX_NAME_LIST).map((m) => m.name || m.id).join(', ')
       + (targets.length > MAX_NAME_LIST ? ', …' : '');
     const nComment = targets.filter((m) => m.type === 'comment').length;
@@ -1916,8 +2007,14 @@
       ? '\n\n⚠ Trong đó ' + nComment + ' chat loại BÌNH LUẬN — sẽ gửi dưới dạng TRẢ LỜI BÌNH LUẬN (công khai dưới bài viết)!'
       : '';
     const imgNote = imgState ? '\n\n📷 Kèm ảnh: ' + (imgState.name || 'ảnh') : '';
-    if (!confirm('Gửi ' + (text ? '1 câu' : 'ảnh') + ' tới ' + targets.length + ' đoạn chat đã chọn?\n\n“'
-      + clip(text || '(chỉ gửi ảnh)', 120) + '”' + imgNote + '\n\nNhận: ' + names + warnComment)) return;
+    const textNote = textsAll.length > 1
+      ? '\n\n📝 ' + textsAll.length + ' nội dung — mỗi câu được gửi đúng chữ đã lưu: '
+        + textsAll.map((t) => '“' + clip(t, 40) + '”').join(', ')
+      : '';
+    if (!confirm('Gửi ' + (textsAll.length > 1 ? textsAll.length + ' nội dung' : (textsAll.length ? '1 câu' : 'ảnh'))
+      + ' tới ' + targets.length + ' đoạn chat đã chọn?\n\n'
+      + (textsAll.length === 1 ? '“' + clip(textsAll[0] || '(chỉ gửi ảnh)', 120) + '”' : '(mỗi câu đúng nội dung đã lưu)')
+      + textNote + imgNote + '\n\nNhận: ' + names + warnComment)) return;
 
     // LỌC TRƯỚC KHI BẮN: tag "chốt"/"chặn" (tải lại tag 1 lượt) + chat có icon điện thoại (has_phone)
     {
@@ -1945,6 +2042,9 @@
     state.stopRequested = false;
     batchSkipApi = false;
     render();
+    // CHỐT danh sách câu sẽ TIÊU THỤ ngay từ đầu lượt: gửi xong (kể cả lỗi giữa chừng) sẽ xóa
+    // ĐÚNG các câu này — không phụ lệch việc giữa chừng bấm tích/bỏ tích câu khác.
+    const consumeIds = new Set(state.listSel || []);
 
     // Chuẩn bị ảnh (nếu có): upload 1 lần → gắn attachment cho từng page
     let photo = null;
@@ -1983,30 +2083,41 @@
     const WAVE_SIZE = Math.max(1, Math.min(5000, parseInt((waveEl && waveEl.value) || '5000', 10) || 5000));
     const gapRaw = parseInt((gapEl && gapEl.value) || '500', 10);
     const WAVE_GAP = isNaN(gapRaw) ? 0 : Math.max(0, Math.min(60000, gapRaw));
-    const useWaves = targets.length > WAVE_SIZE;
+    // gửi theo từng nhóm nội dung (câu khác câu → chữ khác chữ)
+    sendGroups = buildSendGroups(targets, state.savedLists, typedText);
+    if (!imgState) {
+      const emptyGs = sendGroups.filter((g) => !g.text.trim());
+      if (emptyGs.length) {
+        const nEmpty = emptyGs.reduce((n2, g) => n2 + g.list.length, 0);
+        logLine('⚠ Bỏ ' + nEmpty + ' chat chưa có nội dung (câu rỗng + ô cần gửi trống) — không gửi chữ trống.');
+        sendGroups = sendGroups.filter((g) => g.text.trim());
+      }
+    }
+    const totalAll = targets.length;
+    const useWaves = totalAll > WAVE_SIZE;
     logLine(useWaves
-      ? '🚀 Bắt đầu gửi ' + targets.length + ' chat THEO LƯỢT: mỗi lượt ' + WAVE_SIZE + ' tin, cách nhau ' + WAVE_GAP + 'ms…'
-      : '🚀 Bắt đầu gửi ' + targets.length + ' chat (1 lượt — ' + WAVE_SIZE + ' tin/lượt)…');
+      ? '🚀 Bắt đầu gửi ' + totalAll + ' chat THEO LƯỢT: mỗi lượt ' + WAVE_SIZE + ' tin, cách nhau ' + WAVE_GAP + 'ms…'
+      : '🚀 Bắt đầu gửi ' + totalAll + ' chat (1 lượt — ' + WAVE_SIZE + ' tin/lượt)…');
 
     let ok = 0, fail = 0, done = 0, unsure = 0, firedN = 0;
     const quickEl0 = shadow && shadow.getElementById('ssb-quick');
     const quickOn = !!(quickEl0 && quickEl0.checked);
 
-    const sendOneAndLog = async (c) => {
+    const sendOneAndLog = async (c, gtext) => {
       let r;
       if (photo) {
-        const p = c.pageId || String(c.id || '').split('_')[0];
+        const p = c.pageId || String(c.id).split('_')[0];
         const fbId = fbIdByPage[p] || '';
         if (!fbId) {
           done++;
           fail++;
-          logLine('❌ [' + done + '/' + targets.length + '] ' + (c.name || c.id) + ' — không có attachment ảnh cho page này');
-          setProgress(done, targets.length);
+          logLine('❌ [' + done + '/' + totalAll + '] ' + (c.name || c.id) + ' — không có attachment ảnh cho page này');
+          setProgress(done, totalAll);
           return { ok: false, sent: false, error: 'Không có attachment ảnh' };
         }
-        r = await sendOne(c, text, { url: photo.url, id: photo.id, fbId, w: photo.w, h: photo.h }, { quick: quickOn });
+        r = await sendOne(c, gtext, { url: photo.url, id: photo.id, fbId, w: photo.w, h: photo.h }, { quick: quickOn });
       } else {
-        r = await sendOne(c, text, null, { quick: quickOn });
+        r = await sendOne(c, gtext, null, { quick: quickOn });
       }
       const via = r.ok ? (r.sendBy === 'direct' ? ' — gửi thẳng Socket/Ext'
         : r.sendBy === 'socket' ? ' — qua Socket'
@@ -2015,24 +2126,24 @@
       if (r.ok) {
         ok++;
         if (r.fired) firedN++;
-        logLine('✅ [' + done + '/' + targets.length + '] ' + (c.name || c.id) + ' — đã gửi' + via);
+        logLine('✅ [' + done + '/' + totalAll + '] ' + (c.name || c.id) + ' — đã gửi' + via);
       } else if (r.uncertain) {
         unsure++;
-        logLine('⚠ [' + done + '/' + targets.length + '] ' + (c.name || c.id) + ' — ' + r.error
+        logLine('⚠ [' + done + '/' + totalAll + '] ' + (c.name || c.id) + ' — ' + r.error
           + ' — không rõ tin đã đi chưa (không gửi thêm để tránh trùng)');
       } else {
         fail++;
-        logLine('❌ [' + done + '/' + targets.length + '] ' + (c.name || c.id) + ' — ' + r.error);
+        logLine('❌ [' + done + '/' + totalAll + '] ' + (c.name || c.id) + ' — ' + r.error);
       }
-      setProgress(done, targets.length);
+      setProgress(done, totalAll);
       return r;
     };
 
     // 1 lượt = bắn song song toàn bộ số tin trong lượt
-    const sendBatch = async (batch) => {
+    const sendBatch = async (gtext, batch) => {
       await runPool(batch, async (c) => {
         if (state.stopRequested) return null;
-        const r = await sendOneAndLog(c);
+        const r = await sendOneAndLog(c, gtext);
         if (!r.ok && r.error && r.error.indexOf('Token') === 0) {
           logLine('⛔ Dừng sớm vì token không còn hợp lệ.');
           state.stopRequested = true;
@@ -2041,39 +2152,56 @@
       }, Math.max(1, batch.length));
     };
 
-    const runWaves = async (list) => {
+    const runWaves = async (gtext, list) => {
       const totalWaves = Math.ceil(list.length / WAVE_SIZE);
-      for (let i = 0; i < list.length && !state.stopRequested; i += WAVE_SIZE) {
-        await sendBatch(list.slice(i, i + WAVE_SIZE));
-        const waveNo = Math.ceil(Math.min(i + WAVE_SIZE, list.length) / WAVE_SIZE);
-        if (i + WAVE_SIZE < list.length && !state.stopRequested) {
+      for (let i2 = 0; i2 < list.length && !state.stopRequested; i2 += WAVE_SIZE) {
+        await sendBatch(gtext, list.slice(i2, i2 + WAVE_SIZE));
+        const waveNo = Math.ceil(Math.min(i2 + WAVE_SIZE, list.length) / WAVE_SIZE);
+        if (i2 + WAVE_SIZE < list.length && !state.stopRequested) {
           logLine('🌊 Lượt ' + waveNo + '/' + totalWaves + ' xong (' + done + ' tin) — nghỉ ' + WAVE_GAP + 'ms rồi lượt tiếp…');
           await sleep(WAVE_GAP);
         }
       }
     };
 
-    warmUpSockets(targets); // tranh thủ kết nối Socket ngay từ đầu lô
-    if (useWaves) await runWaves(targets);
-    else await sendBatch(targets);
+    let sendErr = null;
+    try {
+      try { warmUpSockets(targets); } catch (e) { /* làm nóng lỗi không được làm hỏng lô */ }
+      for (let gi = 0; gi < sendGroups.length && !state.stopRequested; gi++) {
+        const g = sendGroups[gi];
+        if (sendGroups.length > 1) {
+          logLine('📤 [' + (gi + 1) + '/' + sendGroups.length + '] nội dung “' + clip(g.text, 50) + '” → ' + g.list.length + ' chat');
+        }
+        if (useWaves) await runWaves(g.text, g.list);
+        else await sendBatch(g.text, g.list);
+      }
+    } catch (e) {
+      sendErr = e;
+      logLine('⚠ Gửi lỗi giữa chừng (' + (e && e.message || e) + ') — vẫn xóa câu đã gửi + bỏ chọn để không gửi trùng.');
+    }
 
     state.sending = false;
-    if (state.stopRequested && done < targets.length) {
-      logLine('⏸ Đã dừng sớm sau ' + done + '/' + targets.length + ' chat.');
+    if (state.stopRequested && done < totalAll) {
+      logLine('⏸ Đã dừng sớm sau ' + done + '/' + totalAll + ' chat.');
     }
-    logLine('🏁 Hoàn tất: ' + ok + ' thành công, ' + fail + ' lỗi.'
-      + (unsure ? ' ' + unsure + ' tin không rõ kết quả (không gửi thêm).' : '')
-      + (firedN ? ' ⚡ ' + firedN + ' tin bắn nhanh (không chờ server xác nhận).' : ''));
-    // LIST ĐÃ LƯU đang tích để gửi → dùng xong TỰ XÓA các list đó (mỗi list chỉ gửi 1 lần — tránh gửi trùng)
-    if (state.listSel && state.listSel.size) {
-      const ids = Array.from(state.listSel);
-      const names = state.savedLists.filter((l) => ids.indexOf(l.id) > -1).map((l) => l.name);
+    if (!sendErr) {
+      logLine('🏁 Hoàn tất: ' + ok + ' thành công, ' + fail + ' lỗi.'
+        + (unsure ? ' ' + unsure + ' tin không rõ kết quả (không gửi thêm).' : '')
+        + (firedN ? ' ⚡ ' + firedN + ' tin bắn nhanh (không chờ server xác nhận).' : ''));
+    }
+    // CÂU ĐÃ CHỐT TIÊU THỤ từ đầu lượt → dùng xong TỰ XÓA (mỗi câu chỉ gửi 1 lần — tránh gửi trùng).
+    // Chạy cả khi gửi lỗi giữa chừng: ít nhất đã bắn dở — giữ lại là dễ gửi trùng.
+    if (consumeIds.size) {
+      const ids = Array.from(consumeIds);
+      const delNames = state.savedLists.filter((l) => ids.indexOf(l.id) > -1).map((l) => l.name);
       state.savedLists = state.savedLists.filter((l) => ids.indexOf(l.id) === -1);
       state.listSel = new Set();
       state.loadedName = null;
       persistSavedLists();
       renderSavedLists();
-      logLine('🗑 Đã gửi xong — tự xóa ' + names.length + ' list: ' + names.join(', '));
+      if (delNames.length) {
+        logLine('🗑 Đã gửi xong — tự xóa ' + delNames.length + ' câu: ' + delNames.join(', '));
+      }
     }
     // Gửi xong → TỰ BỎ CHỌN các đoạn chat đã đánh dấu (giống nút "Xóa"): dấu chọn đã "tiêu" vào
     // lượt gửi này, để sẵn sàng chọn lượt mới — và bấm chạy lại không bao giờ dính dấu cũ (chống trùng).
@@ -2279,6 +2407,16 @@
         .fw-body .log { flex: 1 1 auto; max-height: none; height: 100%; font-size: 12px; }
         .fw-body #ssb-sec-sl { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; gap: 8px; }
         .fw-body #ssb-sec-sl .saved-lists { flex: 1 1 auto; max-height: none; min-height: 0; }
+        /* hộp thoại SỬA CÂU (tên + nội dung nhiều dòng) */
+        .edit-ov { position: fixed; inset: 0; background: rgba(2,6,23,.55); z-index: 2147483647;
+                   display: flex; align-items: center; justify-content: center; }
+        .edit-card { background: #0f172a; color: #e2e8f0; border: 1px solid #334155; border-radius: 12px;
+                     width: min(520px, 92vw); padding: 14px; display: flex; flex-direction: column; gap: 8px;
+                     box-shadow: 0 12px 40px rgba(0,0,0,.55); }
+        .edit-title { font-weight: 700; font-size: 13px; color: #f8fafc; }
+        .edit-card input[type=text] { width: 100%; background: #0b1220; color: #f1f5f9; border: 1px solid #334155;
+                                      border-radius: 6px; padding: 6px 8px; font-size: 12px; }
+        .edit-card textarea { min-height: 120px; }
         /* tay nắm KÉO THẢ ĐỔI CỠ panel (góc dưới-phải; đúp chuột = về mặc định) */
         .rs { position: absolute; right: 0; bottom: 0; width: 20px; height: 20px; cursor: nwse-resize;
               background: linear-gradient(135deg, transparent 55%, #475569 55%, #475569 66%,
@@ -2317,7 +2455,7 @@
       </style>
       <div class="wrap" id="ssb-wrap">
         <div class="head" id="ssb-head">
-          <span class="title"><svg class="logo" viewBox="0 0 50 52" width="17" height="17" xmlns="http://www.w3.org/2000/svg"><path d="M10 2 L14 11" stroke="#5865F2" stroke-width="5" stroke-linecap="round" fill="none"/><path d="M40 2 L36 11" stroke="#5865F2" stroke-width="5" stroke-linecap="round" fill="none"/><rect x="0" y="12" width="50" height="40" rx="6" fill="#5865F2"/><rect x="12" y="31" width="12" height="4" rx="2" fill="#fff"/><rect x="26" y="31" width="12" height="4" rx="2" fill="#fff"/></svg>BOTFAKE <span style="color:#64748b;font-weight:400;font-size:11px">v1.35.0</span></span>
+          <span class="title"><svg class="logo" viewBox="0 0 50 52" width="17" height="17" xmlns="http://www.w3.org/2000/svg"><path d="M10 2 L14 11" stroke="#5865F2" stroke-width="5" stroke-linecap="round" fill="none"/><path d="M40 2 L36 11" stroke="#5865F2" stroke-width="5" stroke-linecap="round" fill="none"/><rect x="0" y="12" width="50" height="40" rx="6" fill="#5865F2"/><rect x="12" y="31" width="12" height="4" rx="2" fill="#fff"/><rect x="26" y="31" width="12" height="4" rx="2" fill="#fff"/></svg>BOTFAKE <span style="color:#64748b;font-weight:400;font-size:11px">v1.36.0</span></span>
           <button class="badge on" id="ssb-toggle" title="Bật/tắt tính năng">BẬT</button>
           <button class="minibtn" id="ssb-close" title="Tắt panel (F5 hoặc Alt+Shift+B để hiện lại)">✕</button>
           <button class="minibtn" id="ssb-min" title="Thu nhỏ">—</button>
@@ -2363,12 +2501,12 @@
           </div>
           <div id="ssb-sec-sl">
             <div class="row" style="align-items:center;justify-content:space-between">
-              <span class="label">LIST ĐÃ LƯU</span>
-              <button class="minibtn" id="ssb-slzoom" title="Phóng to / thu nhỏ bảng list — kéo tiêu đề để di chuyển, kéo góc dưới-phải để đổi cỡ">⛶ Phóng to list</button>
+              <span class="label">LIST CÂU GỬI</span>
+              <button class="minibtn" id="ssb-slzoom" title="Phóng to / thu nhỏ bảng list câu gửi — kéo tiêu đề để di chuyển, kéo góc dưới-phải để đổi cỡ">⛶ Phóng to</button>
             </div>
             <div class="row" style="margin:4px 0;align-items:center">
-              <button class="b b-gray" id="ssb-sl-new">＋ Tạo list từ lựa chọn</button>
-              <span class="hint" id="ssb-sl-info">0 list</span>
+              <button class="b b-gray" id="ssb-sl-new" title="Lưu CÂU CẦN GỬI đang gõ + các chat đã chọn thành 1 câu — gửi xong tự xóa">＋ Tạo câu gửi</button>
+              <span class="hint" id="ssb-sl-info">0 câu</span>
             </div>
             <div class="saved-lists" id="ssb-sl-box"><div class="empty">Chưa có list nào — chọn chat ở mục 1–2 rồi bấm “＋ Tạo list”</div></div>
           </div>
@@ -2429,7 +2567,7 @@
       const el = root.getElementById('ssb-sec-sl');
       const btn = root.getElementById('ssb-slzoom');
       if (!el) return;
-      toggleFloat('ssb_win_list', el, 'LIST ĐÃ LƯU', btn, '⛶ Phóng to list', '🗕 Thu nhỏ list', {
+      toggleFloat('ssb_win_list', el, 'LIST CÂU GỬI', btn, '⛶ Phóng to', '🗕 Thu nhỏ', {
         w: 560, h: 460,
         left: () => Math.max(24, Math.round(window.innerWidth * 0.3)),
         top: () => Math.round(window.innerHeight * 0.08),
@@ -2562,37 +2700,40 @@
       btn.disabled = false;
       render();
     });
-    // ===== LIST ĐÃ LƯU =====
+    // ===== LIST CÂU GỬI =====
     on('ssb-sl-new', 'click', () => {
       const sel = state.matches.filter((m) => m.checked);
+      const msgEl2 = root.getElementById('ssb-msg');
+      const cauText = (msgEl2 && msgEl2.value || '');
       if (!sel.length) {
         alert('Chưa có chat nào được chọn để lưu.\nHãy chọn snippet/chuỗi (mục 1–2) và tick chọn chat rồi thử lại.');
         return;
       }
-      const def = 'List ' + (state.savedLists.length + 1);
-      const name = (prompt('Tên list:', def) || '').trim() || def;
+      const def = 'Câu ' + (state.savedLists.length + 1);
+      const name = (prompt('Tên câu:', def) || '').trim() || def;
       const l = {
         id: 'l' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
         name,
+        text: cauText, // CÂU CẦN GỬI đang gõ lúc tạo → gắn liền với câu này (sửa được bằng nút ✎)
         items: sel.map((m) => ({
           id: m.id,
           pageId: m.pageId || String(m.id).split('_')[0] || '',
           name: m.name || '', snippet: m.snippet || '', snippetRaw: m.snippetRaw || '',
           time: m.time || '', type: m.type || '', platform: m.platform || '',
-          lastAt: m.lastAt || '',
-          fromPsid: m.fromPsid || '',
-          pageId: m.pageId || '',
-          threadId: m.threadId || '',
-          threadKey: m.threadKey || '',
-          customerName: m.customerName || '',
-          updatedAt: m.updatedAt || '',
+          lastAt: m.lastAt || '', fromPsid: m.fromPsid || '',
+          pageId: m.pageId || '', threadId: m.threadId || '', threadKey: m.threadKey || '',
+          customerName: m.customerName || '', updatedAt: m.updatedAt || '',
           hasPhone: m.hasPhone === true,
         })),
       };
       state.savedLists.push(l);
       persistSavedLists();
       renderSavedLists();
-      logLine('💾 Đã tạo list “' + name + '” (' + l.items.length + ' chat)');
+      // câu vừa tạo được GẮN với lượt gửi hiện tại — gửi xong TỰ XÓA (mỗi câu chỉ gửi 1 lần)
+      state.listSel.add(l.id);
+      rebuildFromLists();
+      logLine('💾 Đã tạo câu “' + name + '” (' + l.items.length + ' chat'
+        + (l.text ? ', kèm nội dung' : ', chưa có nội dung') + ') — gắn với lượt gửi này, gửi xong tự xóa');
     });
     const slBox = root.getElementById('ssb-sl-box');
     if (slBox) {
@@ -2603,30 +2744,24 @@
         const id = row.getAttribute('data-id');
         const l = state.savedLists.find((x) => x.id === id);
         if (!l) return;
+        if (e.target.closest && e.target.closest('.sl-handle')) return; // bấm ⠿ để kéo ≠ tích/bỏ tích
         const btn = e.target.closest('.sl-btn');
         if (btn) {
           const act = btn.getAttribute('data-act');
-          if (act === 'rename') {
-            const name = (prompt('Đổi tên list:', l.name) || '').trim();
-            if (name && name !== l.name) {
-              l.name = name;
-              persistSavedLists();
-              renderSavedLists();
-              if (state.listSel.has(l.id)) rebuildFromLists();
-              logLine('✏️ Đã đổi tên list thành “' + name + '”');
-            }
+          if (act === 'edit') {
+            openCauEditor(l); // sửa TÊN + NỘI DUNG của câu
           } else if (act === 'del') {
-            if (!confirm('Xóa list “' + l.name + '” (' + l.items.length + ' chat)?')) return;
+            if (!confirm('Xóa câu “' + l.name + '” (' + l.items.length + ' chat)?')) return;
             const wasSel = state.listSel.has(l.id);
             state.savedLists = state.savedLists.filter((x) => x.id !== id);
             if (wasSel) { state.listSel.delete(id); rebuildFromLists(); }
             persistSavedLists();
             renderSavedLists();
-            logLine('🗑 Đã xóa list “' + l.name + '”');
+            logLine('🗑 Đã xóa câu “' + l.name + '”');
           }
           return;
         }
-        // bấm vào dòng (hoặc ô tích) → tích/bỏ tích list — chọn được NHIỀU list để gửi cùng lúc
+        // bấm vào dòng (hoặc ô tích) → tích/bỏ tích câu — chọn được NHIỀU câu để gửi cùng lúc
         if (state.listSel.has(id)) state.listSel.delete(id);
         else state.listSel.add(id);
         rebuildFromLists();
@@ -2835,8 +2970,8 @@
         tgt.innerHTML = '🎯 Snippet: <b>' + esc(state.target.name || '?') + '</b> · ' + esc(state.target.time || '') + '<br>'
           + esc(state.target.snippetRaw || state.target.snippet);
       } else if (state.mode === 'saved' && state.loadedName) {
-        tgt.innerHTML = '📚 List: <b>' + esc(state.loadedName) + '</b><br>' + state.matches.length
-          + ' chat trong list đã lưu — sẵn sàng gửi';
+        tgt.innerHTML = '📚 Câu: <b>' + esc(state.loadedName) + '</b><br>' + state.matches.length
+          + ' chat trong câu — sẵn sàng gửi';
       } else {
         tgt.innerHTML = 'Chưa chọn — <b>Alt+Click 2 lần</b> (đầu → cuối chuỗi) hoặc lấy snippet từ chat đang chọn';
       }
