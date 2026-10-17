@@ -1,0 +1,90 @@
+
+curl --url ^"[https://pancake.vn/api/v1/pages/898735919982398/conversations/898735919982398_30052750080980626/messages?^](https://pancake.vn/api/v1/pages/898735919982398/conversations/898735919982398_30052750080980626/messages?^)" ^
+
+  -H ^"accept: application/json, text/plain, */*^" ^
+
+  -H ^"accept-language: vi-VN,vi;q=0.9,fr-FR;q=0.8,fr;q=0.7,en-US;q=0.6,en;q=0.5^" ^
+
+  -H ^"content-type: multipart/form-data; boundary=----WebKitFormBoundarysad6WIaCxagf0NAQ^" ^
+
+  -b ^"_fbp=fb.1.1789102456289.944497458155465367; *gcl*au=1.1.1895013025.1789102456; *gid=GA1.2.133624231.1791014329;* ga_VG3LFY1C9R=GS2.1.s1791014328^$o30^$g1^$t1791027462^$j60^$l0^$h0; jwt=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJuYW1lIjoiTmd1eeG7hW4gVHXhuqVuIiwiZXhwIjoxNzk5MjkwNjM3LCJhcHBsaWNhdGlvbiI6MSwidWlkIjoiMjk5NjY2YmQtNzU1OS00YzQ4LWIwOTQtYjI5NTViOTJkNzU3Iiwic2Vzc2lvbl9pZCI6ImZiNzBkOGI3LTM0YTctNGQxNy1iNDM1LWE0MTlmOGYzZDhjOSIsImlhdCI6MTc5MTUxNDYzNywicGFuY2FrZV9pZCI6IjBlMzIzODk5LTAwMjctNDg3MC05MGU4LTdjMTRkNTdkMmU0YSIsImZiX2lkIjoiMTM1MTU1MjA3MzEwNzI2IiwibG9naW5fc2Vzc2lvbiI6bnVsbCwiZmJfbmFtZSI6Ik5ndXnhu4VuIFR14bqlbiJ9.2V0YTTWhS9No-qEPuY84jwp24VKX6KpkjbB-4qiG_vk; jwt_http_only=v3.a825eb758a0cf48c; locale=vi; *ga=GA1.1.1555905925.1789102456;* ga_VG3LFY1C9R=GS2.1.s1792194850^$o48^$g1^$t1792220828^$j59^$l0^$h0; *ga*NCVX3Z1MWB=GS2.1.s1792194851^$o37^$g1^$t1792220828^$j59^$l0^$h0^" ^
+
+  -H ^"origin: [https://pancake.vn^](https://pancake.vn^)" ^
+
+  -H ^"priority: u=1, i^" ^
+
+  -H ^"referer: [https://pancake.vn/898735919982398^](https://pancake.vn/898735919982398^)" ^
+
+  -H ^"sec-ch-ua: ^\^"Google Chrome^\^";v=^\^"155^\^", ^\^"Chromium^\^";v=^\^"155^\^", ^\^"Not^(A:Brand^\^";v=^\^"24^\^"^" ^
+
+  -H ^"sec-ch-ua-mobile: ?0^" ^
+
+  -H ^"sec-ch-ua-platform: ^\^"Windows^\^"^" ^
+
+  -H ^"sec-fetch-dest: empty^" ^
+
+  -H ^"sec-fetch-mode: cors^" ^
+
+  -H ^"sec-fetch-site: same-origin^" ^
+
+  -H ^"user-agent: Mozilla/5.0 ^(Windows NT 10.0; Win64; x64^) AppleWebKit/537.36 ^(KHTML, like Gecko^) Chrome/155.0.0.0 Safari/537.36^" ^
+
+  --data-raw ^"------WebKitFormBoundarysad6WIaCxagf0NAQ^
+
+Content-Disposition: form-data; name=^\^"action^\^"^
+
+^
+
+reply_inbox^
+
+------WebKitFormBoundarysad6WIaCxagf0NAQ^
+
+Content-Disposition: form-data; name=^\^"message^\^"^
+
+^
+
+C l^ y th^  m^ u n^ y di^ n ^ i ^ . kh^ ng ^ ^ p tr^  l^ i shipper mang v^  cho em lu^ n ch^  nh^  ^ ^  MI^ N SHIP ^ ^ ^ ^  ch^  nha^
+
+------WebKitFormBoundarysad6WIaCxagf0NAQ^
+
+Content-Disposition: form-data; name=^\^"send_by_platform^\^"^
+
+^
+
+web^
+
+------WebKitFormBoundarysad6WIaCxagf0NAQ--^
+
+^"
+
+curl --url '[https://pancake.vn/api/v1/pages/898735919982398/conversations/898735919982398_30052750080980626/messages](https://pancake.vn/api/v1/pages/898735919982398/conversations/898735919982398_30052750080980626/messages)?' \
+
+  -H 'accept: application/json, text/plain, */*' \
+
+  -H 'accept-language: vi-VN,vi;q=0.9,fr-FR;q=0.8,fr;q=0.7,en-US;q=0.6,en;q=0.5' \
+
+  -H 'content-type: multipart/form-data; boundary=----WebKitFormBoundarysad6WIaCxagf0NAQ' \
+
+  -b '_fbp=fb.1.1789102456289.944497458155465367; *gcl*au=1.1.1895013025.1789102456; *gid=GA1.2.133624231.1791014329;* ga_VG3LFY1C9R=GS2.1.s1791014328$o30$g1$t1791027462$j60$l0$h0; jwt=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJuYW1lIjoiTmd1eeG7hW4gVHXhuqVuIiwiZXhwIjoxNzk5MjkwNjM3LCJhcHBsaWNhdGlvbiI6MSwidWlkIjoiMjk5NjY2YmQtNzU1OS00YzQ4LWIwOTQtYjI5NTViOTJkNzU3Iiwic2Vzc2lvbl9pZCI6ImZiNzBkOGI3LTM0YTctNGQxNy1iNDM1LWE0MTlmOGYzZDhjOSIsImlhdCI6MTc5MTUxNDYzNywicGFuY2FrZV9pZCI6IjBlMzIzODk5LTAwMjctNDg3MC05MGU4LTdjMTRkNTdkMmU0YSIsImZiX2lkIjoiMTM1MTU1MjA3MzEwNzI2IiwibG9naW5fc2Vzc2lvbiI6bnVsbCwiZmJfbmFtZSI6Ik5ndXnhu4VuIFR14bqlbiJ9.2V0YTTWhS9No-qEPuY84jwp24VKX6KpkjbB-4qiG_vk; jwt_http_only=v3.a825eb758a0cf48c; locale=vi; *ga=GA1.1.1555905925.1789102456;* ga_VG3LFY1C9R=GS2.1.s1792194850$o48$g1$t1792220828$j59$l0$h0; *ga*NCVX3Z1MWB=GS2.1.s1792194851$o37$g1$t1792220828$j59$l0$h0' \
+
+  -H 'origin: [https://pancake.vn](https://pancake.vn)' \
+
+  -H 'priority: u=1, i' \
+
+  -H 'referer: [https://pancake.vn/898735919982398](https://pancake.vn/898735919982398)' \
+
+  -H 'sec-ch-ua: "Google Chrome";v="155", "Chromium";v="155", "Not(A:Brand";v="24"' \
+
+  -H 'sec-ch-ua-mobile: ?0' \
+
+  -H 'sec-ch-ua-platform: "Windows"' \
+
+  -H 'sec-fetch-dest: empty' \
+
+  -H 'sec-fetch-mode: cors' \
+
+  -H 'sec-fetch-site: same-origin' \
+
+  -H 'user-agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/155.0.0.0 Safari/537.36' \
+
+  --data-raw $'------WebKitFormBoundarysad6WIaCxagf0NAQ\r\nContent-Disposition: form-data; name="action"\r\n\r\nreply_inbox\r\n------WebKitFormBoundarysad6WIaCxagf0NAQ\r\nContent-Disposition: form-data; name="message"\r\n\r\nC lấy thử mẫu này diện đi ạ. không đẹp trả lại shipper mang về cho em luôn chị nhé 😍 MIỄN SHIP 🍀🍀 chị nha\r\n------WebKitFormBoundarysad6WIaCxagf0NAQ\r\nContent-Disposition: form-data; name="send_by_platform"\r\n\r\nweb\r\n------WebKitFormBoundarysad6WIaCxagf0NAQ--\r\n'
