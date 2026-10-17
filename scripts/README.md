@@ -86,7 +86,7 @@ dòng trùng id, chặn bấm đúp). Khi một kênh báo **“không rõ kết
 **Lỗi là lỗi**: tin báo ❌ (chắc chắn chưa gửi) chỉ bị báo trong log — **không gửi lại, không kiểm tra
 lại** — ưu tiên tốc độ.
 - **⚡ Gửi nhanh** (mặc định bật, ô cạnh thiết lập lượt): bắn API **không chờ server xác nhận** — xong là báo ✅ ngay.
-  Chat bị API từ chối RÕ thì tự **bù Socket/Ext trong nền** (log có dòng bù); không rõ kết quả thì bỏ — không gửi lại để tránh trùng.
+  Chat bị API từ chối RÕ thì tự **bù qua Extension trong nền** (log có dòng bù); không rõ kết quả thì bỏ — không gửi lại để tránh trùng.
 - **Thông minh hơn — đoán trước kênh gửi** (đúng luật app `SEND_MESSAGE_API_TIME_WINDOW`): chat **ngoài cửa sổ 24h**
   (không có ads 7 ngày) → **gửi thẳng Socket/Ext** khỏi bắn API chắc thua `(#551)`; API bị chặn giữa lô `(#10)/(#551)…`
   → chat còn lại đi thẳng; chat đã biết kênh tốt → dùng luôn kênh đó. Ít lỗi hơn hẳn, không phải gửi bù mất thời gian.
@@ -116,16 +116,14 @@ lại** — ưu tiên tốc độ.
   server để phân loại chắc/thiếu — không mất gì về độ chính xác.
 - **Full speed**: mặc định 5000 tin/lượt, nghỉ 0ms giữa lượt — lô gửi bung hết tốc độ như tool gửi
   hàng loạt (không còn khoảng hãm nào trong đường gửi). Muốn hãm lại thì chỉnh 2 ô — vẫn lưu qua F5.
-- **Bù sau nhịp — chống mất tin, hết "gửi đi gửi lại" (v1.39.0)**: bắn lô dồn (8–21 tin/giây) mà bù
-  Socket/Ext NGAY là Facebook "báo gửi thất bại" hàng loạt (đang giữ nhịp gửi của tài khoản) —
-  cùng chat đó bù lại sau ~12 giây là thắng (đã đối chiếu bằng chứng trong log). Nên khi kênh
-  **thừa nhận thua** (chắc chắn tin chưa đến nơi) thì script **bù ĐÚNG 1 LẦN, 1 KÊNH** (text →
-  Socket, ảnh/bình luận → Ext) sau nhịp ~12s, **rải đều ~1.2s** giữa các chat để FB không giữ nhịp.
-  Trước đây mỗi chat bị thử đi thử lại 4–5 lần qua hết lối này tới lối khác trong 30–60s — nay
-  tối đa: 1 phát API + 1 lần bù. Chat **đã có kênh báo thành công thì tuyệt đối không gửi lại**
-  (dù bù đang chờ); bắt đầu lượt gửi mới thì bù dở của lượt cũ tự hủy (không gửi lẫn 2 lượt).
-  Tin **"không rõ" (maybe)** vẫn tuyệt đối không gửi thêm — chống trùng tin. Socket cũng được
-  khởi động lại đúng kiểu app (initSocket tự kiểm `isRunning`) và luôn chờ làm nóng xong mới bắn.
+- **Bù qua EXTENSION, nhanh như app (v1.44.0)**: API từ chối (#10 app khác giữ thread, #551 ngoài cửa
+  sổ…) thì app fallback **NGAY** sang Extension (executeByExtOnce) — không chờ nhịp. Extension **tự
+  resolve globalId đúng** (bằng chứng `update_global_id` trong tinnhan.har) nên cứu được cả chat Socket
+  thua (globalId ≠ PSID) lẫn chat FB đang giữ nhịp sau bắn dồn (log 21:58 — Socket thua 30/30). Script
+  nay bù đúng 1 lần **qua Extension sau ~1.5s** (rải nhẹ 0.5s/chat — 30 chat bù xong trong ~17s thay vì
+  ~90s); Socket chỉ dùng khi extension chưa kết nối (và vẫn chờ nhịp 12s cho khung /ls_req). Bù thắng
+  được ghi nhớ kênh — lần gửi sau vào thẳng kênh đó. Vẫn đúng luật: tối đa 1 lần bù/chat, "maybe"
+  tuyệt đối không gửi thêm, chat đã xác nhận thành công không bao giờ gửi lại.
 - **Socket/Ext gửi LẦN LƯỢT từng chat (hàng đợi)**: gửi lô mà bắn Socket/Extension đồng loạt thì
   hỏng hàng loạt (Extension trả "không gửi được", socket bị server "báo gửi thất bại") — đúng như
   thực tế "chọn riêng 1 con thì chạy, chọn cả lô thì lỗi". Nên mọi bước Socket/Ext được xếp vào 1

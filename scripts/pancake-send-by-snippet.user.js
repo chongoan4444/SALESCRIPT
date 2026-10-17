@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE
 // @namespace    salescript
-// @version      1.43.0
+// @version      1.44.0
 // @description  BOTFAKE — chọn chuỗi chat (Alt+Click 2 đầu) hoặc theo snippet trong Pancake rồi gửi cùng 1 câu (kèm ảnh nếu muốn) cho tất cả.
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -1471,7 +1471,7 @@
         // nhịp, bù ngay là "server báo gửi thất bại" hàng loạt, vừa chậm vừa sinh thêm vòng
         // gửi đi gửi lại. Đúng luật "kênh chắc thua PHẢI bù": bù ĐÚNG 1 lần sau nhịp (12s).
         // BÁO RÕ KẾT QUẢ THẬT — không bao giờ "báo gửi" xong im lặng khi request đã bị từ chối.
-        logLine('⚠ ' + nm + ' — API từ chối (' + msg + ') — sẽ tự bù 1 lần sau nhịp.');
+        logLine('⚠ ' + nm + ' — API từ chối (' + msg + ')');
         scheduleBuRetry(conv, text, photo, nm, 'API từ chối (' + msg + ')');
       } else {
         logLine('⚠ ' + nm + ' — không rõ kết quả (' + msg + ') — KHÔNG gửi lại để tránh trùng');
@@ -2128,8 +2128,13 @@
      (chắc chắn tin CHƯA đến nơi) thì bù vòng 2 sau nhịp — đúng luật "kênh chắc thua PHẢI bù
      tiếp, không im lặng bỏ sót". Mỗi chat tối đa 1 lần; 'maybe'/không rõ → TUYỆT ĐỐI không
      (chống trùng tin). */
-  const BU_RETRY_MS = 12000;
-  const BU_SPREAD_MS = 1200; // rải nhịp giữa các lần bù — FB giữ nhịp nếu bắn dồn 8–21/s (bằng chứng v1.37.0)
+  // BÙ QUA EXTENSION trước — đúng đường app: API từ chối (#10 app khác giữ thread, #551 ngoài
+  // cửa sổ…) thì app fallback NGAY sang executeByExtOnce, KHÔNG chờ nhịp. Extension tự resolve
+  // globalId đúng (bằng chứng update_global_id trong tinnhan.har) nên cứu được cả chat Socket
+  // phải bỏ (globalId ≠ PSID) lẫn chat FB đang giữ nhịp sau bắn dồn (log 21:58 — Socket thua 30/30).
+  const BU_RETRY_EXT_MS = 1500; // Ext: app bù ngay khi API từ chối — chỉ chừa 1.5s cho request API kết thúc
+  const BU_RETRY_MS = 12000;    // Socket: khung /ls_req bị FB giữ nhịp sau bắn dồn → phải chờ nhịp (bằng chứng v1.37.0)
+  const BU_SPREAD_MS = 500;     // rải nhẹ giữa các lần bù — hàng đợi Socket/Ext vốn đã tự giãn
   const buRetryDone = {}; // convId → đã bù trong lượt này
   let buRetrySeq = 0;
   let runSeq = 0; // mỗi lượt gửi 1 số — bù của lượt cũ tự hủy khi có lượt mới (chống gửi lẫn/lặp)
@@ -2142,7 +2147,7 @@
     return /server báo gửi thất bại|Extension không gửi được|Socket không kết nối|Không thấy Extension|Extension Pancake chưa kết nối/.test(String(err || ''));
   }
 
-  // BÙ ĐÚNG 1 LẦN, 1 KÊNH (text → Socket, ảnh/bình luận → Ext), sau nhịp ~12s, rải đều.
+  // BÙ ĐÚNG 1 LẦN — qua EXTENSION (kênh app dùng để cứu), Socket chỉ khi extension chưa kết nối.
   // KHÔNG chuỗi "thử hết lối này tới lối khác" — trước đây mỗi chat lặp 4–5 lần trong 30–60s.
   function scheduleBuRetry(conv, text, photo, name, why) {
     if (!conv || buRetryDone[conv.id]) return; // mỗi chat đúng 1 lần trong lượt
@@ -2153,8 +2158,13 @@
     }
     buRetryDone[conv.id] = true;
     const myRun = runSeq;
-    const delay = BU_RETRY_MS + (buRetrySeq++) * BU_SPREAD_MS;
-    logLine('⏳ ' + name + ' — ' + why + ' — bù đúng 1 lần sau ' + Math.round(delay / 1000) + 's…');
+    // kênh bù: Extension là kênh app dùng để cứu (tự resolve id đúng, khác rổ rate-limit của
+    // khung Socket); chỉ khi extension chưa kết nối thì text mới dùng Socket; ảnh/bình luận bắt buộc Ext
+    const hasExt = !!(window.__ExtensionAdapter__ && typeof window.__ExtensionAdapter__.send === 'function');
+    const ch = (photo || conv.type === 'comment' || hasExt) ? 'ext' : 'socket';
+    const delay = (ch === 'ext' ? BU_RETRY_EXT_MS : BU_RETRY_MS) + (buRetrySeq++) * BU_SPREAD_MS;
+    logLine('⏳ ' + name + ' — ' + why + ' — bù qua ' + (ch === 'ext' ? 'Extension' : 'Socket')
+      + ' sau ' + Math.round(delay / 1000) + 's…');
     setTimeout(() => {
       if (myRun !== runSeq) return; // có lượt gửi mới — bù của lượt cũ bỏ (tránh gửi lẫn 2 lượt)
       if (state.stopRequested) {
@@ -2162,12 +2172,12 @@
         return;
       }
       if (deliveredIds[conv.id]) return; // trong lúc chờ, tin đã đến nơi qua đường khác — thôi
-      const ch = (photo || conv.type === 'comment') ? 'ext' : 'socket';
       busEnqueue(() => (ch === 'ext'
         ? sendViaExtension(conv, text, photo, {})
         : sendViaSocket(conv, text, {}))).then((r) => {
         if (r && r.ok) {
           markDelivered(conv.id);
+          markChannel(conv.id, ch); // lần gửi sau vào thẳng kênh vừa thắng
           logLine('✅ ' + name + ' — bù THÀNH CÔNG qua ' + (ch === 'ext' ? 'Extension' : 'Socket'));
         } else if (r && r.sent === 'maybe') {
           logLine('⚠ ' + name + ' — bù không rõ kết quả — KHÔNG gửi thêm (chống trùng)');
@@ -2726,7 +2736,7 @@
       </style>
       <div class="wrap" id="ssb-wrap">
         <div class="head" id="ssb-head">
-          <span class="title"><svg class="logo" viewBox="0 0 50 52" width="17" height="17" xmlns="http://www.w3.org/2000/svg"><path d="M10 2 L14 11" stroke="#5865F2" stroke-width="5" stroke-linecap="round" fill="none"/><path d="M40 2 L36 11" stroke="#5865F2" stroke-width="5" stroke-linecap="round" fill="none"/><rect x="0" y="12" width="50" height="40" rx="6" fill="#5865F2"/><rect x="12" y="31" width="12" height="4" rx="2" fill="#fff"/><rect x="26" y="31" width="12" height="4" rx="2" fill="#fff"/></svg>BOTFAKE <span style="color:#64748b;font-weight:400;font-size:11px">v1.43.0</span></span>
+          <span class="title"><svg class="logo" viewBox="0 0 50 52" width="17" height="17" xmlns="http://www.w3.org/2000/svg"><path d="M10 2 L14 11" stroke="#5865F2" stroke-width="5" stroke-linecap="round" fill="none"/><path d="M40 2 L36 11" stroke="#5865F2" stroke-width="5" stroke-linecap="round" fill="none"/><rect x="0" y="12" width="50" height="40" rx="6" fill="#5865F2"/><rect x="12" y="31" width="12" height="4" rx="2" fill="#fff"/><rect x="26" y="31" width="12" height="4" rx="2" fill="#fff"/></svg>BOTFAKE <span style="color:#64748b;font-weight:400;font-size:11px">v1.44.0</span></span>
           <button class="badge on" id="ssb-toggle" title="Bật/tắt tính năng">BẬT</button>
           <button class="minibtn" id="ssb-close" title="Tắt panel (F5 hoặc Alt+Shift+B để hiện lại)">✕</button>
           <button class="minibtn" id="ssb-min" title="Thu nhỏ">—</button>
