@@ -124,6 +124,8 @@ lại** — ưu tiên tốc độ.
   trong URL (auth bằng cookie `jwt` như người thật) và body đúng 3 trường `action → message →
   send_by_platform` — không thêm `is_record_ctx_7_days`. Trước đây request bị coi là call API/bot nên
   ngoài cửa sổ 24h là #551, trong khi gửi tay vẫn chạy. Text giờ đi API-trước kể cả ngoài cửa sổ.
+- **Gửi xong tự bỏ chọn**: sau lượt gửi, các đoạn chat đã đánh dấu tự được "Xóa" chọn (như bấm nút
+  Xóa) — sẵn sàng chọn lượt mới, và bấm chạy lại không bao giờ dính dấu cũ (chống gửi trùng).
 
 Tự động tăng tốc: sau lần đầu API bị `(#10)/(#551)…`, các chat còn lại **bỏ qua API** đi thẳng sang Socket;
 kênh gửi thành công được **ghi nhớ** (session) nên lần gửi sau vào thẳng kênh đó.
