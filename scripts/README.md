@@ -93,6 +93,8 @@ lại** — ưu tiên tốc độ.
   (chỉ chạy khi chắc chắn chưa gửi gì — không lo trùng).
 - **Gửi giống hệt request thật của app** (đã so khớp từng trường với curl thật): đủ `send_by_platform=web`,
   `width`/`height` ảnh, đúng thứ tự trường, và body `contents/facebook` dạng JSON như app.
+- **Bỏ bước thừa**: ảnh ngoài cửa sổ 24h không bắn API trước nữa (chắc chắn #551) — đi thẳng Ext,
+  API chỉ là cứu cánh cuối; nhãn log bù đúng kênh thật (ảnh = Ext, chữ = Socket/Ext).
 
 Tự động tăng tốc: sau lần đầu API bị `(#10)/(#551)…`, các chat còn lại **bỏ qua API** đi thẳng sang Socket;
 kênh gửi thành công được **ghi nhớ** (session) nên lần gửi sau vào thẳng kênh đó.
