@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE
 // @namespace    salescript
-// @version      1.29.3
+// @version      1.29.4
 // @description  BOTFAKE — chọn chuỗi chat (Alt+Click 2 đầu) hoặc theo snippet trong Pancake rồi gửi cùng 1 câu (kèm ảnh nếu muốn) cho tất cả.
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -1212,7 +1212,10 @@
 
   function isThreadControlError(msg) {
     const m = String(msg || '');
-    return /\(#(551|2022|10|100|1_reduce_data|-1|613|80006)(?:,\d+)?\)/.test(m)
+    // CHẶN CẢ LÔ chỉ khi là chặn cấp page/hệ thống (rate limit, FB handover, thread control).
+    // (#551 "Người này hiện không có mặt" là chặn của TỪNG NGƯỜI — chat khác vẫn gửi API bình thường;
+    // trước đây 1 con #551 làm cả lô bị tước API → nhiều chat trong cửa sổ 24h mất oan.)
+    return /\(#(10|613|80006)(?:,\d+)?\)/.test(m)
       || m.indexOf('kiểm soát thread') > -1
       || m.toLowerCase().indexOf('rate limit') > -1;
   }
@@ -1559,10 +1562,12 @@
     if (opts.quick && !opts.skipApi && conv.type !== 'comment') {
       const full = peekConv(conv) || conv;
       const rawIdle = (full && full.last_customer_interactive_at) || conv.lastAt || '';
-      let idleLong = true;
+      // thiếu/không parse được mốc → ĐỂ API thử trước: sai dữ liệu (list cũ, mốc stale)
+      // không được phép làm chat trong cửa sổ 24h bị bỏ qua API mà gửi tay vẫn chạy
+      let idleLong = false;
       if (rawIdle) {
         const t = Date.parse(/[zZ+]|\+\d{2}:?\d{2}$/.test(rawIdle) ? rawIdle : rawIdle + 'Z');
-        idleLong = isNaN(t) || (Date.now() - t) > 86400000;
+        if (!isNaN(t)) idleLong = (Date.now() - t) > 86400000;
       }
       const hint = channelHints[conv.id];
       // ngoài cửa sổ 24h (KỂ CẢ ẢNH): API chắc #551 → đi thẳng, khỏi bắn uổng 1 vòng;
@@ -1909,7 +1914,7 @@
       </style>
       <div class="wrap" id="ssb-wrap">
         <div class="head" id="ssb-head">
-          <span class="title"><svg class="logo" viewBox="0 0 50 52" width="17" height="17" xmlns="http://www.w3.org/2000/svg"><path d="M10 2 L14 11" stroke="#5865F2" stroke-width="5" stroke-linecap="round" fill="none"/><path d="M40 2 L36 11" stroke="#5865F2" stroke-width="5" stroke-linecap="round" fill="none"/><rect x="0" y="12" width="50" height="40" rx="6" fill="#5865F2"/><rect x="12" y="31" width="12" height="4" rx="2" fill="#fff"/><rect x="26" y="31" width="12" height="4" rx="2" fill="#fff"/></svg>BOTFAKE <span style="color:#64748b;font-weight:400;font-size:11px">v1.29.3</span></span>
+          <span class="title"><svg class="logo" viewBox="0 0 50 52" width="17" height="17" xmlns="http://www.w3.org/2000/svg"><path d="M10 2 L14 11" stroke="#5865F2" stroke-width="5" stroke-linecap="round" fill="none"/><path d="M40 2 L36 11" stroke="#5865F2" stroke-width="5" stroke-linecap="round" fill="none"/><rect x="0" y="12" width="50" height="40" rx="6" fill="#5865F2"/><rect x="12" y="31" width="12" height="4" rx="2" fill="#fff"/><rect x="26" y="31" width="12" height="4" rx="2" fill="#fff"/></svg>BOTFAKE <span style="color:#64748b;font-weight:400;font-size:11px">v1.29.4</span></span>
           <button class="badge on" id="ssb-toggle" title="Bật/tắt tính năng">BẬT</button>
           <button class="minibtn" id="ssb-close" title="Tắt panel (F5 hoặc Alt+Shift+B để hiện lại)">✕</button>
           <button class="minibtn" id="ssb-min" title="Thu nhỏ">—</button>

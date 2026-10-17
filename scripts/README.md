@@ -100,6 +100,9 @@ lại** — ưu tiên tốc độ.
 - **Socket hết báo "không rõ" oan**: socket chết (frame chưa hề đi) hoặc server báo gửi thất bại
   (markOptimisticMessageFailed) → THUA RÕ → tự bù Ext/API tiếp; chỉ "đã gửi nhưng không có ACK"
   mới bị dừng chống trùng. Không còn con nào bị im lặng bỏ sót.
+- **API không bị cướp oan**: `#551` (chặn của TỪNG NGƯỜI — ngoài cửa sổ) chỉ bù cho chính chat đó,
+  không tước API cả lô nữa (chỉ rate limit/FB handover/thread-control mới chặn lô); chat thiếu mốc
+  thời gian → để API thử trước thay vì đoán bừa.
 
 Tự động tăng tốc: sau lần đầu API bị `(#10)/(#551)…`, các chat còn lại **bỏ qua API** đi thẳng sang Socket;
 kênh gửi thành công được **ghi nhớ** (session) nên lần gửi sau vào thẳng kênh đó.
