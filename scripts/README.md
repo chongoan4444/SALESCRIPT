@@ -114,6 +114,11 @@ lại** — ưu tiên tốc độ.
   server để phân loại chắc/thiếu — không mất gì về độ chính xác.
 - **Full speed**: mặc định 5000 tin/lượt, nghỉ 0ms giữa lượt — lô gửi bung hết tốc độ như tool gửi
   hàng loạt (không còn khoảng hãm nào trong đường gửi). Muốn hãm lại thì chỉnh 2 ô — vẫn lưu qua F5.
+- **Socket/Ext gửi LẦN LƯỢT từng chat (hàng đợi)**: gửi lô mà bắn Socket/Extension đồng loạt thì
+  hỏng hàng loạt (Extension trả "không gửi được", socket bị server "báo gửi thất bại") — đúng như
+  thực tế "chọn riêng 1 con thì chạy, chọn cả lô thì lỗi". Nên mọi bước Socket/Ext được xếp vào 1
+  hàng đợi: lệnh xong mới tới lệnh kế — giống hệt kịch bản gửi riêng từng con vốn chạy ngon. API vẫn
+  bắn song song full speed (fetch thuần không đụng Extension/Socket).
 - **Socket không còn 'không kết nối' oan**: socket được làm nóng ngay khi mở panel; nếu đang kết nối
   dở thì kênh Socket chờ xong rồi gửi thay vì bỏ cuộc. Lỗi Extension giờ giữ nguyên lý do extension
   trả về (log lộ đúng nguyên nhân thay vì chỉ 'không gửi được'). Token lấy từ cookie `jwt` như app.
