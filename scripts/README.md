@@ -133,6 +133,9 @@ lại** — ưu tiên tốc độ.
   tag) và tự bỏ qua chat đã bị gắn tag chứa chữ "chốt" (vd "Huyền chốt" — đã chốt đơn) hoặc "chặn"
   — kể cả khi chat đó được gắn tag SAU khi tải danh sách. Không kiểm tra được tag → vẫn gửi (không
   bao giờ mất tin vì thiếu dữ liệu).
+- **Bỏ qua chat có icon điện thoại**: chat nào hiện icon 📞 (`phone-green` = `has_phone`, sale đang
+  chăm số) cũng bị loại khỏi lô — soi cả icon trên màn hình, dữ liệu live của app lẫn dòng đã lưu.
+  Log tách riêng từng nhóm: tag chốt/chặn 🧹 và icon điện thoại 📞.
 
 Tự động tăng tốc: sau lần đầu API bị `(#10)/(#551)…`, các chat còn lại **bỏ qua API** đi thẳng sang Socket;
 kênh gửi thành công được **ghi nhớ** (session) nên lần gửi sau vào thẳng kênh đó.

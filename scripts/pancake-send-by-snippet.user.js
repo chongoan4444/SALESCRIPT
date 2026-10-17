@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE
 // @namespace    salescript
-// @version      1.32.0
+// @version      1.33.0
 // @description  BOTFAKE — chọn chuỗi chat (Alt+Click 2 đầu) hoặc theo snippet trong Pancake rồi gửi cùng 1 câu (kèm ảnh nếu muốn) cho tất cả.
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -565,6 +565,7 @@
       pageId: String(c.page_id || c.id.split('_')[0] || ''), // pageId có sẵn — khỏi suy từ id
       threadId: String(c.thread_id || ''), // thread_id có sẵn trong API — khỏi tải lại conversation khi gửi
       tags: Array.isArray(c.tags) ? c.tags.slice() : [], // tag ids — lọc "chốt"/"chặn" lúc gửi
+      hasPhone: !!c.has_phone, // icon điện thoại (phone-green) — sale đang chăm, không bắn hàng loạt
       threadKey: String(c.thread_key || ''), // payload Ext cần convId = thread_key (đúng executeByExtOnce)
       customerName: String((c.from && (c.from.username || c.from.name)) || c.name || ''), // payload Ext cần customerName
       updatedAt: String(c.updated_at || ''), // payload Ext cần conversationUpdatedTime
@@ -745,10 +746,32 @@
     return norm.indexOf('chot') > -1 || norm.indexOf('chan') > -1;
   }
 
-  // Trả { kept, skipped }: CHỈ bỏ qua chat khi tải lại tag xác nhận dính tag cấm;
+  // Icon điện thoại (phone-green.svg) trong danh sách = chat CÓ SỐ ĐIỆN THOẠI (has_phone) —
+  // sale đang chăm khách này → không bắn tin hàng loạt vào. Soi 3 nguồn: icon trên màn hình
+  // (mắt thấy gì dùng nấy), redux app (live), dữ liệu dòng chat đã lưu.
+  function convHasPhone(m) {
+    try {
+      const el = document.getElementById(String(m.id));
+      if (el && el.querySelector('img[src*="phone"]')) return true;
+    } catch (e) { /* ignore */ }
+    try {
+      const st = window.__pancakeReduxStore__ && window.__pancakeReduxStore__.getState();
+      const lists = st && st.conversations
+        && [st.conversations.data, st.conversations.filteredConversationsCloneList];
+      for (let i = 0; lists && i < lists.length; i++) {
+        const arr = lists[i];
+        if (!Array.isArray(arr)) continue;
+        const hit = arr.find((c) => c && String(c.id) === String(m.id));
+        if (hit && hit.has_phone !== undefined && hit.has_phone !== null) return !!hit.has_phone;
+      }
+    } catch (e) { /* ignore */ }
+    return m.hasPhone === true;
+  }
+
+  // Trả { kept, skippedTag, skippedPhone }: CHỈ bỏ qua khi xác nhận dính tag cấm/icon điện thoại;
   // chat không kiểm tra được → GIỮ NGUYÊN (thiếu dữ liệu không được làm mất tin).
   async function filterBannedTagTargets(targets) {
-    const kept = [], skipped = [];
+    const kept = [], skippedTag = [], skippedPhone = [];
     try {
       const st = window.__pancakeReduxStore__ && window.__pancakeReduxStore__.getState();
       const defsByPage = (st && st.conversations && st.conversations.pageSettingTags) || {};
@@ -767,24 +790,27 @@
           }
         });
       });
-      if (!banIds.size) return { kept: targets, skipped }; // page không có tag cấm nào — khỏi tốn request
-      logLine('🔎 Lọc tag lúc gửi: kiểm tra tag "' + banNames.join('", "') + '" — tải lại 1 lượt…');
-      const res = await loadListViaApi(null, { forceTags: Array.from(banIds) });
-      if (!res.ok) {
-        logLine('⚠ Không tải lại được tag (' + res.error + ') — giữ nguyên danh sách, không lọc.');
-        return { kept: targets, skipped };
+      let banned = new Set();
+      if (banIds.size) {
+        logLine('🔎 Lọc tag lúc gửi: kiểm tra tag "' + banNames.join('", "') + '" — tải lại 1 lượt…');
+        const res = await loadListViaApi(null, { forceTags: Array.from(banIds) });
+        if (!res.ok) {
+          logLine('⚠ Không tải lại được tag (' + res.error + ') — chỉ lọc theo icon điện thoại.');
+        } else {
+          banned = new Set();
+          res.rows.forEach((r) => banned.add(r.id));
+        }
       }
-      const banned = new Set();
-      res.rows.forEach((r) => banned.add(r.id));
       targets.forEach((m) => {
-        if (banned.has(m.id)) skipped.push(m);
+        if (banned.has(m.id)) skippedTag.push(m);
+        else if (convHasPhone(m)) skippedPhone.push(m);
         else kept.push(m);
       });
     } catch (e) {
-      logLine('⚠ Lọc tag lỗi (' + (e && e.message || e) + ') — giữ nguyên danh sách.');
-      return { kept: targets, skipped };
+      logLine('⚠ Lọc lúc gửi lỗi (' + (e && e.message || e) + ') — giữ nguyên danh sách.');
+      return { kept: targets, skippedTag, skippedPhone };
     }
-    return { kept, skipped };
+    return { kept, skippedTag, skippedPhone };
   }
 
   /* ============================ QUÉT TOÀN BỘ DANH SÁCH ============================ */
@@ -1859,13 +1885,17 @@
     if (!confirm('Gửi ' + (text ? '1 câu' : 'ảnh') + ' tới ' + targets.length + ' đoạn chat đã chọn?\n\n“'
       + clip(text || '(chỉ gửi ảnh)', 120) + '”' + imgNote + '\n\nNhận: ' + names + warnComment)) return;
 
-    // LỌC TAG "CHỐT"/"CHẶN" trước khi bắn — tải lại tag 1 lượt, bỏ qua chat đã bị gắn cấm
+    // LỌC TRƯỚC KHI BẮN: tag "chốt"/"chặn" (tải lại tag 1 lượt) + chat có icon điện thoại (has_phone)
     {
       const ban = await filterBannedTagTargets(targets);
-      if (ban.skipped.length) {
-        logLine('🧹 Bỏ qua ' + ban.skipped.length + ' chat mang tag chốt/chặn: '
-          + ban.skipped.slice(0, 20).map((m) => m.name || m.id).join(', ')
-          + (ban.skipped.length > 20 ? ', …' : ''));
+      const nm = (arr) => arr.slice(0, 20).map((m) => m.name || m.id).join(', ') + (arr.length > 20 ? ', …' : '');
+      if (ban.skippedTag.length) {
+        logLine('🧹 Bỏ qua ' + ban.skippedTag.length + ' chat mang tag chốt/chặn: ' + nm(ban.skippedTag));
+      }
+      if (ban.skippedPhone.length) {
+        logLine('📞 Bỏ qua ' + ban.skippedPhone.length + ' chat có icon điện thoại (sale đang chăm): ' + nm(ban.skippedPhone));
+      }
+      if (ban.skippedTag.length || ban.skippedPhone.length) {
         targets = ban.kept;
       }
       if (!targets.length) {
@@ -2128,7 +2158,7 @@
       </style>
       <div class="wrap" id="ssb-wrap">
         <div class="head" id="ssb-head">
-          <span class="title"><svg class="logo" viewBox="0 0 50 52" width="17" height="17" xmlns="http://www.w3.org/2000/svg"><path d="M10 2 L14 11" stroke="#5865F2" stroke-width="5" stroke-linecap="round" fill="none"/><path d="M40 2 L36 11" stroke="#5865F2" stroke-width="5" stroke-linecap="round" fill="none"/><rect x="0" y="12" width="50" height="40" rx="6" fill="#5865F2"/><rect x="12" y="31" width="12" height="4" rx="2" fill="#fff"/><rect x="26" y="31" width="12" height="4" rx="2" fill="#fff"/></svg>BOTFAKE <span style="color:#64748b;font-weight:400;font-size:11px">v1.32.0</span></span>
+          <span class="title"><svg class="logo" viewBox="0 0 50 52" width="17" height="17" xmlns="http://www.w3.org/2000/svg"><path d="M10 2 L14 11" stroke="#5865F2" stroke-width="5" stroke-linecap="round" fill="none"/><path d="M40 2 L36 11" stroke="#5865F2" stroke-width="5" stroke-linecap="round" fill="none"/><rect x="0" y="12" width="50" height="40" rx="6" fill="#5865F2"/><rect x="12" y="31" width="12" height="4" rx="2" fill="#fff"/><rect x="26" y="31" width="12" height="4" rx="2" fill="#fff"/></svg>BOTFAKE <span style="color:#64748b;font-weight:400;font-size:11px">v1.33.0</span></span>
           <button class="badge on" id="ssb-toggle" title="Bật/tắt tính năng">BẬT</button>
           <button class="minibtn" id="ssb-close" title="Tắt panel (F5 hoặc Alt+Shift+B để hiện lại)">✕</button>
           <button class="minibtn" id="ssb-min" title="Thu nhỏ">—</button>
@@ -2381,6 +2411,7 @@
           threadKey: m.threadKey || '',
           customerName: m.customerName || '',
           updatedAt: m.updatedAt || '',
+          hasPhone: m.hasPhone === true,
         })),
       };
       state.savedLists.push(l);
