@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE
 // @namespace    salescript
-// @version      1.33.0
+// @version      1.33.1
 // @description  BOTFAKE — chọn chuỗi chat (Alt+Click 2 đầu) hoặc theo snippet trong Pancake rồi gửi cùng 1 câu (kèm ảnh nếu muốn) cho tất cả.
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -739,11 +739,14 @@
      Trong lúc chờ gửi, sale có thể đã gắn tag "…chốt" (đã chốt đơn — KHÔNG được gửi tiếp)
      hoặc tag "chặn". Lúc bấm Gửi: tải lại tag MỘT LƯỢT (API lọc sẵn theo tag) rồi bỏ qua. */
 
-  // so khớp TÊN TAG đã bỏ dấu/không phân biệt hoa: "chốt"→chot, "chặn"→chan (vd "Huyền chốt", "Chặn")
+  // so khớp TÊN TAG: "chốt"/"chặn" nguyên từ (có dấu) hoặc từ độc lập sau khi bỏ dấu
+  // ("Huyền chốt", "Chặn", "chot don"…). KHÔNG dùng chuỗi con — "Bình Chánh"/"Chánh" (chanh)
+  // từng bị hiểu nhầm là "chặn" (chan) → loại oan cả loạt chat sạch.
   function tagBanName(name) {
-    const norm = String(name || '').toLowerCase()
-      .normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/đ/g, 'd');
-    return norm.indexOf('chot') > -1 || norm.indexOf('chan') > -1;
+    const raw = String(name || '').toLowerCase();
+    if (raw.indexOf('chốt') > -1 || raw.indexOf('chặn') > -1) return true;
+    const norm = raw.normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/đ/g, 'd');
+    return /\bchot\b/.test(norm) || /\bchan\b/.test(norm);
   }
 
   // Icon điện thoại (phone-green.svg) trong danh sách = chat CÓ SỐ ĐIỆN THOẠI (has_phone) —
@@ -776,6 +779,7 @@
       const st = window.__pancakeReduxStore__ && window.__pancakeReduxStore__.getState();
       const defsByPage = (st && st.conversations && st.conversations.pageSettingTags) || {};
       const banIds = new Set();
+      const banNameById = {};
       const banNames = [];
       const seenPage = {};
       targets.forEach((m) => {
@@ -785,24 +789,32 @@
         (defsByPage[pid] || []).forEach((t) => {
           const nm = String((t && (t.text || t.name)) || '');
           if (tagBanName(nm)) {
-            banIds.add(String(t.id));
+            banIds.add(t.id);
+            banNameById[String(t.id)] = nm;
             if (banNames.indexOf(nm) < 0) banNames.push(nm);
           }
         });
       });
-      let banned = new Set();
+      // id tag giữ NGUYÊN dạng số như app (tags:[387,388] — chuỗi sẽ bị server bỏ qua!)
+      const banIdNum = {};
+      banIds.forEach((id) => { banIdNum[String(id)] = (typeof id === 'number' || /^\d+$/.test(String(id))) ? Number(id) : id; });
+      const tagOf = {}; // convId → TÊN tag cấm mà nó mang (để log cho user soi)
       if (banIds.size) {
         logLine('🔎 Lọc tag lúc gửi: kiểm tra tag "' + banNames.join('", "') + '" — tải lại 1 lượt…');
-        const res = await loadListViaApi(null, { forceTags: Array.from(banIds) });
+        const res = await loadListViaApi(null, { forceTags: Object.keys(banIdNum).map((k) => banIdNum[k]) });
         if (!res.ok) {
           logLine('⚠ Không tải lại được tag (' + res.error + ') — chỉ lọc theo icon điện thoại.');
         } else {
-          banned = new Set();
-          res.rows.forEach((r) => banned.add(r.id));
+          // CHỈ tin khi CHÍNH chat đó mang tag cấm trong dữ liệu trả về — nếu server bỏ qua
+          // tham số tags mà trả cả danh sách thì vẫn không bỏ sót/không loại oan ai
+          (res.rows || []).forEach((r) => {
+            const hit = (r.tags || []).map(String).find((t) => banNameById[t]);
+            if (hit) tagOf[r.id] = banNameById[hit];
+          });
         }
       }
       targets.forEach((m) => {
-        if (banned.has(m.id)) skippedTag.push(m);
+        if (tagOf[m.id]) skippedTag.push({ m: m, why: tagOf[m.id] });
         else if (convHasPhone(m)) skippedPhone.push(m);
         else kept.push(m);
       });
@@ -1890,7 +1902,9 @@
       const ban = await filterBannedTagTargets(targets);
       const nm = (arr) => arr.slice(0, 20).map((m) => m.name || m.id).join(', ') + (arr.length > 20 ? ', …' : '');
       if (ban.skippedTag.length) {
-        logLine('🧹 Bỏ qua ' + ban.skippedTag.length + ' chat mang tag chốt/chặn: ' + nm(ban.skippedTag));
+        logLine('🧹 Bỏ qua ' + ban.skippedTag.length + ' chat mang tag chốt/chặn: '
+          + ban.skippedTag.slice(0, 20).map((x) => (x.m.name || x.m.id) + ' (tag "' + x.why + '")').join(', ')
+          + (ban.skippedTag.length > 20 ? ', …' : ''));
       }
       if (ban.skippedPhone.length) {
         logLine('📞 Bỏ qua ' + ban.skippedPhone.length + ' chat có icon điện thoại (sale đang chăm): ' + nm(ban.skippedPhone));
@@ -2158,7 +2172,7 @@
       </style>
       <div class="wrap" id="ssb-wrap">
         <div class="head" id="ssb-head">
-          <span class="title"><svg class="logo" viewBox="0 0 50 52" width="17" height="17" xmlns="http://www.w3.org/2000/svg"><path d="M10 2 L14 11" stroke="#5865F2" stroke-width="5" stroke-linecap="round" fill="none"/><path d="M40 2 L36 11" stroke="#5865F2" stroke-width="5" stroke-linecap="round" fill="none"/><rect x="0" y="12" width="50" height="40" rx="6" fill="#5865F2"/><rect x="12" y="31" width="12" height="4" rx="2" fill="#fff"/><rect x="26" y="31" width="12" height="4" rx="2" fill="#fff"/></svg>BOTFAKE <span style="color:#64748b;font-weight:400;font-size:11px">v1.33.0</span></span>
+          <span class="title"><svg class="logo" viewBox="0 0 50 52" width="17" height="17" xmlns="http://www.w3.org/2000/svg"><path d="M10 2 L14 11" stroke="#5865F2" stroke-width="5" stroke-linecap="round" fill="none"/><path d="M40 2 L36 11" stroke="#5865F2" stroke-width="5" stroke-linecap="round" fill="none"/><rect x="0" y="12" width="50" height="40" rx="6" fill="#5865F2"/><rect x="12" y="31" width="12" height="4" rx="2" fill="#fff"/><rect x="26" y="31" width="12" height="4" rx="2" fill="#fff"/></svg>BOTFAKE <span style="color:#64748b;font-weight:400;font-size:11px">v1.33.1</span></span>
           <button class="badge on" id="ssb-toggle" title="Bật/tắt tính năng">BẬT</button>
           <button class="minibtn" id="ssb-close" title="Tắt panel (F5 hoặc Alt+Shift+B để hiện lại)">✕</button>
           <button class="minibtn" id="ssb-min" title="Thu nhỏ">—</button>

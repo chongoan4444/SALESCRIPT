@@ -136,6 +136,9 @@ lại** — ưu tiên tốc độ.
 - **Bỏ qua chat có icon điện thoại**: chat nào hiện icon 📞 (`phone-green` = `has_phone`, sale đang
   chăm số) cũng bị loại khỏi lô — soi cả icon trên màn hình, dữ liệu live của app lẫn dòng đã lưu.
   Log tách riêng từng nhóm: tag chốt/chặn 🧹 và icon điện thoại 📞.
+  Lọc tag CHẶT CHẼ: chỉ loại khi CHÍNH chat đó mang tag cấm trong dữ liệu trả về (server có lơ
+  filter vẫn không loại oan), so khớp "chốt"/"chặn" nguyên từ ("Bình Chánh"/"Chánh" không dính),
+  và log kèm tên tag đã khớp để đối chiếu.
 
 Tự động tăng tốc: sau lần đầu API bị `(#10)/(#551)…`, các chat còn lại **bỏ qua API** đi thẳng sang Socket;
 kênh gửi thành công được **ghi nhớ** (session) nên lần gửi sau vào thẳng kênh đó.
