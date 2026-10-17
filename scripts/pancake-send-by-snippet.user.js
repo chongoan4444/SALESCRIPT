@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE
 // @namespace    salescript
-// @version      1.31.0
+// @version      1.31.2
 // @description  BOTFAKE — chọn chuỗi chat (Alt+Click 2 đầu) hoặc theo snippet trong Pancake rồi gửi cùng 1 câu (kèm ảnh nếu muốn) cho tất cả.
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -1667,11 +1667,12 @@
         if (!isNaN(t)) idleLong = (Date.now() - t) > 86400000;
       }
       const hint = channelHints[conv.id];
-      // TEXT: đi API-trước kể cả ngoài cửa sổ — gửi tay (request cookie-auth) chứng minh API vẫn chạy;
-      // ẢNH ngoài cửa sổ: giữ dự đoán đi thẳng Ext (chưa có bằng chứng ảnh cũng qua được API);
-      // API vẫn để CUỐI làm cứu cánh nếu các kênh trước THUA RÕ
+      // TEXT: LUÔN API-trước (request cookie-auth = y hệt gửi tay, HAR 200 chứng minh) —
+      // hint/dự đoán KHÔNG được ép text vào vòng Socket/Ext (chậm, hàng đợi Extension xếp hàng,
+      // mà gửi tay vẫn chạy được bằng chính API này).
+      // ẢNH: giữ hint/dự đoán đi thẳng Ext (chưa có bằng chứng ảnh cũng qua được API).
       const goDirect = batchSkipApi
-        || (hint && hint !== 'api')
+        || (photo && hint && hint !== 'api')
         || (idleLong && photo && !isRecordCtx7Days(full));
       if (goDirect) {
         const directOpts = batchSkipApi ? { skipApi: true } : { directChain: true };
@@ -1726,9 +1727,10 @@
       if (r.sent === 'maybe') {
         return { ok: false, uncertain: true, sent: 'maybe', error: tried.join(' | ') };
       }
-      // kênh trước thua rõ mà lỗi nghi do PSID sai (server từ chối người nhận) → kênh sau
-      // dò lại PSID CHÍNH CHỦ qua WS/Ext thay vì dùng lại from_psid có thể đã lệch
-      if (conv.fromPsid && /server báo gửi thất bại|không gửi được|globalId/i.test(r.error || '')) {
+      // CHỈ dò lại PSID khi lỗi đúng nghĩa "không có/không đúng người nhận" (globalId/thread_id).
+      // 'server báo gửi thất bại'/'không gửi được' là TỪ CHỐI CỦA KÊNH (cửa sổ/…) — dò PSID chỉ
+      // tốn thêm RPC Extension chậm mà không cứu được — trước đây từng làm bước bù chậm như rùa.
+      if (conv.fromPsid && /globalId|thread_id/i.test(r.error || '')) {
         ctx.gidForceFind = true;
         ctx.gidResolved = false;
       }
@@ -2049,7 +2051,7 @@
       </style>
       <div class="wrap" id="ssb-wrap">
         <div class="head" id="ssb-head">
-          <span class="title"><svg class="logo" viewBox="0 0 50 52" width="17" height="17" xmlns="http://www.w3.org/2000/svg"><path d="M10 2 L14 11" stroke="#5865F2" stroke-width="5" stroke-linecap="round" fill="none"/><path d="M40 2 L36 11" stroke="#5865F2" stroke-width="5" stroke-linecap="round" fill="none"/><rect x="0" y="12" width="50" height="40" rx="6" fill="#5865F2"/><rect x="12" y="31" width="12" height="4" rx="2" fill="#fff"/><rect x="26" y="31" width="12" height="4" rx="2" fill="#fff"/></svg>BOTFAKE <span style="color:#64748b;font-weight:400;font-size:11px">v1.31.0</span></span>
+          <span class="title"><svg class="logo" viewBox="0 0 50 52" width="17" height="17" xmlns="http://www.w3.org/2000/svg"><path d="M10 2 L14 11" stroke="#5865F2" stroke-width="5" stroke-linecap="round" fill="none"/><path d="M40 2 L36 11" stroke="#5865F2" stroke-width="5" stroke-linecap="round" fill="none"/><rect x="0" y="12" width="50" height="40" rx="6" fill="#5865F2"/><rect x="12" y="31" width="12" height="4" rx="2" fill="#fff"/><rect x="26" y="31" width="12" height="4" rx="2" fill="#fff"/></svg>BOTFAKE <span style="color:#64748b;font-weight:400;font-size:11px">v1.31.2</span></span>
           <button class="badge on" id="ssb-toggle" title="Bật/tắt tính năng">BẬT</button>
           <button class="minibtn" id="ssb-close" title="Tắt panel (F5 hoặc Alt+Shift+B để hiện lại)">✕</button>
           <button class="minibtn" id="ssb-min" title="Thu nhỏ">—</button>

@@ -126,6 +126,9 @@ lại** — ưu tiên tốc độ.
   ngoài cửa sổ 24h là #551, trong khi gửi tay vẫn chạy. Text giờ đi API-trước kể cả ngoài cửa sổ.
 - **Gửi xong tự bỏ chọn**: sau lượt gửi, các đoạn chat đã đánh dấu tự được "Xóa" chọn (như bấm nút
   Xóa) — sẵn sàng chọn lượt mới, và bấm chạy lại không bao giờ dính dấu cũ (chống gửi trùng).
+- **Text luôn đi API-trước — hết vòng vo**: hint/dự đoán không còn ép text vào Socket/Ext (chậm,
+  hàng đợi Extension xếp hàng) — gửi thẳng API cookie-auth như gửi tay (HAR 200 chứng minh);
+  ảnh mới dùng hint. Bù cũng hết chậm: không dò PSID qua Extension khi kênh chỉ từ chối (cửa sổ).
 
 Tự động tăng tốc: sau lần đầu API bị `(#10)/(#551)…`, các chat còn lại **bỏ qua API** đi thẳng sang Socket;
 kênh gửi thành công được **ghi nhớ** (session) nên lần gửi sau vào thẳng kênh đó.
