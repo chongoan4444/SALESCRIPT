@@ -109,6 +109,9 @@ lại** — ưu tiên tốc độ.
   PSID chính chủ qua WS/Ext.
 - **Bù Socket hết chậm**: Socket được "làm nóng" ngay từ lúc bắn lô (kết nối + đồng bộ chạy song song
   các bắn API) — con cần bù Socket chỉ còn ~1–2s thay vì ~10s phí kết nối như trước.
+- **Socket nhanh hơn nữa**: dựng thẳng khung `/ls_req` gốc của app (label 46 + 21, id sinh đúng kiểu
+  app) và gọi `helper.publish` — bỏ hẳn bước chờ 1s trong `sendMessage` của app. Vẫn chờ ACK của
+  server để phân loại chắc/thiếu — không mất gì về độ chính xác.
 
 Tự động tăng tốc: sau lần đầu API bị `(#10)/(#551)…`, các chat còn lại **bỏ qua API** đi thẳng sang Socket;
 kênh gửi thành công được **ghi nhớ** (session) nên lần gửi sau vào thẳng kênh đó.

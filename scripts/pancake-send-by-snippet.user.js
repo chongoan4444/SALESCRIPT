@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE
 // @namespace    salescript
-// @version      1.29.6
+// @version      1.30.0
 // @description  BOTFAKE — chọn chuỗi chat (Alt+Click 2 đầu) hoặc theo snippet trong Pancake rồi gửi cùng 1 câu (kèm ảnh nếu muốn) cho tất cả.
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -1352,10 +1352,67 @@
 
   // Gửi qua Facebook WebSocket — ĐÚNG đường "gửi bình thường" mà app/nhân viên vẫn dùng
   // (_app: executeBySocketFB → __MqttHelper__.sendMessage(pageId, globalId, {text}) → publish /ls_req)
+  // id kiểu app (epoch_id/otid trong khung /ls_req): Date.now() ghép 22-bit ngẫu nhiên → thập phân.
+  // Bắt chước đúng hàm sinh id của app (module 231748) — dùng BigInt cho gọn, có dự phòng nếu thiếu.
+  function epochId() {
+    try {
+      const bin = Date.now().toString(2)
+        + ('0000000000000000000000' + Math.floor(4294967295 * Math.random()).toString(2)).slice(-22);
+      return BigInt('0b' + bin).toString();
+    } catch (e) {
+      return String(Date.now()) + String(Math.floor(Math.random() * 1e6));
+    }
+  }
+
+  // Gửi TRỰC TIẾP khung /ls_req của app (label "46" gửi text + label "21" watermark) qua
+  // helper.publish — BỎ BƯỚC CHỜ 1S bên trong helper.sendMessage. Vẫn chờ ACK của server
+  // để phân loại chắc/thiếu y như đường gốc. Trả về: ok | rejected | noack | dead | legacy.
+  async function socketPublishSend(helper, pageId, gid, text) {
+    const sock = helper.SOCKETS && helper.SOCKETS[pageId];
+    if (!sock || !sock.instance) return { kind: 'dead' };
+    if (typeof helper.publish !== 'function' || typeof helper.findAllBlockActions !== 'function') {
+      return { kind: 'legacy' }; // helper cũ — quay về sendMessage đầy đủ
+    }
+    sock.taskId = sock.taskId || 0;
+    const frame = {
+      epoch_id: epochId(),
+      version_id: '9942677559150662',
+      tasks: [
+        {
+          failure_count: null,
+          label: '46',
+          payload: JSON.stringify({
+            mark_thread_read: 1, otid: epochId(), send_type: 1, source: 4456448,
+            sync_group: 205, text: text, thread_id: gid,
+          }),
+          queue_name: gid,
+          task_id: ++sock.taskId,
+        },
+        {
+          failure_count: null,
+          label: '21',
+          payload: JSON.stringify({ last_read_watermark_ts: Date.now(), sync_group: 205, thread_id: gid }),
+          queue_name: gid,
+          task_id: ++sock.taskId,
+        },
+      ],
+    };
+    const g = await helper.publish(pageId, '/ls_req', frame, 3);
+    if (!(g && g.payload)) return { kind: 'noack' };
+    let resp = null;
+    try { resp = JSON.parse(g.payload); } catch (e) { return { kind: 'noack' }; }
+    // đúng luật app: chỉ khi server markOptimisticMessageFailed MÀ không có replaceOptimsiticMessage
+    // thì mới là thất bại thật; còn lại (kể cả không có block action nào) = đã nhận
+    const replaced = helper.findAllBlockActions(resp.step, 'replaceOptimsiticMessage') || [];
+    const failed = helper.findAllBlockActions(resp.step, 'markOptimisticMessageFailed') || [];
+    if (failed.length && !replaced.length) return { kind: 'rejected' };
+    return { kind: 'ok' };
+  }
+
   async function sendViaSocket(conv, text, ctx) {
     ctx = ctx || {};
     const helper = window.__MqttHelper__;
-    if (!helper || typeof helper.sendMessage !== 'function') {
+    if (!helper || (typeof helper.sendMessage !== 'function' && typeof helper.publish !== 'function')) {
       return { ok: false, error: 'Không thấy __MqttHelper__' };
     }
     const platform = detectPlatform(conv.pageId || conv.id.split('_')[0]);
@@ -1379,21 +1436,26 @@
     const gid = ctx.gid;
     if (!gid) return { ok: false, error: 'Không tìm thấy globalId' };
     try {
+      const raw = await socketPublishSend(helper, pageId, gid, text);
+      if (raw.kind === 'ok') return { ok: true, id: gid, sendBy: 'socket', sent: true };
+      if (raw.kind === 'dead') return { ok: false, sent: false, error: 'Socket không kết nối' };
+      if (raw.kind === 'rejected') return { ok: false, sent: false, error: 'Socket: server báo gửi thất bại' };
+      if (raw.kind === 'noack') {
+        // không có ACK: socket đã chết → frame chưa đi → chắc thua; socket sống → tin CÓ THỂ đã đi
+        const sock = helper.SOCKETS && helper.SOCKETS[pageId];
+        if (!(sock && sock.instance)) return { ok: false, sent: false, error: 'Socket không kết nối' };
+        return { ok: false, sent: 'maybe', error: 'Socket không rõ kết quả (không có ACK)' };
+      }
+      // legacy — helper không có publish: đường sendMessage cũ (kèm bước chờ 1s của app)
       const res = await helper.sendMessage(pageId, gid, { text });
       if (res && res.success) return { ok: true, id: gid, sendBy: 'socket', sent: true };
       const reason = String((res && res.reason) || '');
-      // các lý do CỐT: chắc chắn chưa publish gì → được phép thử kênh khác
       if (/no_socket_found|getGlobalIdFailed|markOptimisticMessageFailed/i.test(reason)) {
         return { ok: false, sent: false, error: 'Socket không gửi được (' + reason + ')' };
       }
-      // sendMessage chỉ trả success:false KÈM response khi server trả block action
-      // markOptimisticMessageFailed (= gửi thất bại THẬT, tin KHÔNG đến) → được phép bù kênh
       if (res && res.response) {
         return { ok: false, sent: false, error: 'Socket: server báo gửi thất bại' };
       }
-      // success:false trơn: nếu socket KHÔNG còn kết nối → frame chưa hề được publish (lý do
-      // connection_not_found bị helper nuốt) → chắc chắn chưa gửi → bù kênh tiếp;
-      // socket đang sống mà không có ACK → tin CÓ THỂ đã đi → không thử kênh khác
       const sock = helper.SOCKETS && helper.SOCKETS[pageId];
       if (!(sock && sock.instance)) {
         return { ok: false, sent: false, error: 'Socket không kết nối' };
@@ -1950,7 +2012,7 @@
       </style>
       <div class="wrap" id="ssb-wrap">
         <div class="head" id="ssb-head">
-          <span class="title"><svg class="logo" viewBox="0 0 50 52" width="17" height="17" xmlns="http://www.w3.org/2000/svg"><path d="M10 2 L14 11" stroke="#5865F2" stroke-width="5" stroke-linecap="round" fill="none"/><path d="M40 2 L36 11" stroke="#5865F2" stroke-width="5" stroke-linecap="round" fill="none"/><rect x="0" y="12" width="50" height="40" rx="6" fill="#5865F2"/><rect x="12" y="31" width="12" height="4" rx="2" fill="#fff"/><rect x="26" y="31" width="12" height="4" rx="2" fill="#fff"/></svg>BOTFAKE <span style="color:#64748b;font-weight:400;font-size:11px">v1.29.6</span></span>
+          <span class="title"><svg class="logo" viewBox="0 0 50 52" width="17" height="17" xmlns="http://www.w3.org/2000/svg"><path d="M10 2 L14 11" stroke="#5865F2" stroke-width="5" stroke-linecap="round" fill="none"/><path d="M40 2 L36 11" stroke="#5865F2" stroke-width="5" stroke-linecap="round" fill="none"/><rect x="0" y="12" width="50" height="40" rx="6" fill="#5865F2"/><rect x="12" y="31" width="12" height="4" rx="2" fill="#fff"/><rect x="26" y="31" width="12" height="4" rx="2" fill="#fff"/></svg>BOTFAKE <span style="color:#64748b;font-weight:400;font-size:11px">v1.30.0</span></span>
           <button class="badge on" id="ssb-toggle" title="Bật/tắt tính năng">BẬT</button>
           <button class="minibtn" id="ssb-close" title="Tắt panel (F5 hoặc Alt+Shift+B để hiện lại)">✕</button>
           <button class="minibtn" id="ssb-min" title="Thu nhỏ">—</button>
