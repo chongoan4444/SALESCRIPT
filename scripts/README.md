@@ -91,6 +91,8 @@ lại** — ưu tiên tốc độ.
 - **Cứu globalId (PSID)**: nếu WS/Ext không tìm ra PSID thì dùng ngay `from_psid` mà API đã trả sẵn trong dữ liệu
   chat (khỏi dò tìm); Ext bị PSID rỗng thì bỏ qua cho nhanh; Socket/Ext đều thua rõ thì **API là cứu cánh cuối**
   (chỉ chạy khi chắc chắn chưa gửi gì — không lo trùng).
+- **Gửi giống hệt request thật của app** (đã so khớp từng trường với curl thật): đủ `send_by_platform=web`,
+  `width`/`height` ảnh, đúng thứ tự trường, và body `contents/facebook` dạng JSON như app.
 
 Tự động tăng tốc: sau lần đầu API bị `(#10)/(#551)…`, các chat còn lại **bỏ qua API** đi thẳng sang Socket;
 kênh gửi thành công được **ghi nhớ** (session) nên lần gửi sau vào thẳng kênh đó.

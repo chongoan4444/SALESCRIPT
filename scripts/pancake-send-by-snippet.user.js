@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE
 // @namespace    salescript
-// @version      1.28.1
+// @version      1.29.0
 // @description  BOTFAKE — chọn chuỗi chat (Alt+Click 2 đầu) hoặc theo snippet trong Pancake rồi gửi cùng 1 câu (kèm ảnh nếu muốn) cho tất cả.
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -1105,11 +1105,15 @@
     // cờ is_record_ctx_7_days (dr() trong _app) — cửa sổ quảng cáo 7 ngày cho khách từ ads
     if (isRecordCtx7Days(peekConv(conv) || conv)) fd.append('is_record_ctx_7_days', 'true');
     if (photo && photo.fbId) {
-      // đúng field khi gửi ảnh qua API (buildRequestBody — case PHOTO, facebook, 1 ảnh)
+      // đúng field + đúng THỨ TỰ request thật của app khi gửi ảnh (đã so khớp curl):
+      // content_id → attachment_id → content_url → width → height
+      if (photo.id) fd.append('content_id', photo.id);
       fd.append('attachment_id', photo.fbId);
       fd.append('content_url', photo.url);
-      if (photo.id) fd.append('content_id', photo.id);
+      if (photo.w) fd.append('width', String(photo.w));
+      if (photo.h) fd.append('height', String(photo.h));
     }
+    fd.append('send_by_platform', 'web'); // request thật của app luôn có (cả text lẫn ảnh)
     return { url: url, fd: fd };
   }
 
@@ -1501,14 +1505,16 @@
     const token = getToken();
     if (!token) return { ok: false, error: 'Không có access token' };
     try {
-      const fd = new FormData();
-      if (photo.id) fd.append('content_ids', JSON.stringify([photo.id]));
-      else fd.append('urls', JSON.stringify([photo.url]));
-      if (o.convId) fd.append('conv_id', String(o.convId));
+      // body JSON đúng request thật của app: {"content_ids":"[\"id\"]","conv_id":"..."}
+      const body = {};
+      if (photo.id) body.content_ids = JSON.stringify([photo.id]);
+      else body.urls = JSON.stringify([photo.url]);
+      if (o.convId) body.conv_id = String(o.convId);
       const res = await fetch(apiBase() + '/v1/pages/' + pageId
         + '/contents/facebook?access_token=' + encodeURIComponent(token)
         + '&is_reusable=' + (reusable ? 'true' : 'false') + '&async=false', {
-        method: 'POST', body: fd, credentials: 'include', headers: { Accept: 'application/json' },
+        method: 'POST', body: JSON.stringify(body), credentials: 'include',
+        headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
       });
       const j = await res.json().catch(() => null);
       if (res.ok && j && j.success && Array.isArray(j.fb_ids) && j.fb_ids.length) {
@@ -1651,7 +1657,7 @@
         render();
         return;
       }
-      photo = { url: up.url, id: up.id, fbId: '' };
+      photo = { url: up.url, id: up.id, fbId: '', w: imgState.w || 0, h: imgState.h || 0 };
       logLine('☁️ Ảnh đã tải lên — đang gắn attachment cho từng page…');
       const pageIds = [];
       targets.forEach((c) => {
@@ -1697,7 +1703,7 @@
           setProgress(done, targets.length);
           return { ok: false, sent: false, error: 'Không có attachment ảnh' };
         }
-        r = await sendOne(c, text, { url: photo.url, id: photo.id, fbId }, { quick: quickOn });
+        r = await sendOne(c, text, { url: photo.url, id: photo.id, fbId, w: photo.w, h: photo.h }, { quick: quickOn });
       } else {
         r = await sendOne(c, text, null, { quick: quickOn });
       }
@@ -1880,7 +1886,7 @@
       </style>
       <div class="wrap" id="ssb-wrap">
         <div class="head" id="ssb-head">
-          <span class="title"><svg class="logo" viewBox="0 0 50 52" width="17" height="17" xmlns="http://www.w3.org/2000/svg"><path d="M10 2 L14 11" stroke="#5865F2" stroke-width="5" stroke-linecap="round" fill="none"/><path d="M40 2 L36 11" stroke="#5865F2" stroke-width="5" stroke-linecap="round" fill="none"/><rect x="0" y="12" width="50" height="40" rx="6" fill="#5865F2"/><rect x="12" y="31" width="12" height="4" rx="2" fill="#fff"/><rect x="26" y="31" width="12" height="4" rx="2" fill="#fff"/></svg>BOTFAKE <span style="color:#64748b;font-weight:400;font-size:11px">v1.28.1</span></span>
+          <span class="title"><svg class="logo" viewBox="0 0 50 52" width="17" height="17" xmlns="http://www.w3.org/2000/svg"><path d="M10 2 L14 11" stroke="#5865F2" stroke-width="5" stroke-linecap="round" fill="none"/><path d="M40 2 L36 11" stroke="#5865F2" stroke-width="5" stroke-linecap="round" fill="none"/><rect x="0" y="12" width="50" height="40" rx="6" fill="#5865F2"/><rect x="12" y="31" width="12" height="4" rx="2" fill="#fff"/><rect x="26" y="31" width="12" height="4" rx="2" fill="#fff"/></svg>BOTFAKE <span style="color:#64748b;font-weight:400;font-size:11px">v1.29.0</span></span>
           <button class="badge on" id="ssb-toggle" title="Bật/tắt tính năng">BẬT</button>
           <button class="minibtn" id="ssb-close" title="Tắt panel (F5 hoặc Alt+Shift+B để hiện lại)">✕</button>
           <button class="minibtn" id="ssb-min" title="Thu nhỏ">—</button>
@@ -1992,7 +1998,14 @@
     const imgClearBtn = root.getElementById('ssb-img-clear');
     const setImg = (file) => {
       if (state.image && state.image.url) { try { URL.revokeObjectURL(state.image.url); } catch (e) { /* ignore */ } }
-      state.image = file ? { file, name: file.name || 'ảnh', url: URL.createObjectURL(file) } : null;
+      state.image = file ? { file, name: file.name || 'ảnh', url: URL.createObjectURL(file), w: 0, h: 0 } : null;
+      // đọc kích thước ảnh — request thật của app gửi kèm width/height
+      if (file && state.image && typeof createImageBitmap === 'function') {
+        createImageBitmap(file).then((bm) => {
+          if (state.image && state.image.file === file) { state.image.w = bm.width; state.image.h = bm.height; }
+          if (bm.close) bm.close();
+        }).catch(() => { /* không đọc được thì gửi thiếu width/height */ });
+      }
       if (imgInfo) {
         imgInfo.textContent = file
           ? '📷 ' + (file.name || 'ảnh') + ' (' + Math.round((file.size || 0) / 1024) + ' KB)'
