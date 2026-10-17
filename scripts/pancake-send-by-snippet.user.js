@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE
 // @namespace    salescript
-// @version      1.36.0
+// @version      1.37.0
 // @description  BOTFAKE — chọn chuỗi chat (Alt+Click 2 đầu) hoặc theo snippet trong Pancake rồi gửi cùng 1 câu (kèm ảnh nếu muốn) cho tất cả.
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -1330,6 +1330,9 @@
         const r = await sendOne(conv, text, photo, { skipApi: true });
         if (r.ok) logLine('✅ ' + nm + ' — đã gửi bù qua ' + (r.sendBy === 'socket' ? 'Socket' : 'Extension'));
         else logLine('❌ ' + nm + ' — bù không được: ' + r.error);
+        if (!r.ok && !r.uncertain && isRetryableLoss(r.error)) {
+          scheduleBuRetry(conv, text, photo, nm, 'bù chưa được');
+        }
       } else {
         logLine('⚠ ' + nm + ' — không rõ kết quả (' + msg + ') — KHÔNG gửi lại để tránh trùng');
       }
@@ -1549,14 +1552,18 @@
   // để phân loại chắc/thiếu y như đường gốc. Trả về: ok | rejected | noack | dead | legacy.
   async function socketPublishSend(helper, pageId, gid, text) {
     let sock = helper.SOCKETS && helper.SOCKETS[pageId];
-    if (!sock || !sock.instance) {
-      // socket chưa sẵn sàng — có thể ĐANG kết nối (làm nóng từ đầu lô) → chờ thay vì bỏ cuộc
-      let warm = socketWarmPromises[pageId];
-      if (!warm && typeof helper.initSocket === 'function') {
-        warm = socketWarmPromises[pageId] = Promise.resolve()
-          .then(() => helper.initSocket(pageId)).catch(() => null);
-      }
-      if (warm) await Promise.race([warm, sleep(15000)]);
+    // LUÔN chờ lệnh làm nóng dở (kể cả khi sock.instance đã có): initSocket đang dựng lại kết nối
+    // mà bắn vào lúc đó là server "báo gửi thất bại" oan — đúng lúc này hay xảy ra ngay sau bắn dồn.
+    const warm = socketWarmPromises[pageId];
+    if (warm) {
+      await Promise.race([warm, sleep(15000)]);
+      sock = helper.SOCKETS && helper.SOCKETS[pageId];
+    }
+    if ((!sock || !sock.instance) && typeof helper.initSocket === 'function') {
+      // chờ xong vẫn thiếu → socket cũ đã chết → khởi động lại hẳn rồi mới bắn (initSocket tự
+      // tái dùng khi kết nối còn đang chạy — đúng guard isRunning() của app)
+      try { await Promise.race([Promise.resolve().then(() => helper.initSocket(pageId)), sleep(15000)]); }
+      catch (e) { /* ignore */ }
       sock = helper.SOCKETS && helper.SOCKETS[pageId];
     }
     if (!sock || !sock.instance) return { kind: 'dead' };
@@ -1867,8 +1874,12 @@
         const directOpts = batchSkipApi ? { skipApi: true } : { directChain: true };
         sendOne(conv, text, photo, directOpts).then((r) => {
           if (r.ok) return; // gửi được — im lặng (đã báo "đã gửi" trước đó)
-          if (r.uncertain) logLine('⚠ ' + (conv.name || conv.id) + ' — ' + r.error + ' (không rõ — không gửi thêm)');
-          else logLine('❌ ' + (conv.name || conv.id) + ' — ' + r.error);
+          const nm2 = conv.name || conv.id;
+          if (r.uncertain) logLine('⚠ ' + nm2 + ' — ' + r.error + ' (không rõ — không gửi thêm)');
+          else logLine('❌ ' + nm2 + ' — ' + r.error);
+          if (!r.ok && !r.uncertain && isRetryableLoss(r.error)) {
+            scheduleBuRetry(conv, text, photo, nm2, 'gửi thẳng chưa được');
+          }
         });
         return { ok: true, id: '', sendBy: 'direct', sent: true, fired: true };
       }
@@ -1944,14 +1955,53 @@
         const pid = c.pageId || String(c.id || '').split('_')[0];
         if (!pid || seen[pid]) return;
         seen[pid] = true;
-        const sock = h.SOCKETS && h.SOCKETS[pid];
-        if (sock && sock.instance) return; // đã kết nối — khỏi làm lại
+        // KHÔNG dựa vào sock.instance để bỏ qua: socket chết mà instance vẫn còn thì bắn là thua.
+        // initSocket của app TỰ trả về ngay khi kết nối còn đang chạy (guard isRunning()) — gọi là đủ.
         if (socketWarmPromises[pid]) return; // đang kết nối dở — khỏi làm trùng
         socketWarmPromises[pid] = Promise.resolve()
           .then(() => h.initSocket(pid))
           .catch(() => null); /* nóng socket là việc phụ — không được làm hỏng lô gửi */
       });
     } catch (e) { /* ignore */ }
+  }
+
+  /* ===== BÙ VÒNG 2 — chống mất tin khi server nghẽn ngay sau khi bắn dồn =====
+     Bằng chứng từ log: bắn lô dồn (8–21 API thành công trong 1 giây) rồi bù socket NGAY là
+     server "báo gửi thất bại" hàng loạt (FB đang giữ nhịp gửi của tài khoản) — CÙNG chat đó
+     bù lại sau ~10–13 giây là THẮNG ngay với đúng frame đó. Nên khi kênh THỪA NHẬN thua
+     (chắc chắn tin CHƯA đến nơi) thì bù vòng 2 sau nhịp — đúng luật "kênh chắc thua PHẢI bù
+     tiếp, không im lặng bỏ sót". Mỗi chat tối đa 1 lần; 'maybe'/không rõ → TUYỆT ĐỐI không
+     (chống trùng tin). */
+  const BU_RETRY_MS = 12000;
+  const buRetryDone = {}; // convId → đã bù vòng 2
+
+  function isRetryableLoss(err) {
+    // CHỈ các lỗi kênh xác nhận "chưa gửi" — không đụng 'không rõ/maybe', token, dữ liệu thiếu
+    return /server báo gửi thất bại|Extension không gửi được|Socket không kết nối|Không thấy Extension|Extension Pancake chưa kết nối/.test(String(err || ''));
+  }
+
+  function scheduleBuRetry(conv, text, photo, name, why) {
+    if (!conv || buRetryDone[conv.id]) return; // mỗi chat đúng 1 lần
+    buRetryDone[conv.id] = true;
+    logLine('⏳ ' + name + ' — ' + why + ' (server thường nghẽn ngay sau khi bắn dồn) — bù vòng 2 sau '
+      + Math.round(BU_RETRY_MS / 1000) + 's…');
+    setTimeout(() => {
+      if (state.stopRequested) {
+        logLine('⏸ ' + name + ' — bỏ bù vòng 2 (đang dừng).');
+        return;
+      }
+      sendOne(conv, text, photo, { skipApi: true }).then((r) => {
+        if (r.ok) {
+          logLine('✅ ' + name + ' — bù vòng 2 THÀNH CÔNG qua ' + (r.sendBy === 'socket' ? 'Socket' : 'Extension'));
+        } else if (r.uncertain) {
+          logLine('⚠ ' + name + ' — bù vòng 2 không rõ kết quả — KHÔNG gửi thêm (chống trùng)');
+        } else {
+          logLine('❌ ' + name + ' — bù vòng 2 vẫn không được: ' + r.error);
+        }
+      }).catch((e) => {
+        logLine('❌ ' + name + ' — bù vòng 2 lỗi: ' + (e && e.message || e));
+      });
+    }, BU_RETRY_MS);
   }
 
   // Nhóm chat theo NỘI DUNG sẽ gửi: chat thuộc câu nào → ĐÚNG chữ của câu đó;
@@ -2134,6 +2184,12 @@
       } else {
         fail++;
         logLine('❌ [' + done + '/' + totalAll + '] ' + (c.name || c.id) + ' — ' + r.error);
+        if (!r.uncertain && isRetryableLoss(r.error)) {
+          const p2 = c.pageId || String(c.id).split('_')[0];
+          scheduleBuRetry(c, gtext, photo
+            ? { url: photo.url, id: photo.id, fbId: fbIdByPage[p2] || '', w: photo.w, h: photo.h }
+            : null, c.name || c.id, 'gửi chưa được');
+        }
       }
       setProgress(done, totalAll);
       return r;
@@ -2455,7 +2511,7 @@
       </style>
       <div class="wrap" id="ssb-wrap">
         <div class="head" id="ssb-head">
-          <span class="title"><svg class="logo" viewBox="0 0 50 52" width="17" height="17" xmlns="http://www.w3.org/2000/svg"><path d="M10 2 L14 11" stroke="#5865F2" stroke-width="5" stroke-linecap="round" fill="none"/><path d="M40 2 L36 11" stroke="#5865F2" stroke-width="5" stroke-linecap="round" fill="none"/><rect x="0" y="12" width="50" height="40" rx="6" fill="#5865F2"/><rect x="12" y="31" width="12" height="4" rx="2" fill="#fff"/><rect x="26" y="31" width="12" height="4" rx="2" fill="#fff"/></svg>BOTFAKE <span style="color:#64748b;font-weight:400;font-size:11px">v1.36.0</span></span>
+          <span class="title"><svg class="logo" viewBox="0 0 50 52" width="17" height="17" xmlns="http://www.w3.org/2000/svg"><path d="M10 2 L14 11" stroke="#5865F2" stroke-width="5" stroke-linecap="round" fill="none"/><path d="M40 2 L36 11" stroke="#5865F2" stroke-width="5" stroke-linecap="round" fill="none"/><rect x="0" y="12" width="50" height="40" rx="6" fill="#5865F2"/><rect x="12" y="31" width="12" height="4" rx="2" fill="#fff"/><rect x="26" y="31" width="12" height="4" rx="2" fill="#fff"/></svg>BOTFAKE <span style="color:#64748b;font-weight:400;font-size:11px">v1.37.0</span></span>
           <button class="badge on" id="ssb-toggle" title="Bật/tắt tính năng">BẬT</button>
           <button class="minibtn" id="ssb-close" title="Tắt panel (F5 hoặc Alt+Shift+B để hiện lại)">✕</button>
           <button class="minibtn" id="ssb-min" title="Thu nhỏ">—</button>

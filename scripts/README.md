@@ -116,6 +116,13 @@ lại** — ưu tiên tốc độ.
   server để phân loại chắc/thiếu — không mất gì về độ chính xác.
 - **Full speed**: mặc định 5000 tin/lượt, nghỉ 0ms giữa lượt — lô gửi bung hết tốc độ như tool gửi
   hàng loạt (không còn khoảng hãm nào trong đường gửi). Muốn hãm lại thì chỉnh 2 ô — vẫn lưu qua F5.
+- **Bù vòng 2 sau nhịp — chống mất tin khi server nghẽn**: bắn lô dồn (8–21 tin thành công trong 1
+  giây) rồi bù socket NGAY là Facebook thường "báo gửi thất bại" (đang giữ nhịp gửi của tài khoản) —
+  cùng chat đó bù lại sau ~12 giây là thắng với đúng frame đó (đã đối chiếu bằng chứng trong log).
+  Nên khi kênh **thừa nhận thua** (chắc chắn tin chưa đến nơi) thì script tự **bù vòng 2 sau 12s** —
+  mỗi chat tối đa 1 lần, đúng luật "kênh chắc thua phải bù tiếp, không im lặng bỏ sót".
+  Tin **"không rõ" (maybe)** vẫn tuyệt đối không gửi thêm — chống trùng tin. Socket cũng được
+  khởi động lại đúng kiểu app (initSocket tự kiểm `isRunning`) và luôn chờ làm nóng xong mới bắn.
 - **Socket/Ext gửi LẦN LƯỢT từng chat (hàng đợi)**: gửi lô mà bắn Socket/Extension đồng loạt thì
   hỏng hàng loạt (Extension trả "không gửi được", socket bị server "báo gửi thất bại") — đúng như
   thực tế "chọn riêng 1 con thì chạy, chọn cả lô thì lỗi". Nên mọi bước Socket/Ext được xếp vào 1
