@@ -2239,7 +2239,6 @@
       }
     }
 
-    // (block "đang gửi" được chuyển lên TRƯỚC bước lọc — xem ngay dưới confirm)
     // CHỐT danh sách câu sẽ TIÊU THỤ ngay từ đầu lượt: gửi xong (kể cả lỗi giữa chừng) sẽ xóa
     // ĐÚNG các câu này — không phụ lệch việc giữa chừng bấm tích/bỏ tích câu khác.
     const consumeIds = new Set(state.listSel || []);
