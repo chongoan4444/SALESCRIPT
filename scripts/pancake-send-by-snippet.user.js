@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE
 // @namespace    salescript
-// @version      1.31.2
+// @version      1.32.0
 // @description  BOTFAKE — chọn chuỗi chat (Alt+Click 2 đầu) hoặc theo snippet trong Pancake rồi gửi cùng 1 câu (kèm ảnh nếu muốn) cho tất cả.
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -564,6 +564,7 @@
       type: String(c.type || '').toLowerCase() === 'comment' ? 'comment' : 'inbox',
       pageId: String(c.page_id || c.id.split('_')[0] || ''), // pageId có sẵn — khỏi suy từ id
       threadId: String(c.thread_id || ''), // thread_id có sẵn trong API — khỏi tải lại conversation khi gửi
+      tags: Array.isArray(c.tags) ? c.tags.slice() : [], // tag ids — lọc "chốt"/"chặn" lúc gửi
       threadKey: String(c.thread_key || ''), // payload Ext cần convId = thread_key (đúng executeByExtOnce)
       customerName: String((c.from && (c.from.username || c.from.name)) || c.name || ''), // payload Ext cần customerName
       updatedAt: String(c.updated_at || ''), // payload Ext cần conversationUpdatedTime
@@ -615,7 +616,7 @@
     'IS_LIVESTREAM_POST_OFF', 'PERSONAL_MESSAGE', 'GROUP_MESSAGE', 'BIZAI_GENERATING',
     'BIZAI_NOT_GENERATING', 'BIZAI_TRANSFERRED', 'STRANGER_MESSAGE'];
 
-  function buildListRequest(pageCount, cursor, currentCount, token) {
+  function buildListRequest(pageCount, cursor, currentCount, token, opts) {
     const st = window.__pancakeReduxStore__.getState();
     const pgs = st.pages || {};
     const auth = st.auth || {};
@@ -644,6 +645,13 @@
         else keep.push(t);
       });
       tagsVal = keep;
+    }
+    // FORCE lọc theo tag (dùng khi kiểm tra tag "chốt"/"chặn" lúc gửi):
+    // server nhận tags=[id…] và tự trả đúng các chat dính 1 trong các tag đó (mode=OR)
+    if (opts && Array.isArray(opts.forceTags) && opts.forceTags.length) {
+      tagsVal = opts.forceTags.map(String);
+      exceptIds = [];
+      mode = 'OR';
     }
     // types = filteredType bỏ các cờ đặc biệt; cờ → query riêng như app
     const types = ftype.filter((e) => LIST_SPECIAL_TYPES.indexOf(e) === -1);
@@ -679,7 +687,7 @@
     return { ids, url: location.origin + '/api/v1/conversations?' + q.toString() };
   }
 
-  async function loadListViaApi(onProgress) {
+  async function loadListViaApi(onProgress, opts) {
     const token = getToken();
     if (!token) return { ok: false, error: 'Không lấy được access token' };
 
@@ -693,7 +701,7 @@
     while (guard++ < 300) {
       let url;
       try {
-        const req = buildListRequest(pageCount, cursor, rows.length || 0, token);
+        const req = buildListRequest(pageCount, cursor, rows.length || 0, token, opts);
         ids = req.ids;
         url = req.url;
       } catch (e) {
@@ -724,6 +732,59 @@
       await sleep(120); // nghỉ nhẹ giữa các trang — tránh bị rate-limit
     }
     return { ok: true, rows };
+  }
+
+  /* ============================ LỌC TAG "CHỐT"/"CHẶN" LÚC GỬI ============================
+     Trong lúc chờ gửi, sale có thể đã gắn tag "…chốt" (đã chốt đơn — KHÔNG được gửi tiếp)
+     hoặc tag "chặn". Lúc bấm Gửi: tải lại tag MỘT LƯỢT (API lọc sẵn theo tag) rồi bỏ qua. */
+
+  // so khớp TÊN TAG đã bỏ dấu/không phân biệt hoa: "chốt"→chot, "chặn"→chan (vd "Huyền chốt", "Chặn")
+  function tagBanName(name) {
+    const norm = String(name || '').toLowerCase()
+      .normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/đ/g, 'd');
+    return norm.indexOf('chot') > -1 || norm.indexOf('chan') > -1;
+  }
+
+  // Trả { kept, skipped }: CHỈ bỏ qua chat khi tải lại tag xác nhận dính tag cấm;
+  // chat không kiểm tra được → GIỮ NGUYÊN (thiếu dữ liệu không được làm mất tin).
+  async function filterBannedTagTargets(targets) {
+    const kept = [], skipped = [];
+    try {
+      const st = window.__pancakeReduxStore__ && window.__pancakeReduxStore__.getState();
+      const defsByPage = (st && st.conversations && st.conversations.pageSettingTags) || {};
+      const banIds = new Set();
+      const banNames = [];
+      const seenPage = {};
+      targets.forEach((m) => {
+        const pid = m.pageId || String(m.id || '').split('_')[0];
+        if (seenPage[pid]) return;
+        seenPage[pid] = 1;
+        (defsByPage[pid] || []).forEach((t) => {
+          const nm = String((t && (t.text || t.name)) || '');
+          if (tagBanName(nm)) {
+            banIds.add(String(t.id));
+            if (banNames.indexOf(nm) < 0) banNames.push(nm);
+          }
+        });
+      });
+      if (!banIds.size) return { kept: targets, skipped }; // page không có tag cấm nào — khỏi tốn request
+      logLine('🔎 Lọc tag lúc gửi: kiểm tra tag "' + banNames.join('", "') + '" — tải lại 1 lượt…');
+      const res = await loadListViaApi(null, { forceTags: Array.from(banIds) });
+      if (!res.ok) {
+        logLine('⚠ Không tải lại được tag (' + res.error + ') — giữ nguyên danh sách, không lọc.');
+        return { kept: targets, skipped };
+      }
+      const banned = new Set();
+      res.rows.forEach((r) => banned.add(r.id));
+      targets.forEach((m) => {
+        if (banned.has(m.id)) skipped.push(m);
+        else kept.push(m);
+      });
+    } catch (e) {
+      logLine('⚠ Lọc tag lỗi (' + (e && e.message || e) + ') — giữ nguyên danh sách.');
+      return { kept: targets, skipped };
+    }
+    return { kept, skipped };
   }
 
   /* ============================ QUÉT TOÀN BỘ DANH SÁCH ============================ */
@@ -1798,6 +1859,22 @@
     if (!confirm('Gửi ' + (text ? '1 câu' : 'ảnh') + ' tới ' + targets.length + ' đoạn chat đã chọn?\n\n“'
       + clip(text || '(chỉ gửi ảnh)', 120) + '”' + imgNote + '\n\nNhận: ' + names + warnComment)) return;
 
+    // LỌC TAG "CHỐT"/"CHẶN" trước khi bắn — tải lại tag 1 lượt, bỏ qua chat đã bị gắn cấm
+    {
+      const ban = await filterBannedTagTargets(targets);
+      if (ban.skipped.length) {
+        logLine('🧹 Bỏ qua ' + ban.skipped.length + ' chat mang tag chốt/chặn: '
+          + ban.skipped.slice(0, 20).map((m) => m.name || m.id).join(', ')
+          + (ban.skipped.length > 20 ? ', …' : ''));
+        targets = ban.kept;
+      }
+      if (!targets.length) {
+        logLine('🧹 Không còn chat nào sau khi lọc tag — không có gì để gửi.');
+        render();
+        return;
+      }
+    }
+
     state.sending = true;
     state.stopRequested = false;
     batchSkipApi = false;
@@ -2051,7 +2128,7 @@
       </style>
       <div class="wrap" id="ssb-wrap">
         <div class="head" id="ssb-head">
-          <span class="title"><svg class="logo" viewBox="0 0 50 52" width="17" height="17" xmlns="http://www.w3.org/2000/svg"><path d="M10 2 L14 11" stroke="#5865F2" stroke-width="5" stroke-linecap="round" fill="none"/><path d="M40 2 L36 11" stroke="#5865F2" stroke-width="5" stroke-linecap="round" fill="none"/><rect x="0" y="12" width="50" height="40" rx="6" fill="#5865F2"/><rect x="12" y="31" width="12" height="4" rx="2" fill="#fff"/><rect x="26" y="31" width="12" height="4" rx="2" fill="#fff"/></svg>BOTFAKE <span style="color:#64748b;font-weight:400;font-size:11px">v1.31.2</span></span>
+          <span class="title"><svg class="logo" viewBox="0 0 50 52" width="17" height="17" xmlns="http://www.w3.org/2000/svg"><path d="M10 2 L14 11" stroke="#5865F2" stroke-width="5" stroke-linecap="round" fill="none"/><path d="M40 2 L36 11" stroke="#5865F2" stroke-width="5" stroke-linecap="round" fill="none"/><rect x="0" y="12" width="50" height="40" rx="6" fill="#5865F2"/><rect x="12" y="31" width="12" height="4" rx="2" fill="#fff"/><rect x="26" y="31" width="12" height="4" rx="2" fill="#fff"/></svg>BOTFAKE <span style="color:#64748b;font-weight:400;font-size:11px">v1.32.0</span></span>
           <button class="badge on" id="ssb-toggle" title="Bật/tắt tính năng">BẬT</button>
           <button class="minibtn" id="ssb-close" title="Tắt panel (F5 hoặc Alt+Shift+B để hiện lại)">✕</button>
           <button class="minibtn" id="ssb-min" title="Thu nhỏ">—</button>

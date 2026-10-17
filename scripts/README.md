@@ -129,6 +129,10 @@ lại** — ưu tiên tốc độ.
 - **Text luôn đi API-trước — hết vòng vo**: hint/dự đoán không còn ép text vào Socket/Ext (chậm,
   hàng đợi Extension xếp hàng) — gửi thẳng API cookie-auth như gửi tay (HAR 200 chứng minh);
   ảnh mới dùng hint. Bù cũng hết chậm: không dò PSID qua Extension khi kênh chỉ từ chối (cửa sổ).
+- **Tự lọc tag "chốt"/"chặn" lúc gửi**: trước khi bắn, script tải lại tag MỘT LƯỢT (API lọc sẵn theo
+  tag) và tự bỏ qua chat đã bị gắn tag chứa chữ "chốt" (vd "Huyền chốt" — đã chốt đơn) hoặc "chặn"
+  — kể cả khi chat đó được gắn tag SAU khi tải danh sách. Không kiểm tra được tag → vẫn gửi (không
+  bao giờ mất tin vì thiếu dữ liệu).
 
 Tự động tăng tốc: sau lần đầu API bị `(#10)/(#551)…`, các chat còn lại **bỏ qua API** đi thẳng sang Socket;
 kênh gửi thành công được **ghi nhớ** (session) nên lần gửi sau vào thẳng kênh đó.
