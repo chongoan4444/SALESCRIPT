@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE
 // @namespace    salescript
-// @version      1.30.2
+// @version      1.30.3
 // @description  BOTFAKE — chọn chuỗi chat (Alt+Click 2 đầu) hoặc theo snippet trong Pancake rồi gửi cùng 1 câu (kèm ảnh nếu muốn) cho tất cả.
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -1257,8 +1257,10 @@
   // Lấy conversation 1 lần cho MỌI kênh trong cùng lượt gửi (ctx dùng chung) — đỡ gọi lại nhiều lần
   async function ctxFull(conv, ctx) {
     if (!ctx.fullLoaded) {
-      // dòng conv đã đủ dữ liệu (threadId + pageId) → dùng thẳng, khỏi GET conversation (tiết kiệm 1 RTT mỗi tin)
-      ctx.full = (conv.threadId && (conv.pageId || conv.id)) ? conv : await getFullConversation(conv);
+      // dòng conv đã đủ dữ liệu (threadId + pageId + threadKey + updatedAt — đủ cho payload Ext)
+      // → dùng thẳng, khỏi GET conversation; thiếu thì nạp đầy đủ (redux có sẵn là xong ngay)
+      ctx.full = (conv.threadId && (conv.pageId || conv.id) && conv.threadKey && conv.updatedAt)
+        ? conv : await getFullConversation(conv);
       ctx.fullLoaded = true;
     }
     return ctx.full || null;
@@ -1552,10 +1554,13 @@
       platform: 'facebook',
       replyMessage: null,
       threadId,
-      convId: full.thread_key || full.threadKey || conv.threadKey || null,
+      convId: full.thread_key || full.threadKey || conv.threadKey || (threadId ? 't_' + threadId : null), // thread_key = 't_' + thread_id
       customerName: (full.from && (full.from.username || full.from.name)) || full.customerName || conv.customerName || '',
       isIGD: false,
-      conversationUpdatedTime: Date.parse(String(full.updated_at || full.updatedAt || conv.updatedAt || '') + 'Z'),
+      conversationUpdatedTime: (function () {
+        const t = Date.parse(String(full.updated_at || full.updatedAt || conv.updatedAt || '') + 'Z');
+        return isNaN(t) ? Date.now() : t; // thiếu mốc → dùng giờ — không gửi NaN cho extension
+      })(),
       photoUrls: photo ? [photo.url] : [],
       isBusiness: false,
     };
@@ -2034,7 +2039,7 @@
       </style>
       <div class="wrap" id="ssb-wrap">
         <div class="head" id="ssb-head">
-          <span class="title"><svg class="logo" viewBox="0 0 50 52" width="17" height="17" xmlns="http://www.w3.org/2000/svg"><path d="M10 2 L14 11" stroke="#5865F2" stroke-width="5" stroke-linecap="round" fill="none"/><path d="M40 2 L36 11" stroke="#5865F2" stroke-width="5" stroke-linecap="round" fill="none"/><rect x="0" y="12" width="50" height="40" rx="6" fill="#5865F2"/><rect x="12" y="31" width="12" height="4" rx="2" fill="#fff"/><rect x="26" y="31" width="12" height="4" rx="2" fill="#fff"/></svg>BOTFAKE <span style="color:#64748b;font-weight:400;font-size:11px">v1.30.2</span></span>
+          <span class="title"><svg class="logo" viewBox="0 0 50 52" width="17" height="17" xmlns="http://www.w3.org/2000/svg"><path d="M10 2 L14 11" stroke="#5865F2" stroke-width="5" stroke-linecap="round" fill="none"/><path d="M40 2 L36 11" stroke="#5865F2" stroke-width="5" stroke-linecap="round" fill="none"/><rect x="0" y="12" width="50" height="40" rx="6" fill="#5865F2"/><rect x="12" y="31" width="12" height="4" rx="2" fill="#fff"/><rect x="26" y="31" width="12" height="4" rx="2" fill="#fff"/></svg>BOTFAKE <span style="color:#64748b;font-weight:400;font-size:11px">v1.30.3</span></span>
           <button class="badge on" id="ssb-toggle" title="Bật/tắt tính năng">BẬT</button>
           <button class="minibtn" id="ssb-close" title="Tắt panel (F5 hoặc Alt+Shift+B để hiện lại)">✕</button>
           <button class="minibtn" id="ssb-min" title="Thu nhỏ">—</button>

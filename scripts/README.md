@@ -117,6 +117,9 @@ lại** — ưu tiên tốc độ.
 - **Socket không còn 'không kết nối' oan**: socket được làm nóng ngay khi mở panel; nếu đang kết nối
   dở thì kênh Socket chờ xong rồi gửi thay vì bỏ cuộc. Lỗi Extension giờ giữ nguyên lý do extension
   trả về (log lộ đúng nguyên nhân thay vì chỉ 'không gửi được'). Token lấy từ cookie `jwt` như app.
+- **Payload Ext không bao giờ thiếu `convId`**: dòng list cũ/thiếu `thread_key` → tự dẫn xuất `t_` +
+  `thread_id` (đúng định dạng của app) hoặc nạp đầy đủ conversation; `conversationUpdatedTime` không
+  bao giờ là NaN — hai lý do hay khiến Extension từ chối trong khi gửi tay vẫn chạy.
 
 Tự động tăng tốc: sau lần đầu API bị `(#10)/(#551)…`, các chat còn lại **bỏ qua API** đi thẳng sang Socket;
 kênh gửi thành công được **ghi nhớ** (session) nên lần gửi sau vào thẳng kênh đó.
