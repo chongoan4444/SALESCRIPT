@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE
 // @namespace    salescript
-// @version      1.29.4
+// @version      1.29.5
 // @description  BOTFAKE — chọn chuỗi chat (Alt+Click 2 đầu) hoặc theo snippet trong Pancake rồi gửi cùng 1 câu (kèm ảnh nếu muốn) cho tất cả.
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -558,6 +558,9 @@
       type: String(c.type || '').toLowerCase() === 'comment' ? 'comment' : 'inbox',
       pageId: String(c.page_id || c.id.split('_')[0] || ''), // pageId có sẵn — khỏi suy từ id
       threadId: String(c.thread_id || ''), // thread_id có sẵn trong API — khỏi tải lại conversation khi gửi
+      threadKey: String(c.thread_key || ''), // payload Ext cần convId = thread_key (đúng executeByExtOnce)
+      customerName: String((c.from && (c.from.username || c.from.name)) || c.name || ''), // payload Ext cần customerName
+      updatedAt: String(c.updated_at || ''), // payload Ext cần conversationUpdatedTime
       lastAt: String(c.last_customer_interactive_at || ''), // mốc tương tác cuối của khách — đoán cửa sổ 24h
       fromPsid: String(c.from_psid || ((c.from || {}).id) || ''), // PSID của khách — có sẵn trong dữ liệu API
       order,
@@ -898,7 +901,8 @@
       const pages = st.pages || {};
       const map = pages.activatedMap || {};
       const arr = pages.activated || [];
-      const p = map[full.page_id] || arr.find((x) => x && x.id === full.page_id);
+      const pid = full.page_id || full.pageId || String(full.id || '').split('_')[0];
+      const p = map[pid] || arr.find((x) => x && x.id === pid);
       if (!p || !p.platform_extra_info || !p.platform_extra_info.ctx_7_days_enabled) return false;
       let clicks = null;
       const mc = st.messages && st.messages.customers;
@@ -1294,24 +1298,28 @@
         const p = String(v || '');
         return /^\d{5,}$/.test(p) && p !== String(pageId) ? p : null;
       };
-      return ok(full.from_psid) || ok(full.fromPsid) || ok(full.from && full.from.id);
+      // KHÔNG nhận from.id: đó có thể là FBID chứ không phải PSID — gửi nhầm thì Socket/Ext đều bị từ chối
+      return ok(full.from_psid) || ok(full.fromPsid);
     } catch (e) { return null; }
   }
 
   // Tìm globalId (PSID) của khách — CHẠY ĐUA đúng như concurrentlyGetGLobalId trong _app:
   // cache → song song [Extension GET_GLOBAL_ID_FOR_CONV, WebSocket __MqttHelper__.findGlobalId]
   // → ai trả kết quả trước thì dùng (WS thường có cache IndexedDB → trả gần như ngay)
-  async function resolveGlobalId(full, threadId, cacheKey, convFromPsid) {
+  async function resolveGlobalId(full, threadId, cacheKey, convFromPsid, forceFind) {
     const key = (full && full.id) || cacheKey;
-    const pageId = (full && full.page_id) || String(cacheKey || '').split('_')[0];
-    try {
-      const g1 = window.__GlobalIdCacheTest__, g2 = window.__tempGlobalIdCache__;
-      const cached = (g1 && g1.get(key)) || (g2 && g2.get(key));
-      if (cached) return cached;
-    } catch (e) { /* ignore */ }
-    // PSID đã có sẵn trong dữ liệu conv → dùng NGAY và KHÔNG ĐỤNG mạng (WS/Ext dò tìm có khi
-    // vài giây/tin mà kết quả cũng chính là con số này). Chỉ dò tìm khi dòng conv THIẾU PSID.
-    const known = psidFromFull(full, pageId) || psidFromFull({ from_psid: convFromPsid || '' }, pageId);
+    const pageId = (full && full.page_id) || (full && full.pageId) || String(cacheKey || '').split('_')[0];
+    if (!forceFind) {
+      try {
+        const g1 = window.__GlobalIdCacheTest__, g2 = window.__tempGlobalIdCache__;
+        const cached = (g1 && g1.get(key)) || (g2 && g2.get(key));
+        if (cached) return cached;
+      } catch (e) { /* ignore */ }
+    }
+    // PSID đã có sẵn trong dữ liệu conv → dùng NGAY và KHÔNG ĐỤNG mạng. Chỉ dò tìm khi dòng conv
+    // THIẾU PSID hoặc khi kênh gửi vừa từ chối PSID này (forceFind → dò lại chính chủ qua WS/Ext).
+    const known = forceFind ? null
+      : (psidFromFull(full, pageId) || psidFromFull({ from_psid: convFromPsid || '' }, pageId));
     if (known) {
       try { window.__tempGlobalIdCache__ && window.__tempGlobalIdCache__.set(key, known); } catch (e) { /* ignore */ }
       return known;
@@ -1321,10 +1329,10 @@
     const tasks = [];
     if (typeof window.findGlobalIdForConv === 'function' && threadId) {
       tasks.push(window.findGlobalIdForConv({
-        pageId: pageId, threadId: threadId, threadKey: (full && full.thread_key) || '',
+        pageId: pageId, threadId: threadId, threadKey: (full && (full.thread_key || full.threadKey)) || '',
         isBusiness: true,
-        conversationUpdatedTime: Date.parse(String((full && full.updated_at) || '') + 'Z'),
-        customerName: (full && full.from && (full.from.username || full.from.name)) || '',
+        conversationUpdatedTime: Date.parse(String((full && (full.updated_at || full.updatedAt)) || '') + 'Z'),
+        customerName: (full && full.from && (full.from.username || full.from.name)) || (full && full.customerName) || '',
         convType: 'INBOX', postId: null, convId: null,
       }).catch(() => null));
     }
@@ -1356,7 +1364,7 @@
     if (!full) return { ok: false, error: 'Không lấy được thông tin đoạn chat' };
     const pageId = full.page_id || conv.pageId;
     if (!ctx.threadResolved) {
-      let threadId = full.thread_id;
+      let threadId = full.thread_id || full.threadId; // dòng list để threadId (camel) — tránh lệch field
       if (!threadId && typeof window.__syncMissingThreadId__ === 'function') {
         try { threadId = await window.__syncMissingThreadId__(pageId, full.id || conv.id); } catch (e) { /* ignore */ }
       }
@@ -1365,7 +1373,7 @@
     }
     const threadId = ctx.threadId;
     if (!ctx.gidResolved) {
-      ctx.gid = await resolveGlobalId(full, threadId, conv.id, conv.fromPsid);
+      ctx.gid = await resolveGlobalId(full, threadId, conv.id, conv.fromPsid, ctx.gidForceFind);
       ctx.gidResolved = true;
     }
     const gid = ctx.gid;
@@ -1424,7 +1432,7 @@
       : null;
 
     if (!ctx.threadResolved) {
-      let threadId = full.thread_id;
+      let threadId = full.thread_id || full.threadId; // dòng list để threadId (camel) — tránh lệch field
       if (!threadId && typeof window.__syncMissingThreadId__ === 'function') {
         try {
           threadId = await window.__syncMissingThreadId__(full.page_id || conv.pageId, full.id || conv.id);
@@ -1437,7 +1445,7 @@
     if (!threadId) return { ok: false, error: 'Không tìm thấy thread_id' };
 
     if (!ctx.gidResolved) {
-      ctx.gid = await resolveGlobalId(full, threadId, conv.id, conv.fromPsid);
+      ctx.gid = await resolveGlobalId(full, threadId, conv.id, conv.fromPsid, ctx.gidForceFind);
       ctx.gidResolved = true;
     }
     const globalUserId = ctx.gid || null;
@@ -1466,10 +1474,10 @@
       platform: 'facebook',
       replyMessage: null,
       threadId,
-      convId: full.thread_key || null,
-      customerName: (full.from && (full.from.username || full.from.name)) || '',
+      convId: full.thread_key || full.threadKey || conv.threadKey || null,
+      customerName: (full.from && (full.from.username || full.from.name)) || full.customerName || conv.customerName || '',
       isIGD: false,
-      conversationUpdatedTime: Date.parse(String(full.updated_at || '') + 'Z'),
+      conversationUpdatedTime: Date.parse(String(full.updated_at || full.updatedAt || conv.updatedAt || '') + 'Z'),
       photoUrls: photo ? [photo.url] : [],
       isBusiness: false,
     };
@@ -1627,6 +1635,12 @@
       // "không rõ" = tin CÓ THỂ đã đi — thử tiếp kênh khác sẽ gửi TRÙNG → dừng ngay
       if (r.sent === 'maybe') {
         return { ok: false, uncertain: true, sent: 'maybe', error: tried.join(' | ') };
+      }
+      // kênh trước thua rõ mà lỗi nghi do PSID sai (server từ chối người nhận) → kênh sau
+      // dò lại PSID CHÍNH CHỦ qua WS/Ext thay vì dùng lại from_psid có thể đã lệch
+      if (conv.fromPsid && /server báo gửi thất bại|không gửi được|globalId/i.test(r.error || '')) {
+        ctx.gidForceFind = true;
+        ctx.gidResolved = false;
       }
       if (r.error && r.error.indexOf('Token') === 0) return r; // token hỏng — dừng hẳn
     }
@@ -1914,7 +1928,7 @@
       </style>
       <div class="wrap" id="ssb-wrap">
         <div class="head" id="ssb-head">
-          <span class="title"><svg class="logo" viewBox="0 0 50 52" width="17" height="17" xmlns="http://www.w3.org/2000/svg"><path d="M10 2 L14 11" stroke="#5865F2" stroke-width="5" stroke-linecap="round" fill="none"/><path d="M40 2 L36 11" stroke="#5865F2" stroke-width="5" stroke-linecap="round" fill="none"/><rect x="0" y="12" width="50" height="40" rx="6" fill="#5865F2"/><rect x="12" y="31" width="12" height="4" rx="2" fill="#fff"/><rect x="26" y="31" width="12" height="4" rx="2" fill="#fff"/></svg>BOTFAKE <span style="color:#64748b;font-weight:400;font-size:11px">v1.29.4</span></span>
+          <span class="title"><svg class="logo" viewBox="0 0 50 52" width="17" height="17" xmlns="http://www.w3.org/2000/svg"><path d="M10 2 L14 11" stroke="#5865F2" stroke-width="5" stroke-linecap="round" fill="none"/><path d="M40 2 L36 11" stroke="#5865F2" stroke-width="5" stroke-linecap="round" fill="none"/><rect x="0" y="12" width="50" height="40" rx="6" fill="#5865F2"/><rect x="12" y="31" width="12" height="4" rx="2" fill="#fff"/><rect x="26" y="31" width="12" height="4" rx="2" fill="#fff"/></svg>BOTFAKE <span style="color:#64748b;font-weight:400;font-size:11px">v1.29.5</span></span>
           <button class="badge on" id="ssb-toggle" title="Bật/tắt tính năng">BẬT</button>
           <button class="minibtn" id="ssb-close" title="Tắt panel (F5 hoặc Alt+Shift+B để hiện lại)">✕</button>
           <button class="minibtn" id="ssb-min" title="Thu nhỏ">—</button>
@@ -2164,6 +2178,9 @@
           fromPsid: m.fromPsid || '',
           pageId: m.pageId || '',
           threadId: m.threadId || '',
+          threadKey: m.threadKey || '',
+          customerName: m.customerName || '',
+          updatedAt: m.updatedAt || '',
         })),
       };
       state.savedLists.push(l);

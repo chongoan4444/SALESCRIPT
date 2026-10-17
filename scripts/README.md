@@ -103,6 +103,10 @@ lại** — ưu tiên tốc độ.
 - **API không bị cướp oan**: `#551` (chặn của TỪNG NGƯỜI — ngoài cửa sổ) chỉ bù cho chính chat đó,
   không tước API cả lô nữa (chỉ rate limit/FB handover/thread-control mới chặn lô); chat thiếu mốc
   thời gian → để API thử trước thay vì đoán bừa.
+- **Payload Ext đủ trường như app**: dòng chat giờ mang theo `thread_key`/tên khách/`updated_at` — payload
+  gửi qua Extension không còn thiếu `convId`/`customerName`/`conversationUpdatedTime` (nguyên nhân Ext hay
+  "không gửi được"); PSID chỉ lấy từ `from_psid` chính danh; server từ chối người nhận → kênh sau tự dò lại
+  PSID chính chủ qua WS/Ext.
 
 Tự động tăng tốc: sau lần đầu API bị `(#10)/(#551)…`, các chat còn lại **bỏ qua API** đi thẳng sang Socket;
 kênh gửi thành công được **ghi nhớ** (session) nên lần gửi sau vào thẳng kênh đó.
