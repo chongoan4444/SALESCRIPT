@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE
 // @namespace    salescript
-// @version      1.42.0
+// @version      1.43.0
 // @description  BOTFAKE — chọn chuỗi chat (Alt+Click 2 đầu) hoặc theo snippet trong Pancake rồi gửi cùng 1 câu (kèm ảnh nếu muốn) cho tất cả.
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -398,24 +398,60 @@
 
   const SL_KEY = 'ssb_saved_lists';
 
+  const LOG_KEY = 'ssb_log';           // nhật ký gửi — giữ qua F5
+  const UI_KEY = 'ssb_ui_state';       // tick câu + ô nội dung đang gõ — giữ qua F5
+  const SL_BAK = SL_KEY + '_bak';      // bản dự phòng câu — chống mất dữ liệu
+
   function loadSavedLists() {
     try {
-      const arr = JSON.parse(localStorage.getItem(SL_KEY) || '[]');
+      const raw = localStorage.getItem(SL_KEY);
+      let arr;
+      if (raw === null) {
+        // key chính KHÔNG CÒN (bất thường) → khôi phục từ bản dự phòng
+        arr = JSON.parse(localStorage.getItem(SL_BAK) || '[]');
+      } else {
+        arr = JSON.parse(raw || '[]');
+        if (!Array.isArray(arr)) throw new Error('dữ liệu hỏng');
+      }
       if (!Array.isArray(arr)) return [];
       // câu cũ (lưu trước khi có text) → nội dung rỗng — vẫn gửi được bằng ô đang gõ
       return arr.filter((l) => l && l.id && Array.isArray(l.items))
         .map((l) => ({ ...l, text: String(l.text || '') }));
-    } catch (e) { return []; }
+    } catch (e) {
+      // dữ liệu chính hỏng → thử bản dự phòng trước khi bỏ cuộc
+      try {
+        const bak = JSON.parse(localStorage.getItem(SL_BAK) || '[]');
+        if (Array.isArray(bak) && bak.length) {
+          logLine('💾 Dữ liệu câu bị hỏng — đã khôi phục ' + bak.length + ' câu từ bản dự phòng.');
+          return bak.filter((l) => l && l.id && Array.isArray(l.items))
+            .map((l) => ({ ...l, text: String(l.text || '') }));
+        }
+      } catch (e2) { /* ignore */ }
+      return [];
+    }
   }
 
   function persistSavedLists() {
     try {
+      const prev = localStorage.getItem(SL_KEY);
+      if (prev && prev !== '[]') localStorage.setItem(SL_BAK, prev); // giữ 1 bản trước — chống mất dữ liệu
       localStorage.setItem(SL_KEY, JSON.stringify(state.savedLists));
       return true;
     } catch (e) {
       logLine('⚠ Không lưu được câu vào localStorage: ' + (e && e.message || e));
       return false;
     }
+  }
+
+  // Ghi trạng thái làm việc (câu đang tick + ô nội dung đang gõ) — F5 xong làm việc tiếp
+  function persistUiState() {
+    try {
+      const msgEl = shadow && shadow.getElementById('ssb-msg');
+      localStorage.setItem(UI_KEY, JSON.stringify({
+        sel: Array.from(state.listSel || []),
+        msg: (msgEl && msgEl.value) || '',
+      }));
+    } catch (e) { /* ignore — lưu trạng thái là việc phụ */ }
   }
 
   // Từ các câu ĐANG TÍCH → dựng lựa chọn hiện tại (gộp chat của mọi câu, loại trùng id)
@@ -458,6 +494,7 @@
   }
 
   function renderSavedLists() {
+    persistUiState(); // tick câu / danh sách đổi → giữ qua F5
     const box = shadow && shadow.getElementById('ssb-sl-box');
     const info = shadow && shadow.getElementById('ssb-sl-info');
     if (info) {
@@ -2420,7 +2457,9 @@
     }
     // CÂU ĐÃ CHỐT TIÊU THỤ từ đầu lượt → dùng xong TỰ XÓA (mỗi câu chỉ gửi 1 lần — tránh gửi trùng).
     // Chạy cả khi gửi lỗi giữa chừng: ít nhất đã bắn dở — giữ lại là dễ gửi trùng.
-    if (consumeIds.size) {
+    // NHƯNG lô fail TOÀN BỘ (0 tin được bắn/xác nhận) → GIỮ NGUYÊN câu: xóa lúc này là mất
+    // dữ liệu oan (đã xảy ra khi request lỗi mà câu vẫn bị nuốt — user mất câu đã soạn).
+    if (consumeIds.size && ok > 0) {
       const ids = Array.from(consumeIds);
       const delNames = state.savedLists.filter((l) => ids.indexOf(l.id) > -1).map((l) => l.name);
       state.savedLists = state.savedLists.filter((l) => ids.indexOf(l.id) === -1);
@@ -2431,6 +2470,9 @@
       if (delNames.length) {
         logLine('🗑 Đã gửi xong — tự xóa ' + delNames.length + ' câu: ' + delNames.join(', '));
       }
+    } else if (consumeIds.size) {
+      logLine('💾 Lô gửi KHÔNG có tin nào được bắn — GIỮ NGUYÊN ' + consumeIds.size
+        + ' câu đã chọn (không mất dữ liệu — sửa lỗi rồi gửi lại).');
     }
     // Gửi xong → TỰ BỎ CHỌN các đoạn chat đã đánh dấu (giống nút "Xóa"): dấu chọn đã "tiêu" vào
     // lượt gửi này, để sẵn sàng chọn lượt mới — và bấm chạy lại không bao giờ dính dấu cũ (chống trùng).
@@ -2684,7 +2726,7 @@
       </style>
       <div class="wrap" id="ssb-wrap">
         <div class="head" id="ssb-head">
-          <span class="title"><svg class="logo" viewBox="0 0 50 52" width="17" height="17" xmlns="http://www.w3.org/2000/svg"><path d="M10 2 L14 11" stroke="#5865F2" stroke-width="5" stroke-linecap="round" fill="none"/><path d="M40 2 L36 11" stroke="#5865F2" stroke-width="5" stroke-linecap="round" fill="none"/><rect x="0" y="12" width="50" height="40" rx="6" fill="#5865F2"/><rect x="12" y="31" width="12" height="4" rx="2" fill="#fff"/><rect x="26" y="31" width="12" height="4" rx="2" fill="#fff"/></svg>BOTFAKE <span style="color:#64748b;font-weight:400;font-size:11px">v1.42.0</span></span>
+          <span class="title"><svg class="logo" viewBox="0 0 50 52" width="17" height="17" xmlns="http://www.w3.org/2000/svg"><path d="M10 2 L14 11" stroke="#5865F2" stroke-width="5" stroke-linecap="round" fill="none"/><path d="M40 2 L36 11" stroke="#5865F2" stroke-width="5" stroke-linecap="round" fill="none"/><rect x="0" y="12" width="50" height="40" rx="6" fill="#5865F2"/><rect x="12" y="31" width="12" height="4" rx="2" fill="#fff"/><rect x="26" y="31" width="12" height="4" rx="2" fill="#fff"/></svg>BOTFAKE <span style="color:#64748b;font-weight:400;font-size:11px">v1.43.0</span></span>
           <button class="badge on" id="ssb-toggle" title="Bật/tắt tính năng">BẬT</button>
           <button class="minibtn" id="ssb-close" title="Tắt panel (F5 hoặc Alt+Shift+B để hiện lại)">✕</button>
           <button class="minibtn" id="ssb-min" title="Thu nhỏ">—</button>
@@ -3036,7 +3078,39 @@
         renderSavedLists();
       });
     }
+    // ===== KHÔI PHỤC SAU F5: câu đang tick + ô nội dung đang gõ + nhật ký — dữ liệu không mất =====
+    try {
+      const ui = JSON.parse(localStorage.getItem(UI_KEY) || 'null');
+      if (ui && Array.isArray(ui.sel)) {
+        const msgEl3 = root.getElementById('ssb-msg');
+        if (msgEl3 && ui.msg) msgEl3.value = String(ui.msg); // khôi phục chữ đang gõ trước
+        state.listSel = new Set(ui.sel.filter((id) => state.savedLists.some((l) => l.id === id)));
+        if (state.listSel.size) rebuildFromLists(); // tích 1 câu → ô gõ nạp theo nội dung câu (đúng UX)
+      }
+      const oldLog = JSON.parse(localStorage.getItem(LOG_KEY) || '[]');
+      if (Array.isArray(oldLog) && oldLog.length) {
+        state.log = oldLog.slice(-300);
+        const elLog = root.getElementById('ssb-log');
+        if (elLog) elLog.textContent = state.log.join('\n');
+      }
+    } catch (e) { /* ignore — hỏng dữ liệu phụ thì làm việc mới */ }
+    // ô nội dung đang gõ: lưu dần — F5 không mất chữ đã gõ dở
+    {
+      const msgElD = root.getElementById('ssb-msg');
+      if (msgElD) {
+        let tD = null;
+        msgElD.addEventListener('input', () => {
+          if (tD) clearTimeout(tD);
+          tD = setTimeout(persistUiState, 400);
+        });
+      }
+    }
     renderSavedLists();
+    if (state.savedLists.length) {
+      logLine('💾 Đã nạp ' + state.savedLists.length + ' câu · '
+        + state.savedLists.reduce((nn, l) => nn + l.items.length, 0) + ' chat đã lưu (giữ qua F5)'
+        + (state.listSel && state.listSel.size ? ' — đang chọn ' + state.listSel.size + ' câu' : ''));
+    }
     // ===== KÉO THẢ ĐỔI CỠ PANEL (tay nắm góc dưới-phải; đúp chuột = về mặc định) =====
     {
       const rsEl = root.getElementById('ssb-rs');
@@ -3165,6 +3239,7 @@
       + ':' + String(t.getSeconds()).padStart(2, '0');
     state.log.push('[' + hh + '] ' + s);
     if (state.log.length > 300) state.log.shift();
+    try { localStorage.setItem(LOG_KEY, JSON.stringify(state.log)); } catch (e) { /* ignore */ }
     const el = shadow && shadow.getElementById('ssb-log');
     if (el) {
       el.textContent = state.log.join('\n');

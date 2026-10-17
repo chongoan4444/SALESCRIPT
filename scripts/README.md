@@ -143,6 +143,11 @@ lại** — ưu tiên tốc độ.
   bỏ hẳn `is_record_ctx_7_days` là SỢI** — đối chiếu HAR gửi thật: app luôn kèm cờ này khi dr()
   đúng, 11/13 request thành công có cờ. THIẾU cờ = bị soi cửa sổ 24h gắt (#551) với **mọi chat
   ngoài cửa sổ 24h** — đây là "lỗi không gửi được tin" triệt để đã tìm ra. Text luôn đi API-trước.
+- **Dữ liệu GIỮ QUA F5 (v1.43.0)**: câu gửi lưu `localStorage` kèm **bản dự phòng** (key hỏng/mất →
+  tự khôi phục, không mất câu đã soạn); **tick câu + ô nội dung đang gõ + nhật ký gửi** cũng được lưu
+  — F5 xong làm việc tiếp đúng chỗ cũ. Khởi động có dòng "💾 Đã nạp N câu · M chat đã lưu".
+  **Câu chỉ tự xóa khi lô có ít nhất 1 tin được bắn** (mỗi câu chỉ gửi 1 lần — chống gửi trùng);
+  lô fail toàn bộ → GIỮ NGUYÊN câu + log rõ "không mất dữ liệu".
 - **Gửi xong tự bỏ chọn**: sau lượt gửi, các đoạn chat đã đánh dấu tự được "Xóa" chọn (như bấm nút
   Xóa) — sẵn sàng chọn lượt mới, và bấm chạy lại không bao giờ dính dấu cũ (chống gửi trùng).
 - **Text luôn đi API-trước — hết vòng vo**: hint/dự đoán không còn ép text vào Socket/Ext (chậm,
