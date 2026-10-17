@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE
 // @namespace    salescript
-// @version      1.26.2
+// @version      1.27.0
 // @description  BOTFAKE — chọn chuỗi chat (Alt+Click 2 đầu) hoặc theo snippet trong Pancake rồi gửi cùng 1 câu (kèm ảnh nếu muốn) cho tất cả.
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -1089,17 +1089,10 @@
     }
   }
 
-  // Đúng request mà _app-...js gửi khi nhắn tin thường (executeByApi + buildRequestBody):
-  //   POST /api/v1/pages/{page_id}/conversations/{conversation.id}/messages?access_token=...
-  //   multipart/form-data: action=reply_inbox, message=<text>
-  // Nếu server từ chối dạng "(#10) ... ứng dụng khác đang kiểm soát thread" (Facebook handover)
-  // thì app tự fallback sang extension — mình làm đúng như vậy ở sendSmart().
-  async function sendViaApi(conv, text, photo, ctx) {
-    if (conv.type === 'comment') return sendCommentViaApi(conv, text, photo, ctx || {}); // chat bình luận → reply_comment
+  // Dựng request gửi inbox ĐÚNG app (dùng chung cho sendViaApi và chế độ nhanh)
+  function buildInboxSend(conv, text, photo) {
     const token = getToken();
-    if (!token) {
-      return { ok: false, error: 'Không tìm thấy access_token — hãy tải lại trang Pancake rồi thử lại' };
-    }
+    if (!token) return { error: 'Không tìm thấy access_token — hãy tải lại trang Pancake rồi thử lại' };
     const pageId = conv.pageId || conv.id.split('_')[0];
     const url = apiBase() + '/v1/pages/' + pageId
       + '/conversations/' + encodeURIComponent(conv.id)
@@ -1115,10 +1108,56 @@
       fd.append('content_url', photo.url);
       if (photo.id) fd.append('content_id', photo.id);
     }
+    return { url: url, fd: fd };
+  }
+
+  // ⚡ CHẾ ĐỘ NHANH: bắn request API NGAY, KHÔNG chờ server trả lời — báo "đã gửi" tức thì.
+  // Response xem TRONG NỀN: OK → im lặng; THUA RÕ (4xx/success=false) → bù Socket/Ext trong nền;
+  // KHÔNG RÕ (5xx/lỗi mạng) → chỉ báo "không rõ" — KHÔNG gửi lại để tránh trùng tin.
+  function fireApiAndWatch(conv, text, photo) {
+    const req = buildInboxSend(conv, text, photo);
+    if (req.error) return { ok: false, sent: false, error: req.error };
+    if (state.stopRequested) return { ok: false, sent: false, error: 'Đã dừng' };
+    fetch(req.url, {
+      method: 'POST',
+      body: req.fd,
+      headers: { Accept: 'application/json' },
+      credentials: 'include',
+    }).then(async (res) => {
+      let data = null;
+      try { data = await res.json(); } catch (e) { data = null; }
+      if (res.ok && data && data.success) return; // đã đến nơi — im lặng
+      const msg = (data && (data.message || data.error)) || ('HTTP ' + res.status);
+      if (res.status === 401 || res.status === 403) capturedToken = null;
+      const nm = conv.name || conv.id;
+      const certainFail = (res.status >= 400 && res.status < 500) || (res.ok && data && data.success === false);
+      if (certainFail) {
+        logLine('⚠ ' + nm + ' — API từ chối (' + msg + ') — thử bù Socket/Ext trong nền…');
+        const r = await sendOne(conv, text, photo, { skipApi: true });
+        if (r.ok) logLine('✅ ' + nm + ' — đã gửi bù qua ' + (r.sendBy === 'socket' ? 'Socket' : 'Extension'));
+        else logLine('❌ ' + nm + ' — bù không được: ' + r.error);
+      } else {
+        logLine('⚠ ' + nm + ' — không rõ kết quả (' + msg + ') — KHÔNG gửi lại để tránh trùng');
+      }
+    }).catch(() => {
+      logLine('⚠ ' + (conv.name || conv.id) + ' — không rõ kết quả (lỗi mạng) — KHÔNG gửi lại để tránh trùng');
+    });
+    return { ok: true, id: '', sendBy: 'api', sent: true, fired: true };
+  }
+
+  // Đúng request mà _app-...js gửi khi nhắn tin thường (executeByApi + buildRequestBody):
+  //   POST /api/v1/pages/{page_id}/conversations/{conversation.id}/messages?access_token=...
+  //   multipart/form-data: action=reply_inbox, message=<text>
+  // Nếu server từ chối dạng "(#10) ... ứng dụng khác đang kiểm soát thread" (Facebook handover)
+  // thì app tự fallback sang extension — mình làm đúng như vậy ở sendSmart().
+  async function sendViaApi(conv, text, photo, ctx) {
+    if (conv.type === 'comment') return sendCommentViaApi(conv, text, photo, ctx || {}); // chat bình luận → reply_comment
+    const req = buildInboxSend(conv, text, photo);
+    if (req.error) return { ok: false, error: req.error };
     try {
-      const res = await fetch(url, {
+      const res = await fetch(req.url, {
         method: 'POST',
-        body: fd,
+        body: req.fd,
         headers: { Accept: 'application/json' },
         credentials: 'include',
       });
@@ -1462,7 +1501,10 @@
   // CHỈ gửi hàng loạt — KHÔNG còn cơ chế gửi từng con qua giao diện.
   // Chống TRÙNG TIN: kênh nào báo "không rõ kết quả" (tin có thể đã đi) → DỪNG ngay,
   // không thử kênh khác, không gửi thêm. Lỗi là lỗi — báo trong log, không gửi lại, không kiểm tra lại.
-  async function sendOne(conv, text, photo) {
+  async function sendOne(conv, text, photo, opts) {
+    opts = opts || {};
+    // ⚡ CHẾ ĐỘ NHANH: chat thường (không phải bình luận, không phải bước bù nền) → bắn API không chờ
+    if (opts.quick && !opts.skipApi && conv.type !== 'comment') return fireApiAndWatch(conv, text, photo);
     // ngữ cảnh dùng chung cho các kênh của CÙNG 1 chat: conversation, threadId, globalId, bình luận…
     // mỗi thứ chỉ tải/giải quyết 1 lần (trước đây mỗi kênh tự gọi lại → chậm)
     const ctx = {};
@@ -1483,6 +1525,7 @@
       ? [hint].concat(order.filter((x) => x !== hint))
       : order.slice();
     if (batchSkipApi) seq = seq.filter((x) => x !== 'api');
+    if (opts.skipApi) seq = seq.filter((x) => x !== 'api'); // bước bù nền: api đã thử rồi
 
     const tried = [];
     for (let i = 0; i < seq.length; i++) {
@@ -1585,7 +1628,9 @@
       ? '🚀 Bắt đầu gửi ' + targets.length + ' chat THEO LƯỢT: mỗi lượt ' + WAVE_SIZE + ' tin, cách nhau ' + WAVE_GAP + 'ms…'
       : '🚀 Bắt đầu gửi ' + targets.length + ' chat (1 lượt — ' + WAVE_SIZE + ' tin/lượt)…');
 
-    let ok = 0, fail = 0, done = 0, unsure = 0;
+    let ok = 0, fail = 0, done = 0, unsure = 0, firedN = 0;
+    const quickEl0 = shadow && shadow.getElementById('ssb-quick');
+    const quickOn = !!(quickEl0 && quickEl0.checked);
 
     const sendOneAndLog = async (c) => {
       let r;
@@ -1599,15 +1644,16 @@
           setProgress(done, targets.length);
           return { ok: false, sent: false, error: 'Không có attachment ảnh' };
         }
-        r = await sendOne(c, text, { url: photo.url, id: photo.id, fbId });
+        r = await sendOne(c, text, { url: photo.url, id: photo.id, fbId }, { quick: quickOn });
       } else {
-        r = await sendOne(c, text);
+        r = await sendOne(c, text, null, { quick: quickOn });
       }
       const via = r.ok ? (r.sendBy === 'socket' ? ' — qua Socket'
         : r.sendBy === 'extension' ? ' — qua Extension' : '') : '';
       done++;
       if (r.ok) {
         ok++;
+        if (r.fired) firedN++;
         logLine('✅ [' + done + '/' + targets.length + '] ' + (c.name || c.id) + ' — đã gửi' + via);
       } else if (r.uncertain) {
         unsure++;
@@ -1654,7 +1700,8 @@
       logLine('⏸ Đã dừng sớm sau ' + done + '/' + targets.length + ' chat.');
     }
     logLine('🏁 Hoàn tất: ' + ok + ' thành công, ' + fail + ' lỗi.'
-      + (unsure ? ' ' + unsure + ' tin không rõ kết quả (không gửi thêm).' : ''));
+      + (unsure ? ' ' + unsure + ' tin không rõ kết quả (không gửi thêm).' : '')
+      + (firedN ? ' ⚡ ' + firedN + ' tin bắn nhanh (không chờ server xác nhận).' : ''));
     // LIST ĐÃ LƯU đang tích để gửi → dùng xong TỰ XÓA các list đó (mỗi list chỉ gửi 1 lần — tránh gửi trùng)
     if (state.listSel && state.listSel.size) {
       const ids = Array.from(state.listSel);
@@ -1779,7 +1826,7 @@
       </style>
       <div class="wrap" id="ssb-wrap">
         <div class="head" id="ssb-head">
-          <span class="title"><svg class="logo" viewBox="0 0 50 52" width="17" height="17" xmlns="http://www.w3.org/2000/svg"><path d="M10 2 L14 11" stroke="#5865F2" stroke-width="5" stroke-linecap="round" fill="none"/><path d="M40 2 L36 11" stroke="#5865F2" stroke-width="5" stroke-linecap="round" fill="none"/><rect x="0" y="12" width="50" height="40" rx="6" fill="#5865F2"/><rect x="12" y="31" width="12" height="4" rx="2" fill="#fff"/><rect x="26" y="31" width="12" height="4" rx="2" fill="#fff"/></svg>BOTFAKE <span style="color:#64748b;font-weight:400;font-size:11px">v1.26.2</span></span>
+          <span class="title"><svg class="logo" viewBox="0 0 50 52" width="17" height="17" xmlns="http://www.w3.org/2000/svg"><path d="M10 2 L14 11" stroke="#5865F2" stroke-width="5" stroke-linecap="round" fill="none"/><path d="M40 2 L36 11" stroke="#5865F2" stroke-width="5" stroke-linecap="round" fill="none"/><rect x="0" y="12" width="50" height="40" rx="6" fill="#5865F2"/><rect x="12" y="31" width="12" height="4" rx="2" fill="#fff"/><rect x="26" y="31" width="12" height="4" rx="2" fill="#fff"/></svg>BOTFAKE <span style="color:#64748b;font-weight:400;font-size:11px">v1.27.0</span></span>
           <button class="badge on" id="ssb-toggle" title="Bật/tắt tính năng">BẬT</button>
           <button class="minibtn" id="ssb-close" title="Tắt panel (F5 hoặc Alt+Shift+B để hiện lại)">✕</button>
           <button class="minibtn" id="ssb-min" title="Thu nhỏ">—</button>
@@ -1818,6 +1865,9 @@
               <span class="hint">tin — nghỉ</span>
               <input type="number" id="ssb-gap" value="500" min="0" step="50" style="width:72px" title="Số ms nghỉ giữa các lượt">
               <span class="hint">ms giữa các lượt</span>
+              <label class="hint" style="display:flex;align-items:center;gap:4px;cursor:pointer" title="Bắn API không chờ server xác nhận — nhanh hơn hẳn; chat bị API từ chối rõ ràng sẽ tự bù Socket/Ext trong nền">
+                <input type="checkbox" id="ssb-quick" checked style="accent-color:#22c55e;margin:0"> ⚡ Gửi nhanh
+              </label>
             </div>
           </div>
           <div id="ssb-sec-sl">
@@ -2149,17 +2199,23 @@
     {
       const waveEl = root.getElementById('ssb-wave');
       const gapEl = root.getElementById('ssb-gap');
+      const quickEl = root.getElementById('ssb-quick');
       try {
         const w = localStorage.getItem('ssb_wave_size');
         if (w && waveEl) waveEl.value = w;
         const g = localStorage.getItem('ssb_wave_gap');
         if (g !== null && g !== '' && gapEl) gapEl.value = g;
+        const q = localStorage.getItem('ssb_quick');
+        if (q !== null && q !== '' && quickEl) quickEl.checked = q !== '0';
       } catch (e) { /* ignore */ }
       if (waveEl) waveEl.addEventListener('change', () => {
         try { localStorage.setItem('ssb_wave_size', String(waveEl.value)); } catch (e) { /* ignore */ }
       });
       if (gapEl) gapEl.addEventListener('change', () => {
         try { localStorage.setItem('ssb_wave_gap', String(gapEl.value)); } catch (e) { /* ignore */ }
+      });
+      if (quickEl) quickEl.addEventListener('change', () => {
+        try { localStorage.setItem('ssb_quick', quickEl.checked ? '1' : '0'); } catch (e) { /* ignore */ }
       });
     }
     on('ssb-send', 'click', () => { sendToAll(); });
