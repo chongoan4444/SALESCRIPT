@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE
 // @namespace    salescript
-// @version      1.34.0
+// @version      1.35.0
 // @description  BOTFAKE — chọn chuỗi chat (Alt+Click 2 đầu) hoặc theo snippet trong Pancake rồi gửi cùng 1 câu (kèm ảnh nếu muốn) cho tất cả.
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -2099,6 +2099,121 @@
     (document.head || document.documentElement).appendChild(st);
   }
 
+  /* ===== CỬA SỔ PHÓNG TO (list/log) — kéo tiêu đề để di chuyển, kéo góc dưới-phải để đổi cỡ =====
+     Bảng gốc được ĐƯA VÀO cửa sổ nổi (mọi nút/kéo thả bên trong vẫn chạy nguyên), thu nhỏ = trả
+     bảng về đúng chỗ cũ trong panel. Vị trí + cỡ lưu localStorage — giữ qua F5. */
+  const floatWins = {}; // key → { win, content, ph, cleanup }
+
+  function toggleFloat(key, contentEl, title, btnEl, openLabel, closeLabel, def) {
+    const existing = floatWins[key];
+    if (existing) {
+      // THU NHỎ: trả nội dung về chỗ cũ + gỡ cửa sổ + tháo listener kéo/đổi cỡ
+      existing.ph.parentNode.insertBefore(existing.content, existing.ph);
+      existing.ph.parentNode.removeChild(existing.ph);
+      existing.cleanup();
+      existing.win.remove();
+      delete floatWins[key];
+      if (btnEl) btnEl.textContent = openLabel;
+      return false;
+    }
+    if (!contentEl || !contentEl.parentNode) return false;
+    // PHÓNG TO: đánh dấu chỗ cũ rồi đưa bảng vào cửa sổ nổi
+    const ph = document.createComment('ssb-ph-' + key);
+    contentEl.parentNode.insertBefore(ph, contentEl);
+    const win = document.createElement('div');
+    win.className = 'floatwin';
+    const headEl = document.createElement('div');
+    headEl.className = 'fw-head';
+    headEl.title = 'Kéo để di chuyển cửa sổ';
+    const titleEl = document.createElement('span');
+    titleEl.className = 'fw-title';
+    titleEl.textContent = title;
+    const closeBtn = document.createElement('button');
+    closeBtn.className = 'minibtn fw-close';
+    closeBtn.textContent = '✕ Thu nhỏ';
+    headEl.appendChild(titleEl);
+    headEl.appendChild(closeBtn);
+    const bodyEl = document.createElement('div');
+    bodyEl.className = 'fw-body';
+    bodyEl.appendChild(contentEl);
+    const rsEl = document.createElement('div');
+    rsEl.className = 'rs';
+    rsEl.title = 'Kéo góc này để đổi cỡ — đúp chuột để về mặc định';
+    win.appendChild(headEl);
+    win.appendChild(bodyEl);
+    win.appendChild(rsEl);
+    shadow.appendChild(win);
+
+    // vị trí/cỡ: đã chỉnh thì giữ qua F5, chưa thì mặc định (lúc mở mới tính theo màn hình)
+    let geo = null;
+    try { geo = JSON.parse(localStorage.getItem(key) || 'null'); } catch (e) { /* ignore */ }
+    const w = (geo && geo.w) || def.w;
+    const h = (geo && geo.h) || def.h;
+    win.style.width = w + 'px';
+    win.style.height = h + 'px';
+    win.style.left = Math.round((geo && typeof geo.left === 'number') ? geo.left : def.left()) + 'px';
+    win.style.top = Math.round((geo && typeof geo.top === 'number') ? geo.top : def.top()) + 'px';
+
+    const save = () => {
+      try {
+        // đọc từ style (giá trị ta tự set cho position:fixed — không phụ thuộc offset* của trình duyệt);
+        // isNaN chứ KHÔNG phải ||default — 0px là hợp lệ, không được nuốt
+        const px = (v, fb) => { const n = parseInt(v, 10); return isNaN(n) ? fb : n; };
+        localStorage.setItem(key, JSON.stringify({
+          left: px(win.style.left, 0), top: px(win.style.top, 0),
+          w: px(win.style.width, def.w), h: px(win.style.height, def.h),
+        }));
+      } catch (e) { /* ignore */ }
+    };
+    // kéo tiêu đề = DI CHUYỂN, kéo góc dưới-phải = ĐỔI CỠ — giữ cửa sổ ló ≥40px trong màn hình
+    let dg = null, rs = null;
+    headEl.addEventListener('mousedown', (e) => {
+      if (e.target && e.target.closest && e.target.closest('button')) return; // bấm nút ≠ kéo
+      dg = { x: e.clientX, y: e.clientY, left: win.offsetLeft, top: win.offsetTop };
+      e.preventDefault();
+    });
+    rsEl.addEventListener('mousedown', (e) => {
+      rs = { x: e.clientX, y: e.clientY, w: win.offsetWidth, h: win.offsetHeight };
+      e.preventDefault();
+    });
+    rsEl.addEventListener('dblclick', () => {
+      win.style.width = def.w + 'px';
+      win.style.height = def.h + 'px';
+      win.style.left = Math.round(def.left()) + 'px';
+      win.style.top = Math.round(def.top()) + 'px';
+      save();
+    });
+    const onMove = (e) => {
+      if (dg) {
+        const left = Math.min(Math.max(0, dg.left + e.clientX - dg.x), Math.max(0, window.innerWidth - 60));
+        const top = Math.min(Math.max(0, dg.top + e.clientY - dg.y), Math.max(0, window.innerHeight - 40));
+        win.style.left = left + 'px';
+        win.style.top = top + 'px';
+      }
+      if (rs) {
+        win.style.width = Math.max(280, Math.min(window.innerWidth - 12, rs.w + e.clientX - rs.x)) + 'px';
+        win.style.height = Math.max(180, Math.min(window.innerHeight - 12, rs.h + e.clientY - rs.y)) + 'px';
+      }
+    };
+    const onUp = () => {
+      if (dg || rs) save();
+      dg = null;
+      rs = null;
+    };
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp);
+    const cleanup = () => {
+      window.removeEventListener('mousemove', onMove);
+      window.removeEventListener('mouseup', onUp);
+    };
+    closeBtn.addEventListener('click', () => {
+      toggleFloat(key, contentEl, title, btnEl, openLabel, closeLabel, def);
+    });
+    floatWins[key] = { win, content: contentEl, ph, cleanup };
+    if (btnEl) btnEl.textContent = closeLabel;
+    return true;
+  }
+
   function buildPanel() {
     if (document.getElementById(PANEL_ID)) return;
     ensureStyle();
@@ -2153,9 +2268,17 @@
         .log { background: #0b1220; border: 1px solid #334155; border-radius: 8px; padding: 8px;
                max-height: 150px; overflow: auto; font-size: 10.5px; line-height: 1.55; color: #cbd5e1;
                white-space: pre-wrap; word-break: break-word; }
-        .log.big { position: fixed; left: 24px; top: 10vh; width: min(640px, 62vw); height: 72vh;
-                   max-height: none; z-index: 2147483646; font-size: 12px; line-height: 1.6;
-                   box-shadow: 0 12px 40px rgba(0,0,0,.55); }
+        /* ===== cửa sổ PHÓNG TO (list/log): kéo tiêu đề để di chuyển, kéo góc dưới-phải để đổi cỡ ===== */
+        .floatwin { position: fixed; z-index: 2147483647; background: #0f172a; color: #e2e8f0;
+                    border: 1px solid #334155; border-radius: 12px; box-shadow: 0 12px 40px rgba(0,0,0,.55);
+                    display: flex; flex-direction: column; overflow: hidden; font-size: 12px; }
+        .fw-head { display: flex; align-items: center; gap: 8px; padding: 8px 12px; background: #1e293b;
+                   cursor: move; user-select: none; flex: 0 0 auto; }
+        .fw-title { font-weight: 700; font-size: 12px; flex: 1; color: #f8fafc; }
+        .fw-body { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; gap: 8px; padding: 8px; }
+        .fw-body .log { flex: 1 1 auto; max-height: none; height: 100%; font-size: 12px; }
+        .fw-body #ssb-sec-sl { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; gap: 8px; }
+        .fw-body #ssb-sec-sl .saved-lists { flex: 1 1 auto; max-height: none; min-height: 0; }
         /* tay nắm KÉO THẢ ĐỔI CỠ panel (góc dưới-phải; đúp chuột = về mặc định) */
         .rs { position: absolute; right: 0; bottom: 0; width: 20px; height: 20px; cursor: nwse-resize;
               background: linear-gradient(135deg, transparent 55%, #475569 55%, #475569 66%,
@@ -2194,7 +2317,7 @@
       </style>
       <div class="wrap" id="ssb-wrap">
         <div class="head" id="ssb-head">
-          <span class="title"><svg class="logo" viewBox="0 0 50 52" width="17" height="17" xmlns="http://www.w3.org/2000/svg"><path d="M10 2 L14 11" stroke="#5865F2" stroke-width="5" stroke-linecap="round" fill="none"/><path d="M40 2 L36 11" stroke="#5865F2" stroke-width="5" stroke-linecap="round" fill="none"/><rect x="0" y="12" width="50" height="40" rx="6" fill="#5865F2"/><rect x="12" y="31" width="12" height="4" rx="2" fill="#fff"/><rect x="26" y="31" width="12" height="4" rx="2" fill="#fff"/></svg>BOTFAKE <span style="color:#64748b;font-weight:400;font-size:11px">v1.34.0</span></span>
+          <span class="title"><svg class="logo" viewBox="0 0 50 52" width="17" height="17" xmlns="http://www.w3.org/2000/svg"><path d="M10 2 L14 11" stroke="#5865F2" stroke-width="5" stroke-linecap="round" fill="none"/><path d="M40 2 L36 11" stroke="#5865F2" stroke-width="5" stroke-linecap="round" fill="none"/><rect x="0" y="12" width="50" height="40" rx="6" fill="#5865F2"/><rect x="12" y="31" width="12" height="4" rx="2" fill="#fff"/><rect x="26" y="31" width="12" height="4" rx="2" fill="#fff"/></svg>BOTFAKE <span style="color:#64748b;font-weight:400;font-size:11px">v1.35.0</span></span>
           <button class="badge on" id="ssb-toggle" title="Bật/tắt tính năng">BẬT</button>
           <button class="minibtn" id="ssb-close" title="Tắt panel (F5 hoặc Alt+Shift+B để hiện lại)">✕</button>
           <button class="minibtn" id="ssb-min" title="Thu nhỏ">—</button>
@@ -2239,7 +2362,10 @@
             </div>
           </div>
           <div id="ssb-sec-sl">
-            <div class="label">LIST ĐÃ LƯU</div>
+            <div class="row" style="align-items:center;justify-content:space-between">
+              <span class="label">LIST ĐÃ LƯU</span>
+              <button class="minibtn" id="ssb-slzoom" title="Phóng to / thu nhỏ bảng list — kéo tiêu đề để di chuyển, kéo góc dưới-phải để đổi cỡ">⛶ Phóng to list</button>
+            </div>
             <div class="row" style="margin:4px 0;align-items:center">
               <button class="b b-gray" id="ssb-sl-new">＋ Tạo list từ lựa chọn</button>
               <span class="hint" id="ssb-sl-info">0 list</span>
@@ -2248,7 +2374,7 @@
           </div>
           <div class="row" style="align-items:center;justify-content:space-between">
             <span class="label">LOG</span>
-            <button class="minibtn" id="ssb-logzoom" title="Phóng to / thu nhỏ bảng log">⛶ Phóng to log</button>
+            <button class="minibtn" id="ssb-logzoom" title="Phóng to / thu nhỏ bảng log — kéo tiêu đề để di chuyển, kéo góc dưới-phải để đổi cỡ">⛶ Phóng to log</button>
           </div>
           <div class="prog"><i id="ssb-bar"></i></div>
           <div class="log" id="ssb-log"></div>
@@ -2288,13 +2414,26 @@
       if (wrapEl) wrapEl.style.display = '';
       if (bubble) bubble.style.display = 'none';
     });
+    // phóng to bảng LOG / bảng LIST → cửa sổ nổi kéo thả + đổi cỡ (xem toggleFloat)
     on('ssb-logzoom', 'click', () => {
       const el = root.getElementById('ssb-log');
       const btn = root.getElementById('ssb-logzoom');
       if (!el) return;
-      // bật: bảng log tách ra thành cửa sổ lớn nổi trên trang — panel giữ nguyên
-      const big = el.classList.toggle('big');
-      if (btn) btn.textContent = big ? '🗕 Thu nhỏ log' : '⛶ Phóng to log';
+      toggleFloat('ssb_win_log', el, 'LOG', btn, '⛶ Phóng to log', '🗕 Thu nhỏ log', {
+        w: 640, h: 480,
+        left: () => 24,
+        top: () => Math.round(window.innerHeight * 0.1),
+      });
+    });
+    on('ssb-slzoom', 'click', () => {
+      const el = root.getElementById('ssb-sec-sl');
+      const btn = root.getElementById('ssb-slzoom');
+      if (!el) return;
+      toggleFloat('ssb_win_list', el, 'LIST ĐÃ LƯU', btn, '⛶ Phóng to list', '🗕 Thu nhỏ list', {
+        w: 560, h: 460,
+        left: () => Math.max(24, Math.round(window.innerWidth * 0.3)),
+        top: () => Math.round(window.innerHeight * 0.08),
+      });
     });
     on('ssb-close', 'click', () => {
       const host = document.getElementById(PANEL_ID);

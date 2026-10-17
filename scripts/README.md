@@ -74,9 +74,11 @@ Không dùng selector bịa: mọi class/id/đường API ở trên đều lấy
 **Không còn cơ chế gửi từng con** (đã bỏ gửi tuần tự và tầng giao diện “nhảy vào từng chat”).
 Gửi theo lượt: chỉnh **“Mỗi lượt: N tin — nghỉ N ms”** ngay trên panel (mặc định **200 tin/lượt, nghỉ 500ms** —
 cả hai **đều chỉnh được và lưu lại, giữ qua F5**; số tin ≤ số/lượt thì gửi 1 lượt). Mỗi lượt bắn song song toàn bộ. Bấm
-**“⛶ Phóng to log”** để bung bảng log thành **cửa sổ lớn nổi trên trang** (không làm panel cao thêm);
-bấm **“🗕 Thu nhỏ log”** để thu về. Nút **✕** trên tiêu đề panel để tắt hẳn panel —
-**F5** (hoặc **Alt+Shift+B**) để hiện lại.
+**“⛶ Phóng to log”** / **“⛶ Phóng to list”** để bung bảng log / bảng LIST ĐÃ LƯU thành **cửa sổ lớn
+nổi trên trang** (không làm panel cao thêm) — cửa sổ **kéo tiêu đề để di chuyển**, **kéo góc dưới-phải
+để phóng to/thu nhỏ** (đúp chuột góc = về mặc định), vị trí + cỡ **lưu giữ qua F5**; bấm **“🗕 Thu nhỏ…”**
+hoặc **✕** trên tiêu đề cửa sổ để thu về đúng chỗ cũ trong panel. Nút **✕** trên tiêu đề panel để tắt
+hẳn panel — **F5** (hoặc **Alt+Shift+B**) để hiện lại.
 
 **Chống trùng tin (gửi đúng 1 lần/chat):** mỗi chat chỉ xuất hiện 1 lần trong danh sách gửi (tự loại
 dòng trùng id, chặn bấm đúp). Khi một kênh báo **“không rõ kết quả”** (lỗi mạng/timeout — tin có thể
