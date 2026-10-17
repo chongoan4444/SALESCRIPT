@@ -83,6 +83,8 @@ dòng trùng id, chặn bấm đúp). Khi một kênh báo **“không rõ kết
 đã đi), script **dừng ngay**, không thử kênh khác và **không gửi thêm** — ghi `⚠` trong log để bạn biết.
 **Lỗi là lỗi**: tin báo ❌ (chắc chắn chưa gửi) chỉ bị báo trong log — **không gửi lại, không kiểm tra
 lại** — ưu tiên tốc độ.
+- **⚡ Gửi nhanh** (mặc định bật, ô cạnh thiết lập lượt): bắn API **không chờ server xác nhận** — xong là báo ✅ ngay.
+  Chat bị API từ chối RÕ thì tự **bù Socket/Ext trong nền** (log có dòng bù); không rõ kết quả thì bỏ — không gửi lại để tránh trùng.
 
 Tự động tăng tốc: sau lần đầu API bị `(#10)/(#551)…`, các chat còn lại **bỏ qua API** đi thẳng sang Socket;
 kênh gửi thành công được **ghi nhớ** (session) nên lần gửi sau vào thẳng kênh đó.
