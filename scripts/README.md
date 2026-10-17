@@ -95,6 +95,8 @@ lại** — ưu tiên tốc độ.
   `width`/`height` ảnh, đúng thứ tự trường, và body `contents/facebook` dạng JSON như app.
 - **Bỏ bước thừa**: ảnh ngoài cửa sổ 24h không bắn API trước nữa (chắc chắn #551) — đi thẳng Ext,
   API chỉ là cứu cánh cuối; nhãn log bù đúng kênh thật (ảnh = Ext, chữ = Socket/Ext).
+- **Hết delay giữa 2 lần gửi**: PSID đã có trong dữ liệu → dùng ngay, khỏi chờ WS/Ext dò tìm (trước ngốn
+  vài giây/tin); dòng chat đủ threadId + pageId → khỏi tải lại conversation. Lô gửi vẫn song song toàn phần.
 
 Tự động tăng tốc: sau lần đầu API bị `(#10)/(#551)…`, các chat còn lại **bỏ qua API** đi thẳng sang Socket;
 kênh gửi thành công được **ghi nhớ** (session) nên lần gửi sau vào thẳng kênh đó.

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE
 // @namespace    salescript
-// @version      1.29.1
+// @version      1.29.2
 // @description  BOTFAKE — chọn chuỗi chat (Alt+Click 2 đầu) hoặc theo snippet trong Pancake rồi gửi cùng 1 câu (kèm ảnh nếu muốn) cho tất cả.
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -556,6 +556,8 @@
       snippetRaw: c.snippet || '',
       time: fmtApiTime(c.updated_at),
       type: String(c.type || '').toLowerCase() === 'comment' ? 'comment' : 'inbox',
+      pageId: String(c.page_id || c.id.split('_')[0] || ''), // pageId có sẵn — khỏi suy từ id
+      threadId: String(c.thread_id || ''), // thread_id có sẵn trong API — khỏi tải lại conversation khi gửi
       lastAt: String(c.last_customer_interactive_at || ''), // mốc tương tác cuối của khách — đoán cửa sổ 24h
       fromPsid: String(c.from_psid || ((c.from || {}).id) || ''), // PSID của khách — có sẵn trong dữ liệu API
       order,
@@ -1241,7 +1243,11 @@
 
   // Lấy conversation 1 lần cho MỌI kênh trong cùng lượt gửi (ctx dùng chung) — đỡ gọi lại nhiều lần
   async function ctxFull(conv, ctx) {
-    if (!ctx.fullLoaded) { ctx.full = await getFullConversation(conv); ctx.fullLoaded = true; }
+    if (!ctx.fullLoaded) {
+      // dòng conv đã đủ dữ liệu (threadId + pageId) → dùng thẳng, khỏi GET conversation (tiết kiệm 1 RTT mỗi tin)
+      ctx.full = (conv.threadId && (conv.pageId || conv.id)) ? conv : await getFullConversation(conv);
+      ctx.fullLoaded = true;
+    }
     return ctx.full || null;
   }
 
@@ -1285,7 +1291,7 @@
         const p = String(v || '');
         return /^\d{5,}$/.test(p) && p !== String(pageId) ? p : null;
       };
-      return ok(full.from_psid) || ok(full.from && full.from.id);
+      return ok(full.from_psid) || ok(full.fromPsid) || ok(full.from && full.from.id);
     } catch (e) { return null; }
   }
 
@@ -1300,19 +1306,23 @@
       const cached = (g1 && g1.get(key)) || (g2 && g2.get(key));
       if (cached) return cached;
     } catch (e) { /* ignore */ }
+    // PSID đã có sẵn trong dữ liệu conv → dùng NGAY và KHÔNG ĐỤNG mạng (WS/Ext dò tìm có khi
+    // vài giây/tin mà kết quả cũng chính là con số này). Chỉ dò tìm khi dòng conv THIẾU PSID.
+    const known = psidFromFull(full, pageId) || psidFromFull({ from_psid: convFromPsid || '' }, pageId);
+    if (known) {
+      try { window.__tempGlobalIdCache__ && window.__tempGlobalIdCache__.set(key, known); } catch (e) { /* ignore */ }
+      return known;
+    }
+    // thiếu PSID → mới chạy đua dò tìm (đúng như concurrentlyGetGLobalId trong _app):
+    // Ext findGlobalIdForConv và __MqttHelper__.findGlobalId chạy song song, ai ra trước dùng trước
     const tasks = [];
     if (typeof window.findGlobalIdForConv === 'function' && threadId) {
-      // đúng tham số app gửi cho GET_GLOBAL_ID_FOR_CONV
       tasks.push(window.findGlobalIdForConv({
-        pageId: full && full.page_id,
-        threadId,
-        threadKey: (full && full.thread_key) || null,
+        pageId: pageId, threadId: threadId, threadKey: (full && full.thread_key) || '',
         isBusiness: true,
         conversationUpdatedTime: Date.parse(String((full && full.updated_at) || '') + 'Z'),
         customerName: (full && full.from && (full.from.username || full.from.name)) || '',
-        convType: 'INBOX',
-        postId: null,
-        convId: null,
+        convType: 'INBOX', postId: null, convId: null,
       }).catch(() => null));
     }
     const mqtt = window.__MqttHelper__;
@@ -1322,7 +1332,7 @@
         .then((r) => (r && r.success && r.data) || null)
         .catch(() => null));
     }
-    const gid = await firstNonNull(tasks) || psidFromFull(full, pageId) || psidFromFull({ from_psid: convFromPsid || '' }, pageId);
+    const gid = await firstNonNull(tasks);
     if (gid) {
       try { window.__tempGlobalIdCache__ && window.__tempGlobalIdCache__.set(key, gid); } catch (e) { /* ignore */ }
     }
@@ -1396,7 +1406,7 @@
     // ảnh: upload attachment MỚI reusable=false (đúng executeByExtOnce) — KHÔNG dùng lại
     // attachment reusable=true (FB web từ chối). Upload chạy SONG SONG bước tìm thread/globalId.
     const photoPrep = photo
-      ? uploadPhotoForPage(full.page_id || conv.pageId, photo, { reusable: false })
+      ? uploadPhotoForPage(full.page_id || conv.pageId || String(conv.id).split('_')[0], photo, { reusable: false })
       : null;
 
     if (!ctx.threadResolved) {
@@ -1888,7 +1898,7 @@
       </style>
       <div class="wrap" id="ssb-wrap">
         <div class="head" id="ssb-head">
-          <span class="title"><svg class="logo" viewBox="0 0 50 52" width="17" height="17" xmlns="http://www.w3.org/2000/svg"><path d="M10 2 L14 11" stroke="#5865F2" stroke-width="5" stroke-linecap="round" fill="none"/><path d="M40 2 L36 11" stroke="#5865F2" stroke-width="5" stroke-linecap="round" fill="none"/><rect x="0" y="12" width="50" height="40" rx="6" fill="#5865F2"/><rect x="12" y="31" width="12" height="4" rx="2" fill="#fff"/><rect x="26" y="31" width="12" height="4" rx="2" fill="#fff"/></svg>BOTFAKE <span style="color:#64748b;font-weight:400;font-size:11px">v1.29.1</span></span>
+          <span class="title"><svg class="logo" viewBox="0 0 50 52" width="17" height="17" xmlns="http://www.w3.org/2000/svg"><path d="M10 2 L14 11" stroke="#5865F2" stroke-width="5" stroke-linecap="round" fill="none"/><path d="M40 2 L36 11" stroke="#5865F2" stroke-width="5" stroke-linecap="round" fill="none"/><rect x="0" y="12" width="50" height="40" rx="6" fill="#5865F2"/><rect x="12" y="31" width="12" height="4" rx="2" fill="#fff"/><rect x="26" y="31" width="12" height="4" rx="2" fill="#fff"/></svg>BOTFAKE <span style="color:#64748b;font-weight:400;font-size:11px">v1.29.2</span></span>
           <button class="badge on" id="ssb-toggle" title="Bật/tắt tính năng">BẬT</button>
           <button class="minibtn" id="ssb-close" title="Tắt panel (F5 hoặc Alt+Shift+B để hiện lại)">✕</button>
           <button class="minibtn" id="ssb-min" title="Thu nhỏ">—</button>
@@ -2136,6 +2146,8 @@
           time: m.time || '', type: m.type || '', platform: m.platform || '',
           lastAt: m.lastAt || '',
           fromPsid: m.fromPsid || '',
+          pageId: m.pageId || '',
+          threadId: m.threadId || '',
         })),
       };
       state.savedLists.push(l);
