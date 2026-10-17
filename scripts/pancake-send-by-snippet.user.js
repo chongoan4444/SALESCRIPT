@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE
 // @namespace    salescript
-// @version      1.41.0
+// @version      1.42.0
 // @description  BOTFAKE — chọn chuỗi chat (Alt+Click 2 đầu) hoặc theo snippet trong Pancake rồi gửi cùng 1 câu (kèm ảnh nếu muốn) cho tất cả.
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -1149,8 +1149,8 @@
   //  1) khách ≥1 ngày không tương tác (hoặc không rõ thời điểm)
   //  2) page bật ctx_7_days_enabled
   //  3) khách có ad_clicks (click quảng cáo) mới nhất ≤7 ngày
-  // Ngoại lệ so với dr(): dữ liệu bulk không kèm ad_clicks → không đánh giá được mục 3 →
-  // khi (1)+(2) đúng thì VẪN bật cờ (server tự kiểm — thiếu cờ chắc chắn #551 oan).
+  // KHÔNG ngoại lệ: thiếu dữ liệu ad_clicks → không bật cờ (không bịa thêm — app cũng vậy).
+  // Chat ngoài 24h không thuộc cửa sổ quảng cáo sẽ được bù qua Socket (đường gửi tay).
   function isRecordCtx7Days(full) {
     try {
       if (!full) return false;
@@ -1179,12 +1179,11 @@
         clicks = full.customers[0].ad_clicks;
       }
       if (!clicks || !clicks.length) {
-        // KHÔNG có dữ liệu ad_clicks (dòng danh sách bulk không kèm) → không đánh giá được.
-        // THIẾU cờ = #551 oan cho MỌI chat ngoài 24h (bằng chứng tinnhan.har); CÓ cờ mà khách
-        // không thuộc cửa sổ 7 ngày thì server/FB vẫn từ chối y như cũ (e_subcode 1545041).
-        // → ngoài 24h (hoặc không rõ mốc) + page bật: VẪN bật cờ — không hại gì, cứu được
-        // các chat từ quảng cáo mà dòng dữ liệu không kèm ad_clicks.
-        return true;
+        // THIẾU ad_clicks → KHÔNG bật cờ — đúng dr() của app và đúng luật "không bịa thêm":
+        // app chỉ thêm is_record_ctx_7_days khi ĐÁNH GIÁ ĐƯỢC cửa sổ 7 ngày quảng cáo.
+        // Chat ngoài 24h không có cờ → API có thể #551 → bù Socket (đường gửi tay) tự lo.
+        // (Bản v1.39.0 từng "bật cờ phỏng đoán" — gán cờ bừa khi không có dữ liệu → bị loại.)
+        return false;
       }
       let latest = 0;
       clicks.forEach((x) => {
@@ -1434,6 +1433,8 @@
         // KHÔNG bù ngay chuỗi Socket/Ext: bằng chứng v1.37.0 — ngay sau bắn dồn FB đang giữ
         // nhịp, bù ngay là "server báo gửi thất bại" hàng loạt, vừa chậm vừa sinh thêm vòng
         // gửi đi gửi lại. Đúng luật "kênh chắc thua PHẢI bù": bù ĐÚNG 1 lần sau nhịp (12s).
+        // BÁO RÕ KẾT QUẢ THẬT — không bao giờ "báo gửi" xong im lặng khi request đã bị từ chối.
+        logLine('⚠ ' + nm + ' — API từ chối (' + msg + ') — sẽ tự bù 1 lần sau nhịp.');
         scheduleBuRetry(conv, text, photo, nm, 'API từ chối (' + msg + ')');
       } else {
         logLine('⚠ ' + nm + ' — không rõ kết quả (' + msg + ') — KHÔNG gửi lại để tránh trùng');
@@ -2108,7 +2109,11 @@
   // KHÔNG chuỗi "thử hết lối này tới lối khác" — trước đây mỗi chat lặp 4–5 lần trong 30–60s.
   function scheduleBuRetry(conv, text, photo, name, why) {
     if (!conv || buRetryDone[conv.id]) return; // mỗi chat đúng 1 lần trong lượt
-    if (deliveredIds[conv.id]) return; // đã có kênh báo thành công — không bao giờ gửi lại
+    if (deliveredIds[conv.id]) {
+      // đã có kênh XÁC NHẬN thành công thật — không gửi lại (chống trùng). Có log để không im lặng.
+      logLine('✓ ' + name + ' — tin đã đến nơi (xác nhận) — không bù.');
+      return;
+    }
     buRetryDone[conv.id] = true;
     const myRun = runSeq;
     const delay = BU_RETRY_MS + (buRetrySeq++) * BU_SPREAD_MS;
@@ -2338,9 +2343,13 @@
       done++;
       if (r.ok) {
         ok++;
-        markDelivered(c.id);
+        // fired = chỉ ĐÃ BẮN request — CHƯA xác nhận server nhận. Đánh dấu "đã đến nơi" cho
+        // kết quả fired sẽ chặn nhầm bước bù nền → "báo gửi nhưng không gửi gì" (bug v1.39.0).
+        // Chỉ đánh dấu khi kênh XÁC NHẬN thành công thật (kể cả xác nhận nền — fireApiAndWatch).
+        if (!r.fired) markDelivered(c.id);
         if (r.fired) firedN++;
-        logLine('✅ [' + done + '/' + totalAll + '] ' + (c.name || c.id) + ' — đã gửi' + via);
+        logLine('✅ [' + done + '/' + totalAll + '] ' + (c.name || c.id) + ' — đã gửi' + via
+          + (r.fired ? ' (đang xác nhận nền — nếu bị từ chối sẽ tự bù và báo)' : ''));
       } else if (r.uncertain) {
         unsure++;
         logLine('⚠ [' + done + '/' + totalAll + '] ' + (c.name || c.id) + ' — ' + r.error
@@ -2675,7 +2684,7 @@
       </style>
       <div class="wrap" id="ssb-wrap">
         <div class="head" id="ssb-head">
-          <span class="title"><svg class="logo" viewBox="0 0 50 52" width="17" height="17" xmlns="http://www.w3.org/2000/svg"><path d="M10 2 L14 11" stroke="#5865F2" stroke-width="5" stroke-linecap="round" fill="none"/><path d="M40 2 L36 11" stroke="#5865F2" stroke-width="5" stroke-linecap="round" fill="none"/><rect x="0" y="12" width="50" height="40" rx="6" fill="#5865F2"/><rect x="12" y="31" width="12" height="4" rx="2" fill="#fff"/><rect x="26" y="31" width="12" height="4" rx="2" fill="#fff"/></svg>BOTFAKE <span style="color:#64748b;font-weight:400;font-size:11px">v1.41.0</span></span>
+          <span class="title"><svg class="logo" viewBox="0 0 50 52" width="17" height="17" xmlns="http://www.w3.org/2000/svg"><path d="M10 2 L14 11" stroke="#5865F2" stroke-width="5" stroke-linecap="round" fill="none"/><path d="M40 2 L36 11" stroke="#5865F2" stroke-width="5" stroke-linecap="round" fill="none"/><rect x="0" y="12" width="50" height="40" rx="6" fill="#5865F2"/><rect x="12" y="31" width="12" height="4" rx="2" fill="#fff"/><rect x="26" y="31" width="12" height="4" rx="2" fill="#fff"/></svg>BOTFAKE <span style="color:#64748b;font-weight:400;font-size:11px">v1.42.0</span></span>
           <button class="badge on" id="ssb-toggle" title="Bật/tắt tính năng">BẬT</button>
           <button class="minibtn" id="ssb-close" title="Tắt panel (F5 hoặc Alt+Shift+B để hiện lại)">✕</button>
           <button class="minibtn" id="ssb-min" title="Thu nhỏ">—</button>

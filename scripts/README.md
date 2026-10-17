@@ -184,10 +184,10 @@ Gắn attachment đúng như app: `POST /v1/pages/{p}/contents/facebook` (`conte
 Kèm cờ `is_record_ctx_7_days` khi đủ điều kiện cửa sổ quảng cáo 7 ngày của app (`dr()`: khách ≥1 ngày không
 tương tác + page bật `ctx_7_days_enabled` + khách có `ad_clicks` ≤7 ngày) — cờ này cho phép gửi ngoài cửa sổ
 24h với khách từ quảng cáo, đúng việc gửi tay trong app làm được (đối chiếu `buildRequestBody` trong `_app`:
-`(0,ev.dr)()&&(j.is_record_ctx_7_days=!0)`). **Ngoại lệ có lợi (v1.39.0)**: dòng dữ liệu bulk không kèm
-`ad_clicks` → không đánh giá được — khi khách ngoài 24h (hoặc không rõ mốc) + page bật thì **vẫn bật cờ**:
-thiếu cờ chắc chắn #551 oan, còn có cờ mà khách không thuộc cửa sổ 7 ngày thì server/FB vẫn từ chối y như
-cũ — không hại gì mà cứu được các chat từ quảng cáo. Nếu CÓ `ad_clicks` mà mới nhất >7 ngày thì không bật.
+`(0,ev.dr)()&&(j.is_record_ctx_7_days=!0)`). **Nghiêm ngặt đúng dr()**: thiếu dữ liệu `ad_clicks` thì KHÔNG
+bật cờ (không bịa thêm — app cũng vậy); chat ngoài 24h không thuộc cửa sổ quảng cáo sẽ được **bù qua Socket**
+(đường gửi tay). Kết quả "đã gửi" ở chế độ nhanh = request **đã bắn**, xác nhận đến nơi xử lý trong nền —
+server từ chối là **báo rõ + tự bù 1 lần**, không bao giờ "báo gửi" rồi im lặng.
 **Học `globalUserId` đúng từ extension (v1.38.0)**: app sau khi Extension thành công có event
 `update_global_id` — globalId extension trả về có thể ĐÚNG hơn giá trị đoán từ `from_psid` (có khách
 globalId là FBID `1000…` chứ không phải PSID). Script nay: (1) cache `res.data.globalUserId` vào
