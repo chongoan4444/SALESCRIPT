@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE
 // @namespace    salescript
-// @version      1.38.0
+// @version      1.39.0
 // @description  BOTFAKE — chọn chuỗi chat (Alt+Click 2 đầu) hoặc theo snippet trong Pancake rồi gửi cùng 1 câu (kèm ảnh nếu muốn) cho tất cả.
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -1063,6 +1063,8 @@
   //  1) khách ≥1 ngày không tương tác (hoặc không rõ thời điểm)
   //  2) page bật ctx_7_days_enabled
   //  3) khách có ad_clicks (click quảng cáo) mới nhất ≤7 ngày
+  // Ngoại lệ so với dr(): dữ liệu bulk không kèm ad_clicks → không đánh giá được mục 3 →
+  // khi (1)+(2) đúng thì VẪN bật cờ (server tự kiểm — thiếu cờ chắc chắn #551 oan).
   function isRecordCtx7Days(full) {
     try {
       if (!full) return false;
@@ -1090,7 +1092,14 @@
       if (!clicks && full.customers && full.customers[0] && Array.isArray(full.customers[0].ad_clicks)) {
         clicks = full.customers[0].ad_clicks;
       }
-      if (!clicks || !clicks.length) return false;
+      if (!clicks || !clicks.length) {
+        // KHÔNG có dữ liệu ad_clicks (dòng danh sách bulk không kèm) → không đánh giá được.
+        // THIẾU cờ = #551 oan cho MỌI chat ngoài 24h (bằng chứng tinnhan.har); CÓ cờ mà khách
+        // không thuộc cửa sổ 7 ngày thì server/FB vẫn từ chối y như cũ (e_subcode 1545041).
+        // → ngoài 24h (hoặc không rõ mốc) + page bật: VẪN bật cờ — không hại gì, cứu được
+        // các chat từ quảng cáo mà dòng dữ liệu không kèm ad_clicks.
+        return true;
+      }
       let latest = 0;
       clicks.forEach((x) => {
         if (!x || !x.inserted_at) return;
@@ -1326,7 +1335,7 @@
     }).then(async (res) => {
       let data = null;
       try { data = await res.json(); } catch (e) { data = null; }
-      if (res.ok && data && data.success) return; // đã đến nơi — im lặng
+      if (res.ok && data && data.success) { markDelivered(conv.id); return; } // đã đến nơi — im lặng
       const msg = (data && (data.message || data.error)) || ('HTTP ' + res.status);
       if (res.status === 401 || res.status === 403) capturedToken = null;
       const nm = conv.name || conv.id;
@@ -1336,13 +1345,10 @@
           batchSkipApi = true; // học nhanh: API đang bị chặn (#10/#551…) → chat còn lại trong lô đi thẳng Socket/Ext
           logLine('⛔ API bị chặn (' + msg + ') — các chat còn lại trong lô sẽ đi thẳng Socket/Ext');
         }
-        logLine('⚠ ' + nm + ' — API từ chối (' + msg + ') — thử bù ' + (photo ? 'Ext' : 'Socket/Ext') + ' trong nền…');
-        const r = await sendOne(conv, text, photo, { skipApi: true });
-        if (r.ok) logLine('✅ ' + nm + ' — đã gửi bù qua ' + (r.sendBy === 'socket' ? 'Socket' : 'Extension'));
-        else logLine('❌ ' + nm + ' — bù không được: ' + r.error);
-        if (!r.ok && !r.uncertain && isRetryableLoss(r.error)) {
-          scheduleBuRetry(conv, text, photo, nm, 'bù chưa được');
-        }
+        // KHÔNG bù ngay chuỗi Socket/Ext: bằng chứng v1.37.0 — ngay sau bắn dồn FB đang giữ
+        // nhịp, bù ngay là "server báo gửi thất bại" hàng loạt, vừa chậm vừa sinh thêm vòng
+        // gửi đi gửi lại. Đúng luật "kênh chắc thua PHẢI bù": bù ĐÚNG 1 lần sau nhịp (12s).
+        scheduleBuRetry(conv, text, photo, nm, 'API từ chối (' + msg + ')');
       } else {
         logLine('⚠ ' + nm + ' — không rõ kết quả (' + msg + ') — KHÔNG gửi lại để tránh trùng');
       }
@@ -1897,7 +1903,7 @@
       if (goDirect) {
         const directOpts = batchSkipApi ? { skipApi: true } : { directChain: true };
         sendOne(conv, text, photo, directOpts).then((r) => {
-          if (r.ok) return; // gửi được — im lặng (đã báo "đã gửi" trước đó)
+          if (r.ok) { markDelivered(conv.id); return; } // gửi được — im lặng (đã báo "đã gửi" trước đó)
           const nm2 = conv.name || conv.id;
           if (r.uncertain) logLine('⚠ ' + nm2 + ' — ' + r.error + ' (không rõ — không gửi thêm)');
           else logLine('❌ ' + nm2 + ' — ' + r.error);
@@ -1956,12 +1962,9 @@
       // CHỈ dò lại PSID khi lỗi đúng nghĩa "không có/không đúng người nhận" (globalId/thread_id).
       // 'server báo gửi thất bại'/'không gửi được' là TỪ CHỐI CỦA KÊNH (cửa sổ/…) — dò PSID chỉ
       // tốn thêm RPC Extension chậm mà không cứu được — trước đây từng làm bước bù chậm như rùa.
-      // dò lại globalId khi: lỗi đúng nghĩa "không có/không đúng người nhận" (globalId/thread_id),
-      // HOẶC server thẳng thừng từ chối tin nhắn mà globalId chỉ là DOÁN từ from_psid — có khách
-      // globalId thật là FBID chứ không phải PSID (event update_global_id trong tinnhan.har).
-      const wrongGid = /globalId|thread_id/i.test(r.error || '')
-        || (ctx.gidFromPsid && /server báo gửi thất bại/.test(r.error || ''));
-      if ((conv.fromPsid || ctx.gidFromPsid) && wrongGid) {
+      // (v1.38.0 từng nới điều kiện này cho "server báo gửi thất bại" — nhưng gid đoán from_psid
+      //  là đa số → MỌI chat bù đều dò lại globalId hàng chục giây → lô gửi chậm như rùa. Đã bỏ.)
+      if (conv.fromPsid && /globalId|thread_id/i.test(r.error || '')) {
         ctx.gidForceFind = true;
         ctx.gidResolved = false;
       }
@@ -2002,35 +2005,52 @@
      tiếp, không im lặng bỏ sót". Mỗi chat tối đa 1 lần; 'maybe'/không rõ → TUYỆT ĐỐI không
      (chống trùng tin). */
   const BU_RETRY_MS = 12000;
-  const buRetryDone = {}; // convId → đã bù vòng 2
+  const BU_SPREAD_MS = 1200; // rải nhịp giữa các lần bù — FB giữ nhịp nếu bắn dồn 8–21/s (bằng chứng v1.37.0)
+  const buRetryDone = {}; // convId → đã bù trong lượt này
+  let buRetrySeq = 0;
+  let runSeq = 0; // mỗi lượt gửi 1 số — bù của lượt cũ tự hủy khi có lượt mới (chống gửi lẫn/lặp)
+  const deliveredIds = {}; // convId → ĐÃ có kênh báo thành công trong lượt này — tuyệt đối không gửi lại
+
+  function markDelivered(convId) { deliveredIds[convId] = true; }
 
   function isRetryableLoss(err) {
     // CHỈ các lỗi kênh xác nhận "chưa gửi" — không đụng 'không rõ/maybe', token, dữ liệu thiếu
     return /server báo gửi thất bại|Extension không gửi được|Socket không kết nối|Không thấy Extension|Extension Pancake chưa kết nối/.test(String(err || ''));
   }
 
+  // BÙ ĐÚNG 1 LẦN, 1 KÊNH (text → Socket, ảnh/bình luận → Ext), sau nhịp ~12s, rải đều.
+  // KHÔNG chuỗi "thử hết lối này tới lối khác" — trước đây mỗi chat lặp 4–5 lần trong 30–60s.
   function scheduleBuRetry(conv, text, photo, name, why) {
-    if (!conv || buRetryDone[conv.id]) return; // mỗi chat đúng 1 lần
+    if (!conv || buRetryDone[conv.id]) return; // mỗi chat đúng 1 lần trong lượt
+    if (deliveredIds[conv.id]) return; // đã có kênh báo thành công — không bao giờ gửi lại
     buRetryDone[conv.id] = true;
-    logLine('⏳ ' + name + ' — ' + why + ' (server thường nghẽn ngay sau khi bắn dồn) — bù vòng 2 sau '
-      + Math.round(BU_RETRY_MS / 1000) + 's…');
+    const myRun = runSeq;
+    const delay = BU_RETRY_MS + (buRetrySeq++) * BU_SPREAD_MS;
+    logLine('⏳ ' + name + ' — ' + why + ' — bù đúng 1 lần sau ' + Math.round(delay / 1000) + 's…');
     setTimeout(() => {
+      if (myRun !== runSeq) return; // có lượt gửi mới — bù của lượt cũ bỏ (tránh gửi lẫn 2 lượt)
       if (state.stopRequested) {
-        logLine('⏸ ' + name + ' — bỏ bù vòng 2 (đang dừng).');
+        logLine('⏸ ' + name + ' — bỏ bù (đang dừng).');
         return;
       }
-      sendOne(conv, text, photo, { skipApi: true }).then((r) => {
-        if (r.ok) {
-          logLine('✅ ' + name + ' — bù vòng 2 THÀNH CÔNG qua ' + (r.sendBy === 'socket' ? 'Socket' : 'Extension'));
-        } else if (r.uncertain) {
-          logLine('⚠ ' + name + ' — bù vòng 2 không rõ kết quả — KHÔNG gửi thêm (chống trùng)');
+      if (deliveredIds[conv.id]) return; // trong lúc chờ, tin đã đến nơi qua đường khác — thôi
+      const ch = (photo || conv.type === 'comment') ? 'ext' : 'socket';
+      busEnqueue(() => (ch === 'ext'
+        ? sendViaExtension(conv, text, photo, {})
+        : sendViaSocket(conv, text, {}))).then((r) => {
+        if (r && r.ok) {
+          markDelivered(conv.id);
+          logLine('✅ ' + name + ' — bù THÀNH CÔNG qua ' + (ch === 'ext' ? 'Extension' : 'Socket'));
+        } else if (r && r.sent === 'maybe') {
+          logLine('⚠ ' + name + ' — bù không rõ kết quả — KHÔNG gửi thêm (chống trùng)');
         } else {
-          logLine('❌ ' + name + ' — bù vòng 2 vẫn không được: ' + r.error);
+          logLine('❌ ' + name + ' — bù không được: ' + ((r && r.error) || 'lỗi không rõ')
+            + ' — đã bù đúng 1 lần theo luật, không lặp lại');
         }
       }).catch((e) => {
-        logLine('❌ ' + name + ' — bù vòng 2 lỗi: ' + (e && e.message || e));
+        logLine('❌ ' + name + ' — bù lỗi: ' + (e && e.message || e));
       });
-    }, BU_RETRY_MS);
+    }, delay);
   }
 
   // Nhóm chat theo NỘI DUNG sẽ gửi: chat thuộc câu nào → ĐÚNG chữ của câu đó;
@@ -2120,6 +2140,12 @@
     state.sending = true;
     state.stopRequested = false;
     batchSkipApi = false;
+    // trạng thái theo LƯỢT gửi: chat đã đến nơi trong lượt này không bao giờ bị gửi lại;
+    // bù của lượt trước đang chờ sẽ tự hủy (runSeq) — không gửi lẫn vào lượt mới
+    runSeq++;
+    buRetrySeq = 0;
+    Object.keys(buRetryDone).forEach((k) => { delete buRetryDone[k]; });
+    Object.keys(deliveredIds).forEach((k) => { delete deliveredIds[k]; });
     render();
     // CHỐT danh sách câu sẽ TIÊU THỤ ngay từ đầu lượt: gửi xong (kể cả lỗi giữa chừng) sẽ xóa
     // ĐÚNG các câu này — không phụ lệch việc giữa chừng bấm tích/bỏ tích câu khác.
@@ -2204,6 +2230,7 @@
       done++;
       if (r.ok) {
         ok++;
+        markDelivered(c.id);
         if (r.fired) firedN++;
         logLine('✅ [' + done + '/' + totalAll + '] ' + (c.name || c.id) + ' — đã gửi' + via);
       } else if (r.uncertain) {
@@ -2540,7 +2567,7 @@
       </style>
       <div class="wrap" id="ssb-wrap">
         <div class="head" id="ssb-head">
-          <span class="title"><svg class="logo" viewBox="0 0 50 52" width="17" height="17" xmlns="http://www.w3.org/2000/svg"><path d="M10 2 L14 11" stroke="#5865F2" stroke-width="5" stroke-linecap="round" fill="none"/><path d="M40 2 L36 11" stroke="#5865F2" stroke-width="5" stroke-linecap="round" fill="none"/><rect x="0" y="12" width="50" height="40" rx="6" fill="#5865F2"/><rect x="12" y="31" width="12" height="4" rx="2" fill="#fff"/><rect x="26" y="31" width="12" height="4" rx="2" fill="#fff"/></svg>BOTFAKE <span style="color:#64748b;font-weight:400;font-size:11px">v1.38.0</span></span>
+          <span class="title"><svg class="logo" viewBox="0 0 50 52" width="17" height="17" xmlns="http://www.w3.org/2000/svg"><path d="M10 2 L14 11" stroke="#5865F2" stroke-width="5" stroke-linecap="round" fill="none"/><path d="M40 2 L36 11" stroke="#5865F2" stroke-width="5" stroke-linecap="round" fill="none"/><rect x="0" y="12" width="50" height="40" rx="6" fill="#5865F2"/><rect x="12" y="31" width="12" height="4" rx="2" fill="#fff"/><rect x="26" y="31" width="12" height="4" rx="2" fill="#fff"/></svg>BOTFAKE <span style="color:#64748b;font-weight:400;font-size:11px">v1.39.0</span></span>
           <button class="badge on" id="ssb-toggle" title="Bật/tắt tính năng">BẬT</button>
           <button class="minibtn" id="ssb-close" title="Tắt panel (F5 hoặc Alt+Shift+B để hiện lại)">✕</button>
           <button class="minibtn" id="ssb-min" title="Thu nhỏ">—</button>

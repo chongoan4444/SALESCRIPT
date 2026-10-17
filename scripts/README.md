@@ -116,11 +116,14 @@ lại** — ưu tiên tốc độ.
   server để phân loại chắc/thiếu — không mất gì về độ chính xác.
 - **Full speed**: mặc định 5000 tin/lượt, nghỉ 0ms giữa lượt — lô gửi bung hết tốc độ như tool gửi
   hàng loạt (không còn khoảng hãm nào trong đường gửi). Muốn hãm lại thì chỉnh 2 ô — vẫn lưu qua F5.
-- **Bù vòng 2 sau nhịp — chống mất tin khi server nghẽn**: bắn lô dồn (8–21 tin thành công trong 1
-  giây) rồi bù socket NGAY là Facebook thường "báo gửi thất bại" (đang giữ nhịp gửi của tài khoản) —
-  cùng chat đó bù lại sau ~12 giây là thắng với đúng frame đó (đã đối chiếu bằng chứng trong log).
-  Nên khi kênh **thừa nhận thua** (chắc chắn tin chưa đến nơi) thì script tự **bù vòng 2 sau 12s** —
-  mỗi chat tối đa 1 lần, đúng luật "kênh chắc thua phải bù tiếp, không im lặng bỏ sót".
+- **Bù sau nhịp — chống mất tin, hết "gửi đi gửi lại" (v1.39.0)**: bắn lô dồn (8–21 tin/giây) mà bù
+  Socket/Ext NGAY là Facebook "báo gửi thất bại" hàng loạt (đang giữ nhịp gửi của tài khoản) —
+  cùng chat đó bù lại sau ~12 giây là thắng (đã đối chiếu bằng chứng trong log). Nên khi kênh
+  **thừa nhận thua** (chắc chắn tin chưa đến nơi) thì script **bù ĐÚNG 1 LẦN, 1 KÊNH** (text →
+  Socket, ảnh/bình luận → Ext) sau nhịp ~12s, **rải đều ~1.2s** giữa các chat để FB không giữ nhịp.
+  Trước đây mỗi chat bị thử đi thử lại 4–5 lần qua hết lối này tới lối khác trong 30–60s — nay
+  tối đa: 1 phát API + 1 lần bù. Chat **đã có kênh báo thành công thì tuyệt đối không gửi lại**
+  (dù bù đang chờ); bắt đầu lượt gửi mới thì bù dở của lượt cũ tự hủy (không gửi lẫn 2 lượt).
   Tin **"không rõ" (maybe)** vẫn tuyệt đối không gửi thêm — chống trùng tin. Socket cũng được
   khởi động lại đúng kiểu app (initSocket tự kiểm `isRunning`) và luôn chờ làm nóng xong mới bắn.
 - **Socket/Ext gửi LẦN LƯỢT từng chat (hàng đợi)**: gửi lô mà bắn Socket/Extension đồng loạt thì
@@ -175,7 +178,10 @@ Gắn attachment đúng như app: `POST /v1/pages/{p}/contents/facebook` (`conte
 Kèm cờ `is_record_ctx_7_days` khi đủ điều kiện cửa sổ quảng cáo 7 ngày của app (`dr()`: khách ≥1 ngày không
 tương tác + page bật `ctx_7_days_enabled` + khách có `ad_clicks` ≤7 ngày) — cờ này cho phép gửi ngoài cửa sổ
 24h với khách từ quảng cáo, đúng việc gửi tay trong app làm được (đối chiếu `buildRequestBody` trong `_app`:
-`(0,ev.dr)()&&(j.is_record_ctx_7_days=!0)`).
+`(0,ev.dr)()&&(j.is_record_ctx_7_days=!0)`). **Ngoại lệ có lợi (v1.39.0)**: dòng dữ liệu bulk không kèm
+`ad_clicks` → không đánh giá được — khi khách ngoài 24h (hoặc không rõ mốc) + page bật thì **vẫn bật cờ**:
+thiếu cờ chắc chắn #551 oan, còn có cờ mà khách không thuộc cửa sổ 7 ngày thì server/FB vẫn từ chối y như
+cũ — không hại gì mà cứu được các chat từ quảng cáo. Nếu CÓ `ad_clicks` mà mới nhất >7 ngày thì không bật.
 **Học `globalUserId` đúng từ extension (v1.38.0)**: app sau khi Extension thành công có event
 `update_global_id` — globalId extension trả về có thể ĐÚNG hơn giá trị đoán từ `from_psid` (có khách
 globalId là FBID `1000…` chứ không phải PSID). Script nay: (1) cache `res.data.globalUserId` vào
