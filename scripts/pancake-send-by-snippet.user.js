@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE
 // @namespace    salescript
-// @version      1.30.1
+// @version      1.30.2
 // @description  BOTFAKE — chọn chuỗi chat (Alt+Click 2 đầu) hoặc theo snippet trong Pancake rồi gửi cùng 1 câu (kèm ảnh nếu muốn) cho tất cả.
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -136,6 +136,12 @@
   }
 
   function getToken() {
+    // app lấy token = cookie 'jwt' (getAccessToken trong _app) — đọc TRỰC TIẾP trước,
+    // tránh dính token cũ đã nuốt từ URL lúc mới tải trang
+    try {
+      const m = /(?:^|;\s*)jwt=([^;]+)/.exec(document.cookie || '');
+      if (m && m[1]) { capturedToken = decodeURIComponent(m[1]); return capturedToken; }
+    } catch (e) { /* ignore */ }
     if (capturedToken) return capturedToken;
     try {
       const entries = performance.getEntriesByType('resource');
@@ -1368,7 +1374,17 @@
   // helper.publish — BỎ BƯỚC CHỜ 1S bên trong helper.sendMessage. Vẫn chờ ACK của server
   // để phân loại chắc/thiếu y như đường gốc. Trả về: ok | rejected | noack | dead | legacy.
   async function socketPublishSend(helper, pageId, gid, text) {
-    const sock = helper.SOCKETS && helper.SOCKETS[pageId];
+    let sock = helper.SOCKETS && helper.SOCKETS[pageId];
+    if (!sock || !sock.instance) {
+      // socket chưa sẵn sàng — có thể ĐANG kết nối (làm nóng từ đầu lô) → chờ thay vì bỏ cuộc
+      let warm = socketWarmPromises[pageId];
+      if (!warm && typeof helper.initSocket === 'function') {
+        warm = socketWarmPromises[pageId] = Promise.resolve()
+          .then(() => helper.initSocket(pageId)).catch(() => null);
+      }
+      if (warm) await Promise.race([warm, sleep(15000)]);
+      sock = helper.SOCKETS && helper.SOCKETS[pageId];
+    }
     if (!sock || !sock.instance) return { kind: 'dead' };
     if (typeof helper.publish !== 'function' || typeof helper.findAllBlockActions !== 'function') {
       return { kind: 'legacy' }; // helper cũ — quay về sendMessage đầy đủ
@@ -1552,7 +1568,10 @@
         return { ok: true, id: (res.data && (res.data.timestamp || res.data.convId)) || '', sendBy: 'extension', sent: true };
       }
       if (res && res.success === false) {
-        return { ok: false, sent: false, error: 'Extension không gửi được' }; // extension trả lời rõ: chưa gửi
+        // giữ nguyên lý do extension trả về (nếu có) để log lộ đúng nguyên nhân thua
+        const d = res.data || {};
+        const why = d.errorMessage || d.error || d.reason || d.code || '';
+        return { ok: false, sent: false, error: 'Extension không gửi được' + (why ? ' (' + why + ')' : '') }; // extension trả lời rõ: chưa gửi
       }
       // không có phản hồi (timeout/hủy) → extension có thể đã gửi → KHÔNG rõ
       return { ok: false, sent: 'maybe', error: 'Extension không phản hồi' };
@@ -1712,6 +1731,8 @@
   // Làm nóng Socket TRƯỚC khi gửi: lần dùng Socket đầu tiên trong phiên (nhất là ngay sau F5)
   // phải trả phí kết nối + đồng bộ thread map ~10s (initSocket). Làm nóng ngay lúc bắn lô —
   // chạy song song các bắn API — nên khi nào cần bù Socket thì chỉ còn ~1–2s của sendMessage.
+  const socketWarmPromises = {}; // pageId → Promise kết nối socket (đang chạy dở)
+
   function warmUpSockets(targets) {
     try {
       const h = window.__MqttHelper__;
@@ -1723,9 +1744,10 @@
         seen[pid] = true;
         const sock = h.SOCKETS && h.SOCKETS[pid];
         if (sock && sock.instance) return; // đã kết nối — khỏi làm lại
-        Promise.resolve()
+        if (socketWarmPromises[pid]) return; // đang kết nối dở — khỏi làm trùng
+        socketWarmPromises[pid] = Promise.resolve()
           .then(() => h.initSocket(pid))
-          .catch(() => { /* nóng socket là việc phụ — không được làm hỏng lô gửi */ });
+          .catch(() => null); /* nóng socket là việc phụ — không được làm hỏng lô gửi */
       });
     } catch (e) { /* ignore */ }
   }
@@ -2012,7 +2034,7 @@
       </style>
       <div class="wrap" id="ssb-wrap">
         <div class="head" id="ssb-head">
-          <span class="title"><svg class="logo" viewBox="0 0 50 52" width="17" height="17" xmlns="http://www.w3.org/2000/svg"><path d="M10 2 L14 11" stroke="#5865F2" stroke-width="5" stroke-linecap="round" fill="none"/><path d="M40 2 L36 11" stroke="#5865F2" stroke-width="5" stroke-linecap="round" fill="none"/><rect x="0" y="12" width="50" height="40" rx="6" fill="#5865F2"/><rect x="12" y="31" width="12" height="4" rx="2" fill="#fff"/><rect x="26" y="31" width="12" height="4" rx="2" fill="#fff"/></svg>BOTFAKE <span style="color:#64748b;font-weight:400;font-size:11px">v1.30.1</span></span>
+          <span class="title"><svg class="logo" viewBox="0 0 50 52" width="17" height="17" xmlns="http://www.w3.org/2000/svg"><path d="M10 2 L14 11" stroke="#5865F2" stroke-width="5" stroke-linecap="round" fill="none"/><path d="M40 2 L36 11" stroke="#5865F2" stroke-width="5" stroke-linecap="round" fill="none"/><rect x="0" y="12" width="50" height="40" rx="6" fill="#5865F2"/><rect x="12" y="31" width="12" height="4" rx="2" fill="#fff"/><rect x="26" y="31" width="12" height="4" rx="2" fill="#fff"/></svg>BOTFAKE <span style="color:#64748b;font-weight:400;font-size:11px">v1.30.2</span></span>
           <button class="badge on" id="ssb-toggle" title="Bật/tắt tính năng">BẬT</button>
           <button class="minibtn" id="ssb-close" title="Tắt panel (F5 hoặc Alt+Shift+B để hiện lại)">✕</button>
           <button class="minibtn" id="ssb-min" title="Thu nhỏ">—</button>
@@ -2418,6 +2440,13 @@
         try { localStorage.setItem('ssb_quick', quickEl.checked ? '1' : '0'); } catch (e) { /* ignore */ }
       });
     }
+    // làm nóng Socket NGAY khi mở panel — kịp kết nối trước khi user bấm Gửi
+    // (kể cả khi gửi vùi thì socket cũng đã sẵn, không còn cảnh 'Socket không kết nối')
+    try {
+      const st0 = window.__pancakeReduxStore__ && window.__pancakeReduxStore__.getState();
+      const pagesArr = (st0 && st0.pages && st0.pages.activated) || [];
+      warmUpSockets(pagesArr.map((x) => ({ pageId: x && x.id })));
+    } catch (e) { /* ignore */ }
     on('ssb-send', 'click', () => { sendToAll(); });
     on('ssb-stop', 'click', () => {
       state.stopRequested = true;
