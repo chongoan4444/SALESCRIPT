@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE
 // @namespace    salescript
-// @version      1.26.1
+// @version      1.26.2
 // @description  BOTFAKE — chọn chuỗi chat (Alt+Click 2 đầu) hoặc theo snippet trong Pancake rồi gửi cùng 1 câu (kèm ảnh nếu muốn) cho tất cả.
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -1574,10 +1574,12 @@
       }
     }
 
-    // Gửi theo lượt: mỗi lượt = "Số tin mỗi lượt" trên panel (mặc định 200), giữa các lượt nghỉ 500ms
+    // Gửi theo lượt: mỗi lượt = "Số tin mỗi lượt" (mặc định 200), giữa các lượt nghỉ "N ms" (mặc định 500)
     const waveEl = shadow && shadow.getElementById('ssb-wave');
+    const gapEl = shadow && shadow.getElementById('ssb-gap');
     const WAVE_SIZE = Math.max(1, Math.min(5000, parseInt((waveEl && waveEl.value) || '200', 10) || 200));
-    const WAVE_GAP = 500;
+    const gapRaw = parseInt((gapEl && gapEl.value) || '500', 10);
+    const WAVE_GAP = isNaN(gapRaw) ? 500 : Math.max(0, Math.min(60000, gapRaw));
     const useWaves = targets.length > WAVE_SIZE;
     logLine(useWaves
       ? '🚀 Bắt đầu gửi ' + targets.length + ' chat THEO LƯỢT: mỗi lượt ' + WAVE_SIZE + ' tin, cách nhau ' + WAVE_GAP + 'ms…'
@@ -1777,7 +1779,7 @@
       </style>
       <div class="wrap" id="ssb-wrap">
         <div class="head" id="ssb-head">
-          <span class="title"><svg class="logo" viewBox="0 0 50 52" width="17" height="17" xmlns="http://www.w3.org/2000/svg"><path d="M10 2 L14 11" stroke="#5865F2" stroke-width="5" stroke-linecap="round" fill="none"/><path d="M40 2 L36 11" stroke="#5865F2" stroke-width="5" stroke-linecap="round" fill="none"/><rect x="0" y="12" width="50" height="40" rx="6" fill="#5865F2"/><rect x="12" y="31" width="12" height="4" rx="2" fill="#fff"/><rect x="26" y="31" width="12" height="4" rx="2" fill="#fff"/></svg>BOTFAKE <span style="color:#64748b;font-weight:400;font-size:11px">v1.26.1</span></span>
+          <span class="title"><svg class="logo" viewBox="0 0 50 52" width="17" height="17" xmlns="http://www.w3.org/2000/svg"><path d="M10 2 L14 11" stroke="#5865F2" stroke-width="5" stroke-linecap="round" fill="none"/><path d="M40 2 L36 11" stroke="#5865F2" stroke-width="5" stroke-linecap="round" fill="none"/><rect x="0" y="12" width="50" height="40" rx="6" fill="#5865F2"/><rect x="12" y="31" width="12" height="4" rx="2" fill="#fff"/><rect x="26" y="31" width="12" height="4" rx="2" fill="#fff"/></svg>BOTFAKE <span style="color:#64748b;font-weight:400;font-size:11px">v1.26.2</span></span>
           <button class="badge on" id="ssb-toggle" title="Bật/tắt tính năng">BẬT</button>
           <button class="minibtn" id="ssb-close" title="Tắt panel (F5 hoặc Alt+Shift+B để hiện lại)">✕</button>
           <button class="minibtn" id="ssb-min" title="Thu nhỏ">—</button>
@@ -1811,9 +1813,11 @@
               <button class="b b-gray" id="ssb-img-clear" style="display:none">✕ Bỏ ảnh</button>
             </div>
             <div class="row" style="align-items:center">
-              <span class="hint">Số tin mỗi lượt:</span>
-              <input type="number" id="ssb-wave" value="200" min="1" step="50" style="width:84px">
-              <span class="hint">— các lượt cách nhau 500ms</span>
+              <span class="hint">Mỗi lượt:</span>
+              <input type="number" id="ssb-wave" value="200" min="1" step="50" style="width:72px" title="Số tin mỗi lượt">
+              <span class="hint">tin — nghỉ</span>
+              <input type="number" id="ssb-gap" value="500" min="0" step="50" style="width:72px" title="Số ms nghỉ giữa các lượt">
+              <span class="hint">ms giữa các lượt</span>
             </div>
           </div>
           <div id="ssb-sec-sl">
@@ -2140,6 +2144,23 @@
           try { localStorage.removeItem('ssb_panel_size'); } catch (e) { /* ignore */ }
         });
       }
+    }
+    // thiết lập gửi: nạp giá trị đã lưu (giữ qua F5) + ghi lại khi chỉnh
+    {
+      const waveEl = root.getElementById('ssb-wave');
+      const gapEl = root.getElementById('ssb-gap');
+      try {
+        const w = localStorage.getItem('ssb_wave_size');
+        if (w && waveEl) waveEl.value = w;
+        const g = localStorage.getItem('ssb_wave_gap');
+        if (g !== null && g !== '' && gapEl) gapEl.value = g;
+      } catch (e) { /* ignore */ }
+      if (waveEl) waveEl.addEventListener('change', () => {
+        try { localStorage.setItem('ssb_wave_size', String(waveEl.value)); } catch (e) { /* ignore */ }
+      });
+      if (gapEl) gapEl.addEventListener('change', () => {
+        try { localStorage.setItem('ssb_wave_gap', String(gapEl.value)); } catch (e) { /* ignore */ }
+      });
     }
     on('ssb-send', 'click', () => { sendToAll(); });
     on('ssb-stop', 'click', () => {
