@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE
 // @namespace    salescript
-// @version      1.40.1
+// @version      1.41.0
 // @description  BOTFAKE — chọn chuỗi chat (Alt+Click 2 đầu) hoặc theo snippet trong Pancake rồi gửi cùng 1 câu (kèm ảnh nếu muốn) cho tất cả.
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -650,8 +650,16 @@
     const max = tries || 3;
     let lastErr = '';
     for (let t = 1; t <= max; t++) {
+      let abortTimer = null;
       try {
-        const r = await fetch(url, { credentials: 'include', cache: 'no-store' });
+        // fetch trần KHÔNG tự hết hạn — kết nối treo là await treo theo → chặn toàn bộ lượt gửi
+        const ctl = (typeof AbortController === 'function') ? new AbortController() : null;
+        if (ctl) abortTimer = setTimeout(() => ctl.abort(), 15000);
+        const r = await fetch(url, {
+          credentials: 'include', cache: 'no-store',
+          signal: ctl ? ctl.signal : undefined,
+        });
+        if (abortTimer) { clearTimeout(abortTimer); abortTimer = null; }
         if (r.status === 429 || r.status >= 500) {
           lastErr = 'HTTP ' + r.status;
           if (t < max) { await sleep(800 * t); continue; }
@@ -669,7 +677,8 @@
           }
         }
       } catch (e) {
-        lastErr = 'Lỗi mạng: ' + (e && e.message || e);
+        if (abortTimer) clearTimeout(abortTimer);
+        lastErr = (e && e.name === 'AbortError') ? 'quá 15s chưa phản hồi' : 'Lỗi mạng: ' + (e && e.message || e);
         if (t < max) { await sleep(800 * t); continue; }
         return { ok: false, error: lastErr };
       }
@@ -787,6 +796,7 @@
       if (j.success === false) {
         return { ok: false, error: 'API danh sách lỗi trang ' + guard + ': ' + (j.message || j.error || 'success=false') };
       }
+      const before = rows.length;
       const convs = j.conversations || [];
       convs.forEach((c) => {
         const id = String(c.id || '');
@@ -794,6 +804,10 @@
         seen.add(id);
         rows.push(convApiRow(c, rows.length));
       });
+      // server trả lại trang CŨ (cursor không tiến, mọi dòng đều trùng) → DỪNG ngay:
+      // trước đây cứ lặp tiếp tới 300 trang = "tải lại 1 lượt" treo 1–2 phút, chặn cả lượt gửi
+      if (rows.length === before && guard > 1) break;
+      if (opts && opts.maxPages && guard >= opts.maxPages) break;
       // GỘP DỒN số đếm theo page (server cần số luỹ kế — ghi đè sẽ hỏng từ trang sau)
       if (j.pages_with_current_count && typeof j.pages_with_current_count === 'object') {
         pageCount = Object.assign({}, pageCount, j.pages_with_current_count);
@@ -933,7 +947,12 @@
           + (banNames.length > 3 ? '… +' + (banNames.length - 3) + ' tag' : '');
         logLine('🔎 Lọc tag lúc gửi: trang có ' + banNames.length + ' tag cấm (' + preview
           + ') — CHỈ bỏ qua chat nào THẬT SỰ đang gắn 1 trong các tag này; chat không có tag không bị ảnh hưởng.');
-        const res = await loadListViaApi(null, { forceTags: Object.keys(banIdNum).map((k) => banIdNum[k]) });
+        // bước tải lại qua API chỉ là lớp phụ — TUYỆT ĐỐI không được chặn gửi: ngân sách 8s + tối đa 3 trang.
+        // hết ngân sách thì vẫn lọc đủ bằng DÒNG CHAT + filledTags (2 lớp chính)
+        const res = await Promise.race([
+          loadListViaApi(null, { forceTags: Object.keys(banIdNum).map((k) => banIdNum[k]), maxPages: 3 }),
+          sleep(8000).then(() => ({ ok: false, error: 'quá 8s chờ API — dùng 2 lớp còn lại' })),
+        ]);
         if (!res.ok) {
           logLine('⚠ Không tải lại được tag qua API (' + res.error + ') — vẫn soi tag theo DÒNG CHAT + dữ liệu app.');
         } else {
@@ -2182,6 +2201,19 @@
       + (textsAll.length === 1 ? '“' + clip(textsAll[0] || '(chỉ gửi ảnh)', 120) + '”' : '(mỗi câu đúng nội dung đã lưu)')
       + textNote + imgNote + '\n\nNhận: ' + names + warnComment)) return;
 
+    // ĐÁNH DẤU ĐANG GỬI NGAY từ trước bước lọc: bước lọc tag/tải ảnh có thể chờ API —
+    // không chặn đúp ở đây thì bấm lần 2 chạy song song lần 1 (log hiện 2 dòng lọc)
+    state.sending = true;
+    state.stopRequested = false;
+    batchSkipApi = false;
+    // trạng thái theo LƯỢT gửi: chat đã đến nơi trong lượt này không bao giờ bị gửi lại;
+    // bù của lượt trước đang chờ sẽ tự hủy (runSeq) — không gửi lẫn vào lượt mới
+    runSeq++;
+    buRetrySeq = 0;
+    Object.keys(buRetryDone).forEach((k) => { delete buRetryDone[k]; });
+    Object.keys(deliveredIds).forEach((k) => { delete deliveredIds[k]; });
+    render();
+
     // LỌC TRƯỚC KHI BẮN: tag "chốt"/"chặn" (tải lại tag 1 lượt) + chat có icon điện thoại (has_phone)
     {
       const ban = await filterBannedTagTargets(targets);
@@ -2201,21 +2233,13 @@
       }
       if (!targets.length) {
         logLine('🧹 Không còn chat nào sau khi lọc tag — không có gì để gửi.');
+        state.sending = false;
         render();
         return;
       }
     }
 
-    state.sending = true;
-    state.stopRequested = false;
-    batchSkipApi = false;
-    // trạng thái theo LƯỢT gửi: chat đã đến nơi trong lượt này không bao giờ bị gửi lại;
-    // bù của lượt trước đang chờ sẽ tự hủy (runSeq) — không gửi lẫn vào lượt mới
-    runSeq++;
-    buRetrySeq = 0;
-    Object.keys(buRetryDone).forEach((k) => { delete buRetryDone[k]; });
-    Object.keys(deliveredIds).forEach((k) => { delete deliveredIds[k]; });
-    render();
+    // (block "đang gửi" được chuyển lên TRƯỚC bước lọc — xem ngay dưới confirm)
     // CHỐT danh sách câu sẽ TIÊU THỤ ngay từ đầu lượt: gửi xong (kể cả lỗi giữa chừng) sẽ xóa
     // ĐÚNG các câu này — không phụ lệch việc giữa chừng bấm tích/bỏ tích câu khác.
     const consumeIds = new Set(state.listSel || []);
@@ -2652,7 +2676,7 @@
       </style>
       <div class="wrap" id="ssb-wrap">
         <div class="head" id="ssb-head">
-          <span class="title"><svg class="logo" viewBox="0 0 50 52" width="17" height="17" xmlns="http://www.w3.org/2000/svg"><path d="M10 2 L14 11" stroke="#5865F2" stroke-width="5" stroke-linecap="round" fill="none"/><path d="M40 2 L36 11" stroke="#5865F2" stroke-width="5" stroke-linecap="round" fill="none"/><rect x="0" y="12" width="50" height="40" rx="6" fill="#5865F2"/><rect x="12" y="31" width="12" height="4" rx="2" fill="#fff"/><rect x="26" y="31" width="12" height="4" rx="2" fill="#fff"/></svg>BOTFAKE <span style="color:#64748b;font-weight:400;font-size:11px">v1.40.1</span></span>
+          <span class="title"><svg class="logo" viewBox="0 0 50 52" width="17" height="17" xmlns="http://www.w3.org/2000/svg"><path d="M10 2 L14 11" stroke="#5865F2" stroke-width="5" stroke-linecap="round" fill="none"/><path d="M40 2 L36 11" stroke="#5865F2" stroke-width="5" stroke-linecap="round" fill="none"/><rect x="0" y="12" width="50" height="40" rx="6" fill="#5865F2"/><rect x="12" y="31" width="12" height="4" rx="2" fill="#fff"/><rect x="26" y="31" width="12" height="4" rx="2" fill="#fff"/></svg>BOTFAKE <span style="color:#64748b;font-weight:400;font-size:11px">v1.41.0</span></span>
           <button class="badge on" id="ssb-toggle" title="Bật/tắt tính năng">BẬT</button>
           <button class="minibtn" id="ssb-close" title="Tắt panel (F5 hoặc Alt+Shift+B để hiện lại)">✕</button>
           <button class="minibtn" id="ssb-min" title="Thu nhỏ">—</button>
