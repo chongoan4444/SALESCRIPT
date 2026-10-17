@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE
 // @namespace    salescript
-// @version      1.30.3
+// @version      1.30.4
 // @description  BOTFAKE — chọn chuỗi chat (Alt+Click 2 đầu) hoặc theo snippet trong Pancake rồi gửi cùng 1 câu (kèm ảnh nếu muốn) cho tất cả.
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -1104,18 +1104,21 @@
   }
 
   // Dựng request gửi inbox ĐÚNG app (dùng chung cho sendViaApi và chế độ nhanh)
+  // ĐÚNG request gửi tay THÀNH CÔNG của user (curl 2026-10-17, gửi được cả khi ngoài cửa sổ 24h):
+  //   POST .../conversations/{id}/messages   (URL KHÔNG kèm access_token — auth bằng COOKIE jwt)
+  //   body: action=reply_inbox → message → [ảnh] → send_by_platform=web
+  // Trước đây URL nhét ?access_token=... và body thêm is_record_ctx_7_days → Pancake coi là call
+  // API/bot nên soi cửa sổ 24h gắt (#551) — trong khi gửi tay (cookie, đúng 3 trường) vẫn chạy.
   function buildInboxSend(conv, text, photo) {
     const token = getToken();
     if (!token) return { error: 'Không tìm thấy access_token — hãy tải lại trang Pancake rồi thử lại' };
     const pageId = conv.pageId || conv.id.split('_')[0];
     const url = apiBase() + '/v1/pages/' + pageId
       + '/conversations/' + encodeURIComponent(conv.id)
-      + '/messages?access_token=' + encodeURIComponent(token);
+      + '/messages';
     const fd = new FormData();
     fd.append('action', 'reply_inbox');
     fd.append('message', text);
-    // cờ is_record_ctx_7_days (dr() trong _app) — cửa sổ quảng cáo 7 ngày cho khách từ ads
-    if (isRecordCtx7Days(peekConv(conv) || conv)) fd.append('is_record_ctx_7_days', 'true');
     if (photo && photo.fbId) {
       // đúng field + đúng THỨ TỰ request thật của app khi gửi ảnh (đã so khớp curl):
       // content_id → attachment_id → content_url → width → height
@@ -1664,11 +1667,12 @@
         if (!isNaN(t)) idleLong = (Date.now() - t) > 86400000;
       }
       const hint = channelHints[conv.id];
-      // ngoài cửa sổ 24h (KỂ CẢ ẢNH): API chắc #551 → đi thẳng, khỏi bắn uổng 1 vòng;
-      // API vẫn để CUỐI làm cứu cánh nếu dự đoán sai idle (chỉ chạy khi các kênh trước THUA RÕ)
+      // TEXT: đi API-trước kể cả ngoài cửa sổ — gửi tay (request cookie-auth) chứng minh API vẫn chạy;
+      // ẢNH ngoài cửa sổ: giữ dự đoán đi thẳng Ext (chưa có bằng chứng ảnh cũng qua được API);
+      // API vẫn để CUỐI làm cứu cánh nếu các kênh trước THUA RÕ
       const goDirect = batchSkipApi
         || (hint && hint !== 'api')
-        || (idleLong && !isRecordCtx7Days(full));
+        || (idleLong && photo && !isRecordCtx7Days(full));
       if (goDirect) {
         const directOpts = batchSkipApi ? { skipApi: true } : { directChain: true };
         sendOne(conv, text, photo, directOpts).then((r) => {
@@ -2039,7 +2043,7 @@
       </style>
       <div class="wrap" id="ssb-wrap">
         <div class="head" id="ssb-head">
-          <span class="title"><svg class="logo" viewBox="0 0 50 52" width="17" height="17" xmlns="http://www.w3.org/2000/svg"><path d="M10 2 L14 11" stroke="#5865F2" stroke-width="5" stroke-linecap="round" fill="none"/><path d="M40 2 L36 11" stroke="#5865F2" stroke-width="5" stroke-linecap="round" fill="none"/><rect x="0" y="12" width="50" height="40" rx="6" fill="#5865F2"/><rect x="12" y="31" width="12" height="4" rx="2" fill="#fff"/><rect x="26" y="31" width="12" height="4" rx="2" fill="#fff"/></svg>BOTFAKE <span style="color:#64748b;font-weight:400;font-size:11px">v1.30.3</span></span>
+          <span class="title"><svg class="logo" viewBox="0 0 50 52" width="17" height="17" xmlns="http://www.w3.org/2000/svg"><path d="M10 2 L14 11" stroke="#5865F2" stroke-width="5" stroke-linecap="round" fill="none"/><path d="M40 2 L36 11" stroke="#5865F2" stroke-width="5" stroke-linecap="round" fill="none"/><rect x="0" y="12" width="50" height="40" rx="6" fill="#5865F2"/><rect x="12" y="31" width="12" height="4" rx="2" fill="#fff"/><rect x="26" y="31" width="12" height="4" rx="2" fill="#fff"/></svg>BOTFAKE <span style="color:#64748b;font-weight:400;font-size:11px">v1.30.4</span></span>
           <button class="badge on" id="ssb-toggle" title="Bật/tắt tính năng">BẬT</button>
           <button class="minibtn" id="ssb-close" title="Tắt panel (F5 hoặc Alt+Shift+B để hiện lại)">✕</button>
           <button class="minibtn" id="ssb-min" title="Thu nhỏ">—</button>

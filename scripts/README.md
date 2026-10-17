@@ -120,6 +120,10 @@ lại** — ưu tiên tốc độ.
 - **Payload Ext không bao giờ thiếu `convId`**: dòng list cũ/thiếu `thread_key` → tự dẫn xuất `t_` +
   `thread_id` (đúng định dạng của app) hoặc nạp đầy đủ conversation; `conversationUpdatedTime` không
   bao giờ là NaN — hai lý do hay khiến Extension từ chối trong khi gửi tay vẫn chạy.
+- **Gửi API y hệt gửi tay (bản sao curl 2026-10-17)**: `POST .../messages` KHÔNG kèm `access_token`
+  trong URL (auth bằng cookie `jwt` như người thật) và body đúng 3 trường `action → message →
+  send_by_platform` — không thêm `is_record_ctx_7_days`. Trước đây request bị coi là call API/bot nên
+  ngoài cửa sổ 24h là #551, trong khi gửi tay vẫn chạy. Text giờ đi API-trước kể cả ngoài cửa sổ.
 
 Tự động tăng tốc: sau lần đầu API bị `(#10)/(#551)…`, các chat còn lại **bỏ qua API** đi thẳng sang Socket;
 kênh gửi thành công được **ghi nhớ** (session) nên lần gửi sau vào thẳng kênh đó.
