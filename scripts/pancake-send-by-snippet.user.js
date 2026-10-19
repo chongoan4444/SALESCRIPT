@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         BOTFAKE
 // @namespace    salescript
-// @version      1.66.0
-// @description  BOTFAKE — chọn chuỗi chat (Alt+Click 2 đầu) hoặc theo snippet trong Pancake rồi gửi cùng 1 câu (kèm ảnh nếu muốn) cho tất cả.
+// @version      1.67.0
+// @description  BOTFAKE — chọn chuỗi chat (Alt+Click 2 đầu) hoặc theo snippet trong Pancake rồi gửi cùng 1 câu (kèm 1 hoặc nhiều ảnh nếu muốn) cho tất cả.
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
 // @match        https://pages.fm/*
@@ -681,12 +681,34 @@
       fromPsid: String(c.from_psid || ((c.from || {}).id) || ''), // PSID của khách — có sẵn trong dữ liệu API
       customerId: String(cust.id || c.customer_id || ''), // uuid khách — ensureConvCtx gọi GET …/messages cần
       globalId: String(cust.global_id || c.global_id || ''), // global_id thật nếu có sẵn trong list
+      seen: !!c.seen,
+      isPinned: !!c.is_pinned,
+      updatedTs: c.updated_at ? Date.parse(/[zZ+]|\+\d{2}:?\d{2}$/.test(c.updated_at) ? c.updated_at : c.updated_at + 'Z') : 0,
       customers: Array.isArray(c.customers) ? c.customers.map((x) => ({
         id: x && x.id, fb_id: x && x.fb_id, name: x && x.name,
         global_id: x && x.global_id, ad_clicks: x && x.ad_clicks,
       })) : [],
       order,
     };
+  }
+
+  function cacheGidFromConvObj(c) {
+    try {
+      if (!c || typeof window.__botfakeSaveGid__ !== 'function') return;
+      const cid = String(c.id || '');
+      const pid = String(c.page_id || c.pageId || cid.split('_')[0] || '');
+      const tid = String(c.thread_id || c.threadId || '');
+      const cust0 = (Array.isArray(c.customers) && c.customers[0]) || {};
+      const gid = String(cust0.global_id || c.global_id || c.globalId || '');
+      if (gid && cid) window.__botfakeSaveGid__(cid, pid, tid, gid);
+      if (Array.isArray(c.customers) && pid) {
+        c.customers.forEach((u) => {
+          if (u && u.fb_id && u.global_id) {
+            window.__botfakeSaveGid__(pid + '_' + u.fb_id, pid, tid, String(u.global_id));
+          }
+        });
+      }
+    } catch (e) { /* ignore */ }
   }
 
   function buildFormDataFromObj(obj) {
@@ -725,7 +747,7 @@
         if (abortTimer) { clearTimeout(abortTimer); abortTimer = null; }
         if (r.status === 429 || r.status >= 500) {
           lastErr = 'HTTP ' + r.status;
-          if (t < max) { await sleep(800 * t); continue; }
+          if (t < max) { await sleep(400 * t); continue; }
           return { ok: false, error: lastErr };
         }
         if (!r.ok) {
@@ -745,19 +767,18 @@
         }
       } catch (e) {
         if (abortTimer) clearTimeout(abortTimer);
-        lastErr = (e && e.name === 'AbortError') ? 'quá 15s chưa phản hồi' : 'Lỗi mạng: ' + (e && e.message || e);
-        if (t < max) { await sleep(800 * t); continue; }
+        lastErr = (e && e.name === 'AbortError') ? 'quá ' + Math.round(((reqOpts && reqOpts.timeoutMs) || 15000) / 1000) + 's chưa phản hồi' : 'Lỗi mạng: ' + (e && e.message || e);
+        if (t < max) { await sleep(400 * t); continue; }
         return { ok: false, error: lastErr };
       }
     }
     return { ok: false, error: lastErr || 'Không tải được' };
   }
 
-  // Đọc tham số danh sách GIỐNG HỆT app (buildConversationsRequest trong bundle):
+  // Đọc tham số danh sách GIỐNG HỆT app (buildConversationsRequest — module 907775 @1402744 trong _app):
   //   pageIdOrPageIds = pages.multiplePageMode ? pages.multiplePageIds : pages.currentPageId
-  //   unreadFirst     = pageSettings.unread_first (tắt nếu sort UNREPLIED_*)
-  //   filterMode      = pageSettings.filter_multi_tag ("OR"/"NONE"/string)
-  //   tags/except     = conversations.filteredTag ?? "ALL"; type = conversations.filteredType
+  //   endpoint        = multiplePageMode ? '/api/v1/conversations' : '/api/v1/pages/{pageId}/conversations'
+  //   method          = 'POST' (multipart FormData) khi có lọc `type` hoặc >20 pages (khớp pancake.vn2.har #10..#21)
   const LIST_SPECIAL_TYPES = ['NOT_PRIVATE_REPLY', 'LIVESTREAM_MARKED_ORDER', 'IS_LIVESTREAM_POST_ON',
     'IS_LIVESTREAM_POST_OFF', 'PERSONAL_MESSAGE', 'GROUP_MESSAGE', 'BIZAI_GENERATING',
     'BIZAI_NOT_GENERATING', 'BIZAI_TRANSFERRED', 'STRANGER_MESSAGE'];
@@ -767,10 +788,13 @@
     const pgs = st.pages || {};
     const auth = st.auth || {};
     const cs = st.conversations || {};
+    const singlePageId = (opts && opts.singlePageId) ? String(opts.singlePageId) : '';
     const multi = !!pgs.multiplePageMode;
-    const ids = multi
-      ? (Array.isArray(pgs.multiplePageIds) ? pgs.multiplePageIds : [])
-      : (pgs.currentPageId ? [pgs.currentPageId] : []);
+    const ids = singlePageId
+      ? [singlePageId]
+      : (multi
+        ? (Array.isArray(pgs.multiplePageIds) ? pgs.multiplePageIds : [])
+        : (pgs.currentPageId ? [pgs.currentPageId] : []));
     const settings = (multi ? auth.settings : pgs.currentSettings) || {};
     const ftype = Array.isArray(cs.filteredType) ? cs.filteredType : (cs.filteredType ? [cs.filteredType] : []);
     let unreadFirst = (settings.unread_first === undefined || settings.unread_first === null)
@@ -801,11 +825,57 @@
       mode = 'OR';
     }
     // types = filteredType bỏ các cờ đặc biệt; cờ → query riêng như app
-    const types = ftype.filter((e) => LIST_SPECIAL_TYPES.indexOf(e) === -1);
+    let types = ftype.filter((e) => LIST_SPECIAL_TYPES.indexOf(e) === -1);
+    const filteredWebs = Array.isArray(cs.filteredWebs) ? cs.filteredWebs : [];
+    const filteredAdIds = cs.filteredAdIds || null;
+    const isInitial = !currentCount && !cursor;
     const q = new URLSearchParams();
-    if (types.length) {
-      q.append('type', types.toString());
-    } else if (ftype.indexOf('NOT_PRIVATE_REPLY') > -1 && ftype.indexOf('COMMENT') > -1) {
+    let method = 'GET';
+    const bodyObj = {};
+    const useMultiEndpoint = multi || ids.length > 1 || !!(opts && opts.forceMultiEndpoint);
+
+    if (isInitial) {
+      const hasWeb = types.some((e) => String(e).indexOf('WEB') > -1) && filteredWebs.length > 0;
+      const hasAds = types.some((e) => String(e).indexOf('ADS') > -1) && !!filteredAdIds;
+      if (hasWeb) types = types.filter((e) => String(e).indexOf('WEB') === -1);
+      if (hasAds) types = types.filter((e) => String(e).indexOf('ADS') === -1);
+      if (useMultiEndpoint) {
+        if (ids.length <= 20) {
+          ids.forEach((p) => q.append('pages[' + p + ']', '0'));
+        } else {
+          const pgMap = {};
+          ids.forEach((p) => { pgMap[p] = 0; });
+          bodyObj.pages = pgMap;
+          method = 'POST';
+        }
+      }
+      if (hasAds) q.append('ad_id', JSON.stringify(filteredAdIds));
+      if (hasWeb) q.append('source_urls', JSON.stringify(filteredWebs.map((e) => (e && e.source) || e)));
+      if (types.length) {
+        bodyObj.type = types.toString();
+        method = 'POST';
+      }
+    } else {
+      q.append('current_count', String(currentCount || 60));
+      if (cursor) q.append('next_cursor', cursor);
+      if (filteredAdIds) q.append('ad_id', JSON.stringify(filteredAdIds));
+      if (filteredWebs.length) q.append('source_urls', JSON.stringify(filteredWebs));
+      if (types.length) {
+        bodyObj.type = types.toString();
+        method = 'POST';
+      }
+      if (useMultiEndpoint) {
+        if (ids.length > 20) {
+          const pgMap = {};
+          ids.forEach((p) => { pgMap[p] = (pageCount && pageCount[p]) || 0; });
+          bodyObj.pages = pgMap;
+          method = 'POST';
+        } else {
+          ids.forEach((p) => q.append('pages[' + p + ']', String((pageCount && pageCount[p]) || 0)));
+        }
+      }
+    }
+    if (!types.length && ftype.indexOf('NOT_PRIVATE_REPLY') > -1 && ftype.indexOf('COMMENT') > -1) {
       q.append('is_private_replied', 'false');
     }
     if (ftype.indexOf('COMMENT') > -1 && ftype.indexOf('LIVESTREAM_MARKED_ORDER') > -1) q.append('filter_has_livestream_order', 'true');
@@ -819,11 +889,6 @@
     if (ftype.indexOf('INBOX') > -1 && ftype.indexOf('BIZAI_TRANSFERRED') > -1) q.append('bizai_status', '2');
     if (cs.filteredTask === 'open' || (cs.filteredTask && cs.filteredTask !== 'close')) q.append('task_opened', 'open');
     if (cs.filteredAssignee) q.append('assignee_id', JSON.stringify(cs.filteredAssignee));
-    ids.forEach((p) => q.append('pages[' + p + ']', String((pageCount && pageCount[p]) || 0)));
-    if (currentCount) {
-      q.append('current_count', String(currentCount));
-      if (cursor) q.append('next_cursor', cursor);
-    }
     q.append('unread_first', unreadFirst ? 'true' : 'false');
     q.append('mode', String(mode));
     q.append('tags', JSON.stringify(tagsVal));
@@ -831,58 +896,407 @@
     q.append('access_token', token);
     q.append('cursor_mode', 'true');
     q.append('from_platform', 'web');
-    return { ids, url: location.origin + '/api/v1/conversations?' + q.toString() };
+    const endpointPath = useMultiEndpoint
+      ? '/api/v1/conversations'
+      : ('/api/v1/pages/' + encodeURIComponent(ids[0]) + '/conversations');
+    return {
+      ids,
+      url: location.origin + endpointPath + '?' + q.toString(),
+      method,
+      bodyObj: Object.keys(bodyObj).length ? bodyObj : null,
+    };
   }
 
+  // Giải mã & mã hóa next_cursor chuẩn Erlang External Term Format (:erlang.term_to_binary) của Pancake
+  // (đã xác minh 100% khớp từng byte với pancake.vn2.har #10: [seen_flag, updated_at_ms, "{page_id}:{conv_id}"])
+  function parseErlangCursor(b64) {
+    try {
+      if (!b64 || typeof b64 !== 'string') return null;
+      const bin = atob(b64);
+      const len = bin.length;
+      if (len < 24) return null;
+      if (bin.charCodeAt(0) !== 0x83 || bin.charCodeAt(1) !== 0x6c || bin.charCodeAt(5) !== 0x03) return null;
+      if (bin.charCodeAt(6) !== 0x61) return null;
+      const seenByte = bin.charCodeAt(7) & 0xff;
+      if (bin.charCodeAt(8) !== 0x6e || bin.charCodeAt(9) !== 0x06 || bin.charCodeAt(10) !== 0x00) return null;
+      let tsMs = 0;
+      let mult = 1;
+      for (let i = 0; i < 6; i++) {
+        tsMs += (bin.charCodeAt(11 + i) & 0xff) * mult;
+        mult *= 256;
+      }
+      if (bin.charCodeAt(17) !== 0x6d) return null;
+      const strLen = (((bin.charCodeAt(18) & 0xff) << 24) >>> 0)
+        + ((bin.charCodeAt(19) & 0xff) << 16)
+        + ((bin.charCodeAt(20) & 0xff) << 8)
+        + (bin.charCodeAt(21) & 0xff);
+      if (22 + strLen + 1 !== len || bin.charCodeAt(len - 1) !== 0x6a) return null;
+      const keyStr = bin.slice(22, 22 + strLen);
+      return { seenByte, tsMs, keyStr };
+    } catch (e) {
+      return null;
+    }
+  }
+
+  function encodeErlangCursor(seenByte, tsMs, keyStr) {
+    try {
+      const s = String(keyStr || '');
+      const strLen = s.length;
+      const bytes = new Uint8Array(22 + strLen + 1);
+      bytes[0] = 0x83;
+      bytes[1] = 0x6c;
+      bytes[2] = 0; bytes[3] = 0; bytes[4] = 0; bytes[5] = 3;
+      bytes[6] = 0x61;
+      bytes[7] = seenByte & 0xff;
+      bytes[8] = 0x6e;
+      bytes[9] = 6;
+      bytes[10] = 0;
+      let v = Math.max(0, Math.floor(tsMs));
+      for (let i = 0; i < 6; i++) {
+        bytes[11 + i] = v % 256;
+        v = Math.floor(v / 256);
+      }
+      bytes[17] = 0x6d;
+      bytes[18] = (strLen >>> 24) & 0xff;
+      bytes[19] = (strLen >>> 16) & 0xff;
+      bytes[20] = (strLen >>> 8) & 0xff;
+      bytes[21] = strLen & 0xff;
+      for (let i = 0; i < strLen; i++) bytes[22 + i] = s.charCodeAt(i) & 0xff;
+      bytes[22 + strLen] = 0x6a;
+      let bin = '';
+      for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
+      return btoa(bin);
+    } catch (e) {
+      return null;
+    }
+  }
+
+  function estimatePageSpanMs(convs, fallbackMs) {
+    if (!Array.isArray(convs) || convs.length < 2) return fallbackMs || 600000;
+    const unpinned = convs.filter((c) => c && !c.is_pinned && !c.isPinned);
+    const list = unpinned.length >= 2 ? unpinned : convs;
+    const last = list[list.length - 1];
+    const lastSeen = !!(last && last.seen);
+    const sameSeen = list.filter((c) => !!c.seen === lastSeen);
+    const arr = sameSeen.length >= 2 ? sameSeen : list;
+    const tFirst = Date.parse(/[zZ+]|\+\d{2}:?\d{2}$/.test(arr[0].updated_at || '') ? arr[0].updated_at : (arr[0].updated_at + 'Z'));
+    const tLast = Date.parse(/[zZ+]|\+\d{2}:?\d{2}$/.test(arr[arr.length - 1].updated_at || '') ? arr[arr.length - 1].updated_at : (arr[arr.length - 1].updated_at + 'Z'));
+    if (!isNaN(tFirst) && !isNaN(tLast) && tFirst > tLast) {
+      return Math.max(5000, tFirst - tLast);
+    }
+    return fallbackMs || 600000;
+  }
+
+  // 🚀 TẢI DANH SÁCH SIÊU TỐC v1.67.0 — 3 cơ chế tùy tình huống, tất cả đều KHÔNG HỞ DỮ LIỆU:
+  //   A) NHIỀU PAGE (multiplePageMode / >1 page): tách mỗi page thành 1 CHUỖI CURSOR RIÊNG chạy SONG SONG
+  //      (endpoint /pages/{pageId}/conversations của chính app trong _app buildConversationsRequest khi
+  //      pageIdOrPageIds không phải mảng) — tối đa 10 chuỗi cùng lúc. Mỗi chuỗi đi tuần tự theo next_cursor
+  //      THẬT của server nên không bao giờ hở/thiếu chat. Xong thì gộp + sắp xếp lại ĐÚNG thứ tự app
+  //      (đã đối chiếu pancake.vn2.har #4: ghim trên cùng → chưa đọc → đã đọc, trong nhóm theo updated_at giảm dần).
+  //   B) 1 PAGE: luồng gốc seg0 đi tuần tự từ đầu (dữ liệu mới tinh 100%) + tối đa 10 luồng phụ chạy ĐỘC LẬP
+  //      (không chờ nhau theo vòng) ở các mốc thời gian phía trước theo cursor Erlang ETF tự tổng hợp;
+  //      hễ seg0 chạm đầu 1 đoạn phụ là KHÂU cả đoạn vào và nhảy cursor qua đoạn đó — bỏ qua được
+  //      hàng loạt request tuần tự. Luồng phụ nào treo cũng không chặn được luồng gốc.
+  //   C) Lọc tag lúc gửi (forceTags / maxPages): tuần tự như cũ (chỉ cần 1 trang).
+  //   Cả A & B đều DỪNG NGAY khi chuỗi 2 đầu (range) đã đủ 2 đầu hoặc user bấm dừng.
   async function loadListViaApi(onProgress, opts) {
     const token = getToken();
     if (!token) return { ok: false, error: 'Không lấy được access token' };
+    const startedAt = Date.now();
+    const plainMode = !opts || (!opts.forceTags && !opts.maxPages);
 
-    const rows = [];
-    const seen = new Set();
-    let cursor = null;
-    let pageCount = {};
-    let guard = 0;
-    let ids = [];
+    const isRangeSatisfied = (idSet) => {
+      if (!plainMode) return false;
+      if (state.mode === 'range' && state.rangeStart && state.rangeEnd) {
+        return idSet.has(state.rangeStart.id) && idSet.has(state.rangeEnd.id);
+      }
+      return false;
+    };
+    const stopped = () => state.scanStopRequested;
 
-    while (guard++ < 1500) {
-      let url;
+    const fetchPage = async (pageCount, cursor, currentCount, extra) => {
+      const eo = Object.assign({}, opts || {}, extra || {});
+      const req = buildListRequest(pageCount, cursor, currentCount, token, eo.forceMulti || eo.singlePageId ? eo : opts);
+      if (!req.ids.length) return { ok: false, error: 'Không xác định được page đang xem' };
+      const res = await fetchJson(req.url, eo.tries || 3, { method: req.method, bodyObj: req.bodyObj, timeoutMs: eo.timeoutMs || 12000 });
+      if (!res.ok) return { ok: false, error: res.error };
+      const j = res.data || {};
+      if (j.success === false) return { ok: false, error: j.message || j.error || 'success=false' };
+      return { ok: true, data: j, ids: req.ids, unreadFirst: req.unreadFirst };
+    };
+
+    const pushConvs = (seg, convs) => {
+      let added = 0;
+      (convs || []).forEach((c) => {
+        const id = String((c && c.id) || '');
+        if (!id || seg.set.has(id)) return;
+        cacheGidFromConvObj(c);
+        seg.set.add(id);
+        seg.items.push(convApiRow(c, seg.items.length));
+        added++;
+      });
+      return added;
+    };
+
+    // ---------- C) TUẦN TỰ (lọc tag / giới hạn trang) ----------
+    const loadSequential = async () => {
+      const seg = { items: [], set: new Set(), cursor: null, pageCount: {} };
+      let guard = 0;
+      let forceMulti = false;
+      while (guard++ < 1500 && !stopped()) {
+        const res = await fetchPage(seg.pageCount, seg.cursor, seg.items.length, { forceMulti });
+        if (!res.ok) {
+          if (guard === 1 && !forceMulti) { forceMulti = true; guard--; continue; }
+          return guard === 1 ? { ok: false, error: 'API danh sách lỗi trang 1: ' + res.error } : { ok: true, rows: seg.items };
+        }
+        const j = res.data || {};
+        const convs = j.conversations || [];
+        const added = pushConvs(seg, convs);
+        if (j.pages_with_current_count) seg.pageCount = Object.assign({}, seg.pageCount, j.pages_with_current_count);
+        seg.cursor = (convs.length && j.next_cursor) ? j.next_cursor : null;
+        if (onProgress) onProgress(seg.items.length, seg.items);
+        if (!seg.cursor || !convs.length || !added || (opts && opts.maxPages && guard >= opts.maxPages)) break;
+      }
+      return { ok: true, rows: seg.items };
+    };
+
+    if (!plainMode) return loadSequential();
+
+    // Đọc danh sách page + unread_first từ request mẫu (chưa bắn mạng)
+    let probeIds = [];
+    let unreadFirst = true;
+    try {
+      const probe = buildListRequest({}, null, 0, token, opts);
+      probeIds = probe.ids || [];
+      unreadFirst = probe.unreadFirst !== false;
+    } catch (e) { /* dùng đường tuần tự bên dưới */ }
+
+    // ---------- A) NHIỀU PAGE → MỖI PAGE 1 CHUỖI SONG SONG ----------
+    if (probeIds.length >= 2) {
+      const perPage = new Map(); // pageId -> rows[]
+      const allSet = new Set();
+      let total = 0;
+      let firstPageErrors = 0;
+      let midErrors = 0;
+      let stopAll = false;
+      const queue = probeIds.slice();
+      const chain = async (pid) => {
+        const seg = { items: [], set: new Set(), cursor: null, pageCount: {}, started: false };
+        perPage.set(pid, seg.items);
+        let guard = 0;
+        while (guard++ < 1500 && !stopAll && !stopped()) {
+          const res = await fetchPage({}, seg.cursor, seg.items.length, { singlePageId: pid, tries: seg.started ? 2 : 3, timeoutMs: 12000 });
+          if (!res.ok) { if (!seg.started) firstPageErrors++; else midErrors++; return; }
+          seg.started = true;
+          const j = res.data || {};
+          const convs = j.conversations || [];
+          const before = seg.items.length;
+          (convs || []).forEach((c) => {
+            const id = String((c && c.id) || '');
+            if (!id || seg.set.has(id) || allSet.has(id)) return;
+            cacheGidFromConvObj(c);
+            seg.set.add(id); allSet.add(id);
+            seg.items.push(convApiRow(c, 0));
+          });
+          total += seg.items.length - before;
+          seg.cursor = (convs.length && j.next_cursor) ? j.next_cursor : null;
+          if (onProgress) onProgress(total, null);
+          if (!seg.cursor || !convs.length || seg.items.length === before) return;
+          if (isRangeSatisfied(allSet)) { stopAll = true; return; }
+        }
+      };
+      const POOL = Math.min(10, queue.length);
+      const workers = [];
+      for (let w = 0; w < POOL; w++) {
+        workers.push((async () => { while (queue.length && !stopAll && !stopped()) { const pid = queue.shift(); await chain(pid); } })());
+      }
+      await Promise.all(workers);
+      // Page nào lỗi trang đầu (endpoint lẻ không được) → bù bằng đường chung tuần tự nếu mất quá nhiều
+      if (!total || firstPageErrors >= Math.ceil(probeIds.length / 2) || midErrors > 0) {
+        logLine('⚠ Tải song song theo page không khả thi — chuyển về tải đa luồng chung…');
+        return loadSequentialOrStitch();
+      }
+      const rows = [];
+      perPage.forEach((arr) => { arr.forEach((r) => rows.push(r)); });
+      // Thứ tự app (HAR #4): ghim ↑ → chưa đọc ↑ → đã đọc, trong nhóm updated_at giảm dần
+      rows.sort((a, b) => {
+        if (!!a.isPinned !== !!b.isPinned) return a.isPinned ? -1 : 1;
+        if (unreadFirst && !!a.seen !== !!b.seen) return a.seen ? 1 : -1;
+        return (b.updatedTs || 0) - (a.updatedTs || 0);
+      });
+      rows.forEach((r, i) => { r.order = i; });
+      logLine('⚡⚡ Tải song song ' + probeIds.length + ' page: ' + rows.length + ' chat trong ' + ((Date.now() - startedAt) / 1000).toFixed(1) + 's');
+      if (onProgress) onProgress(rows.length, rows);
+      return { ok: true, rows };
+    }
+
+    return loadSequentialOrStitch();
+
+    // ---------- B) 1 PAGE → LUỒNG GỐC + LUỒNG PHỤ ĐỘC LẬP, KHÂU ĐOẠN ----------
+    async function loadSequentialOrStitch() {
+      let forceMultiEndpoint = false;
+      let p1;
       try {
-        const req = buildListRequest(pageCount, cursor, rows.length || 0, token, opts);
-        ids = req.ids;
-        url = req.url;
+        p1 = await fetchPage({}, null, 0, {});
+        if (!p1.ok) {
+          const retryMulti = await fetchPage({}, null, 0, { forceMulti: true });
+          if (retryMulti.ok) { p1 = retryMulti; forceMultiEndpoint = true; }
+        }
       } catch (e) {
         return { ok: false, error: 'Không đọc được bộ lọc của app: ' + (e && e.message || e) };
       }
-      if (!ids.length) return { ok: false, error: 'Không xác định được page đang xem' };
+      if (!p1 || !p1.ok) return { ok: false, error: 'API danh sách lỗi trang 1: ' + ((p1 && p1.error) || 'Không tải được') };
 
-      const res = await fetchJson(url, 3);
-      if (!res.ok) return { ok: false, error: 'API danh sách lỗi trang ' + guard + ': ' + res.error };
-      const j = res.data || {};
-      if (j.success === false) {
-        return { ok: false, error: 'API danh sách lỗi trang ' + guard + ': ' + (j.message || j.error || 'success=false') };
+      const seg0 = {
+        items: [], set: new Set(),
+        cursor: (p1.data && p1.data.next_cursor) || null,
+        pageCount: Object.assign({}, (p1.data && p1.data.pages_with_current_count) || {}),
+        spanMs: estimatePageSpanMs((p1.data && p1.data.conversations) || [], 600000),
+      };
+      pushConvs(seg0, (p1.data && p1.data.conversations) || []);
+      if (onProgress) onProgress(seg0.items.length, seg0.items);
+      if (!seg0.cursor || stopped() || isRangeSatisfied(seg0.set)) return { ok: true, rows: seg0.items };
+
+      const parsed0 = parseErlangCursor(seg0.cursor);
+      if (!parsed0) {
+        // Cursor lạ → tuần tự từ trang 2
+        let guard = 1;
+        while (guard++ < 1500 && !stopped()) {
+          const before = seg0.items.length;
+          const res = await fetchPage(seg0.pageCount, seg0.cursor, seg0.items.length, { forceMulti: forceMultiEndpoint });
+          if (!res.ok) break;
+          const j = res.data || {};
+          pushConvs(seg0, j.conversations || []);
+          if (j.pages_with_current_count) seg0.pageCount = Object.assign({}, seg0.pageCount, j.pages_with_current_count);
+          seg0.cursor = (j.conversations && j.conversations.length && j.next_cursor) ? j.next_cursor : null;
+          if (onProgress) onProgress(seg0.items.length, seg0.items);
+          if (!seg0.cursor || seg0.items.length === before || isRangeSatisfied(seg0.set)) break;
+        }
+        return { ok: true, rows: seg0.items };
       }
-      const before = rows.length;
-      const convs = j.conversations || [];
-      convs.forEach((c) => {
-        const id = String(c.id || '');
-        if (!id || seen.has(id)) return;
-        seen.add(id);
-        rows.push(convApiRow(c, rows.length));
-      });
-      // server trả lại trang CŨ (cursor không tiến, mọi dòng đều trùng) → DỪNG ngay
-      if (rows.length === before && guard > 1) break;
-      if (opts && opts.maxPages && guard >= opts.maxPages) break;
-      // GỘP DỒN số đếm theo page (server cần số luỹ kế — ghi đè sẽ hỏng từ trang sau)
-      if (j.pages_with_current_count && typeof j.pages_with_current_count === 'object') {
-        pageCount = Object.assign({}, pageCount, j.pages_with_current_count);
+
+      const STRIDES = [1.1, 2.2, 3.3, 4.4, 5.5, 6.6, 7.7, 8.8, 9.9, 11];
+      const samplePageId = parsed0.keyStr.split(':')[0] || String((p1.ids && p1.ids[0]) || '');
+      const dummyKeyStr = samplePageId + ':' + samplePageId + '_99999999999999999999';
+      const segments = [];
+      let helpersDone = false;
+      let strideIdx = 0;
+
+      const stitch = () => {
+        let changed = true;
+        while (changed) {
+          changed = false;
+          for (let i = 0; i < segments.length; i++) {
+            const seg = segments[i];
+            if (seg.absorbed || !seg.items.length) continue;
+            if (seg0.set.has(seg.items[0].id)) {
+              for (let k = 0; k < seg.items.length; k++) {
+                const r = seg.items[k];
+                if (!seg0.set.has(r.id)) { seg0.set.add(r.id); r.order = seg0.items.length; seg0.items.push(r); }
+              }
+              if (seg.cursorReal) {
+                const p0 = seg0.cursor ? parseErlangCursor(seg0.cursor) : null;
+                const pS = seg.cursor ? parseErlangCursor(seg.cursor) : null;
+                if (!seg.cursor || (p0 && pS && (pS.seenByte > p0.seenByte || (pS.seenByte === p0.seenByte && pS.tsMs < p0.tsMs)))) {
+                  seg0.cursor = seg.cursor;
+                  seg0.spanMs = seg.spanMs || seg0.spanMs;
+                  seg0.pageCount = Object.assign({}, seg0.pageCount, seg.pageCount);
+                }
+              }
+              seg.absorbed = true;
+              changed = true;
+            }
+          }
+          // đoạn phụ chạm nhau → nối lại để seg0 khâu 1 lần được đoạn dài hơn
+          for (let i = 0; i < segments.length; i++) {
+            const sa = segments[i];
+            if (sa.absorbed || !sa.items.length) continue;
+            for (let j = 0; j < segments.length; j++) {
+              if (i === j) continue;
+              const sb = segments[j];
+              if (sb.absorbed || !sb.items.length) continue;
+              if (sa.set.has(sb.items[0].id)) {
+                for (let k = 0; k < sb.items.length; k++) {
+                  const r = sb.items[k];
+                  if (!sa.set.has(r.id)) { sa.set.add(r.id); sa.items.push(r); }
+                }
+                if (sb.cursorReal) {
+                  const pA = sa.cursor ? parseErlangCursor(sa.cursor) : null;
+                  const pB = sb.cursor ? parseErlangCursor(sb.cursor) : null;
+                  if (!sb.cursor || (pA && pB && (pB.seenByte > pA.seenByte || (pB.seenByte === pA.seenByte && pB.tsMs < pA.tsMs)))) {
+                    sa.cursor = sb.cursor; sa.spanMs = sb.spanMs || sa.spanMs;
+                    sa.pageCount = Object.assign({}, sa.pageCount, sb.pageCount);
+                  }
+                }
+                sb.absorbed = true;
+                changed = true;
+              }
+            }
+          }
+        }
+      };
+
+      const spawnHelper = () => {
+        const base = seg0.cursor ? parseErlangCursor(seg0.cursor) : null;
+        if (!base || helpersDone) return;
+        const mult = STRIDES[strideIdx++ % STRIDES.length];
+        const seg = {
+          items: [], set: new Set(),
+          cursor: encodeErlangCursor(base.seenByte, base.tsMs - Math.round(Math.max(5000, seg0.spanMs || 600000) * mult), dummyKeyStr),
+          pageCount: Object.assign({}, seg0.pageCount),
+          spanMs: seg0.spanMs, estCount: seg0.items.length + Math.round(60 * mult),
+          absorbed: false, cursorReal: false,
+        };
+        if (!seg.cursor) return;
+        segments.push(seg);
+        (async () => {
+          // Luồng phụ chạy ĐỘC LẬP: cứ đi tiếp về phía cũ, khâu được lúc nào hay lúc đó;
+          // treo/lỗi thì tự chết, tuyệt đối không chặn luồng gốc (không còn Promise.all theo vòng).
+          while (!helpersDone && !stopped() && !seg.absorbed && seg.cursor) {
+            const res = await fetchPage(seg.pageCount, seg.cursor, seg.estCount + seg.items.length, { forceMulti: forceMultiEndpoint, tries: 2, timeoutMs: 10000 });
+            if (!res.ok) return;
+            const j = res.data || {};
+            const convs = j.conversations || [];
+            if (!convs.length) { seg.cursor = null; return; }
+            pushConvs(seg, convs);
+            if (convs.length >= 2) seg.spanMs = estimatePageSpanMs(convs, seg.spanMs);
+            if (j.pages_with_current_count) seg.pageCount = Object.assign({}, seg.pageCount, j.pages_with_current_count);
+            seg.cursor = j.next_cursor || null;
+            seg.cursorReal = true;
+            stitch();
+            if (onProgress) onProgress(seg0.items.length, seg0.items);
+            if (isRangeSatisfied(seg0.set)) { helpersDone = true; return; }
+          }
+        })().catch(() => {});
+      };
+
+      for (let h = 0; h < STRIDES.length; h++) spawnHelper();
+
+      // Luồng gốc: đi tuần tự, khâu đoạn nào dùng đoạn đó, xong là dừng hết luồng phụ
+      let guard = 0;
+      while (guard++ < 1500 && seg0.cursor && !stopped()) {
+        const before = seg0.items.length;
+        const res = await fetchPage(seg0.pageCount, seg0.cursor, seg0.items.length, { forceMulti: forceMultiEndpoint, tries: 3, timeoutMs: 12000 });
+        if (!res.ok) break;
+        const j = res.data || {};
+        const convs = j.conversations || [];
+        pushConvs(seg0, convs);
+        if (convs.length >= 2) seg0.spanMs = estimatePageSpanMs(convs, seg0.spanMs);
+        if (j.pages_with_current_count) seg0.pageCount = Object.assign({}, seg0.pageCount, j.pages_with_current_count);
+        seg0.cursor = (convs.length && j.next_cursor) ? j.next_cursor : null;
+        stitch();
+        if (onProgress) onProgress(seg0.items.length, seg0.items);
+        if (seg0.items.length === before || !seg0.cursor || isRangeSatisfied(seg0.set)) break;
+        // Bổ sung luồng phụ thay những luồng đã khâu/chết, luôn giữ ~10 luồng chạy phía trước
+        const alive = segments.filter((s) => !s.absorbed && s.cursor).length;
+        for (let s = alive; s < STRIDES.length; s++) spawnHelper();
       }
-      cursor = j.next_cursor || null;
-      if (onProgress) onProgress(rows.length);
-      if (!cursor || !convs.length) break;
+      helpersDone = true;
+      logLine('⚡⚡ Tải đa luồng 1 page: ' + seg0.items.length + ' chat trong ' + ((Date.now() - startedAt) / 1000).toFixed(1) + 's');
+      return { ok: true, rows: seg0.items };
     }
-    return { ok: true, rows };
   }
+
 
   /* ============================ LỌC TAG "CHỐT"/"CHẶN" LÚC GỬI ============================
      Trong lúc chờ gửi, sale có thể đã gắn tag "…chốt" (đã chốt đơn — KHÔNG được gửi tiếp)
@@ -1034,10 +1448,10 @@
           + (banNames.length > 3 ? '… +' + (banNames.length - 3) + ' tag' : '');
         logLine('🔎 Lọc tag lúc gửi: trang có ' + banNames.length + ' tag cấm (' + preview
           + ') — CHỈ bỏ qua chat nào THẬT SỰ đang gắn 1 trong các tag này; chat không có tag không bị ảnh hưởng.');
-        // CHẶN TREO: tối đa 2 trang hoặc 5 giây
+        // CHẶN TREO: tối đa 1 trang (các chat vừa gắn tag mới nhất) hoặc 1.8 giây
         const res = await Promise.race([
-          loadListViaApi(null, { forceTags: Array.from(banIds), maxPages: 2 }),
-          sleep(5000).then(() => ({ ok: false, error: 'quá 5s chờ API — dùng 2 lớp còn lại' })),
+          loadListViaApi(null, { forceTags: Array.from(banIds), maxPages: 1 }),
+          sleep(1800).then(() => ({ ok: false, error: 'quá 1.8s chờ API — dùng 2 lớp còn lại' })),
         ]);
         if (res.ok) {
           (res.rows || []).forEach((r) => {
@@ -1077,8 +1491,13 @@
 
   // Danh sách là virtual list (rc-virtual-list): chỉ render các dòng đang thấy.
   // Khi người dùng bấm "⚡ Tải danh sách": PHẢI XÓA SẠCH DANH SÁCH CŨ (state.allRows = null)
-  // rồi tải lại danh sách mới hoàn toàn từ đầu.
+  // rồi tải lại danh sách mới hoàn toàn từ đầu. Nếu đang tải dở mà bấm lần 2 → dừng ngay & dùng số chat đã tải!
   async function scanFullList() {
+    if (state.scanning) {
+      state.scanStopRequested = true;
+      logLine('⏹ Đã yêu cầu dừng tải danh sách — dùng ngay số chat vừa tải!');
+      return;
+    }
     const scroller = getScroller();
     if (!scroller) {
       logLine('⚠ Không tìm thấy khung danh sách đoạn chat (#conversationList)');
@@ -1087,137 +1506,177 @@
     const btn = shadow && shadow.getElementById('ssb-scan');
     const setBtn = (t) => { if (btn) btn.textContent = t; };
 
-    // XÓA SẠCH DANH SÁCH CŨ TRƯỚC KHI TẢI LẠI — tránh giữ lại dữ liệu/thứ tự cũ gây lỗi
-    state.allRows = null;
-    if (state.mode !== 'saved') {
-      state.matches = [];
-    }
-    highlightRows();
-    render();
+    state.scanning = true;
+    state.scanStopRequested = false;
 
-    // 1) TẢI QUA API — siêu nhanh, không cuộn (đúng request app dùng để tải danh sách)
-    logLine('⚡ Đã xóa danh sách cũ — đang tải lại danh sách mới qua API…');
-    setBtn('⏳ API…');
-    const api = await loadListViaApi((n) => setBtn('⏳ ' + n + ' chat…'));
-    if (api && api.ok && api.rows.length) {
-      // kiểm tra khớp với các dòng đang thấy trên màn hình:
-      //  - thiếu dòng nào → API khác màn hình → quét giao diện
-      //  - các dòng liền nhau trên màn hình mà lệch thứ tự xa trong API → có bộ lọc → quét giao diện
-      const vis = visibleRows();
-      const byId = new Map(api.rows.map((r) => [r.id, r]));
-      let missing = 0, scattered = 0;
-      const missSample = [];
-      for (let i = 0; i < vis.length; i++) {
-        if (!byId.has(vis[i].id)) {
-          missing++;
-          if (missSample.length < 3) missSample.push(vis[i].id);
-        }
-        if (i > 0) {
-          const a = byId.get(vis[i - 1].id), b = byId.get(vis[i].id);
-          if (a && b && Math.abs(a.order - b.order) > 3) scattered++;
-        }
+    try {
+      // XÓA SẠCH DANH SÁCH CŨ TRƯỚC KHI TẢI LẠI — tránh giữ lại dữ liệu/thứ tự cũ gây lỗi
+      state.allRows = null;
+      if (state.mode !== 'saved') {
+        state.matches = [];
       }
-      const scatterLimit = Math.max(2, Math.ceil(vis.length * 0.2));
-      logLine('ℹ API: ' + api.rows.length + ' chat · màn hình: ' + vis.length + ' dòng · thiếu: '
-        + missing + ' · lệch thứ tự: ' + scattered
-        + (missing ? ' · id thiếu: ' + missSample.join(', ') : ''));
-      if (!vis.length || (missing === 0 && scattered <= scatterLimit)) {
-        const found = new Map(api.rows.map((r) => [r.id, { ...r }]));
-        // cập nhật tên/giờ/loại theo app cho các dòng đang thấy trên màn hình
-        vis.forEach((r) => {
-          if (found.has(r.id)) found.set(r.id, { ...found.get(r.id), ...r });
-        });
-        let ord = 0;
-        found.forEach((v) => { v.order = ord++; });
-        state.allRows = found;
-        setBtn('⚡ Tải danh sách (' + found.size + ' chat)');
-        logLine('⚡ Tải qua API: ' + found.size + ' chat — không cần cuộn');
+      highlightRows();
+      render();
+
+      // 1) TẢI ĐA LUỒNG QUA API — siêu nhanh, không cuộn, cập nhật live từng chặng
+      logLine('⚡ Đã xóa danh sách cũ — đang tải lại danh sách mới đa luồng qua API (bấm nút lần nữa nếu muốn dừng & dùng ngay)…');
+      setBtn('⏹ Dừng tải (0 chat)');
+      let lastLiveSync = 0;
+      let lastSyncedLen = 0;
+      const syncLiveRows = (rowsArr) => {
+        if (!Array.isArray(rowsArr) || !rowsArr.length) return;
+        const now = Date.now();
+        if (now - lastLiveSync < 400) return;
+        lastLiveSync = now;
+        // NỐI THÊM PHẦN MỚI (incremental): seg0.items chỉ NỐI DÀI ở đuôi nên chỉ việc
+        // thêm các dòng từ vị trí đã đồng bộ — không dựng lại Map toàn bộ sau mỗi chặng
+        // (trước đây danh sách 20–30k chat bị dựng lại từ đầu mỗi 220ms → chậm dần theo độ dài).
+        if (!state.allRows || rowsArr.length < lastSyncedLen) {
+          state.allRows = new Map();
+          lastSyncedLen = 0;
+        }
+        for (let i = lastSyncedLen; i < rowsArr.length; i++) {
+          const r = rowsArr[i];
+          r.order = i;
+          state.allRows.set(r.id, r);
+        }
+        lastSyncedLen = rowsArr.length;
         computeMatches();
-        render();
-        return;
-      }
-      logLine('⚠ Danh sách API không khớp màn hình (có thể đang bật bộ lọc) — chuyển sang quét giao diện…');
-    } else {
-      logLine('⚠ ' + ((api && api.error) || 'Tải API thất bại') + ' — chuyển sang quét giao diện…');
-    }
+        const cntEl = shadow && shadow.getElementById('ssb-count');
+        if (cntEl) cntEl.textContent = String(state.matches.length);
+      };
 
-    // 2) QUÉT GIAO DIỆN (dự phòng) — luôn khớp đúng những gì đang thấy trên màn hình
-    const savedTop = scroller.scrollTop;
-    const found = new Map();
-    let guard = 0;
-    logLine('⚡ Đang quét danh sách trên giao diện…');
-
-    const collect = () => {
-      let added = 0;
-      visibleRows().forEach((r) => {
-        if (!found.has(r.id)) {
-          found.set(r.id, { ...r }); // thứ tự Map = thứ tự trên→dưới
-          added++;
-        }
+      const api = await loadListViaApi((n, rowsArr) => {
+        setBtn('⏹ Dừng tải (' + n + ' chat)');
+        syncLiveRows(rowsArr);
       });
-      return added;
-    };
-
-    scroller.scrollTop = 0;
-    await sleep(150);
-    collect();
-    setBtn('⏳ ' + found.size + ' chat…');
-
-    const step = Math.max(220, Math.round(scroller.clientHeight * 0.9));
-    let noNewStreak = 0;
-    while (guard++ < 5000) { // đủ cho cả nghìn chat (mỗi bước ~1 màn hình ≈ 8-12 dòng)
-      const prevTop = scroller.scrollTop;
-      scroller.scrollTop = prevTop + step;
-      let atBottom = false;
-      if (scroller.scrollTop === prevTop) {
-        // 1 số bản render cuộn bằng wheel event thay vì scrollTop
-        try {
-          scroller.dispatchEvent(new WheelEvent('wheel', { deltaY: step, bubbles: true, cancelable: true }));
-        } catch (e) { /* ignore */ }
-        await sleep(120);
-        atBottom = scroller.scrollTop === prevTop; // kéo không nổi = đáy danh sách
-      }
-      await sleep(90); // chờ render + app kích hoạt tải thêm (infinite scroll)
-      const added = collect();
-
-      if (atBottom) {
-        // đáy: chờ app tải nốt trang cuối (poll nhanh, tối đa ~450ms)
-        const t0 = Date.now();
-        while (Date.now() - t0 < 450) {
-          await sleep(110);
-          if (collect() > 0) { setBtn('⏳ ' + found.size + ' chat…'); }
+      if (api && api.ok && api.rows.length) {
+        // kiểm tra khớp với các dòng đang thấy trên màn hình:
+        //  - thiếu dòng nào → API khác màn hình → quét giao diện
+        //  - các dòng liền nhau trên màn hình mà lệch thứ tự xa trong API → có bộ lọc → quét giao diện
+        const vis = visibleRows();
+        const byId = new Map(api.rows.map((r) => [r.id, r]));
+        let missing = 0, scattered = 0;
+        const missSample = [];
+        for (let i = 0; i < vis.length; i++) {
+          if (!byId.has(vis[i].id)) {
+            missing++;
+            if (missSample.length < 3) missSample.push(vis[i].id);
+          }
+          if (i > 0) {
+            const a = byId.get(vis[i - 1].id), b = byId.get(vis[i].id);
+            if (a && b && Math.abs(a.order - b.order) > 3) scattered++;
+          }
         }
-        break;
+        const scatterLimit = Math.max(2, Math.ceil(vis.length * 0.2));
+        logLine('ℹ API: ' + api.rows.length + ' chat · màn hình: ' + vis.length + ' dòng · thiếu: '
+          + missing + ' · lệch thứ tự: ' + scattered
+          + (missing ? ' · id thiếu: ' + missSample.join(', ') : ''));
+        if (!vis.length || (missing === 0 && scattered <= scatterLimit)) {
+          const found = new Map(api.rows.map((r) => [r.id, { ...r }]));
+          // cập nhật tên/giờ/loại theo app cho các dòng đang thấy trên màn hình
+          vis.forEach((r) => {
+            if (found.has(r.id)) found.set(r.id, { ...found.get(r.id), ...r });
+          });
+          let ord = 0;
+          found.forEach((v) => { v.order = ord++; });
+          state.allRows = found;
+          setBtn('⚡ Tải danh sách (' + found.size + ' chat)');
+          logLine('⚡ Tải qua API: ' + found.size + ' chat — không cần cuộn');
+          computeMatches();
+          render();
+          return;
+        }
+        logLine('⚠ Danh sách API không khớp màn hình (có thể đang bật bộ lọc) — chuyển sang quét giao diện…');
+      } else {
+        logLine('⚠ ' + ((api && api.error) || 'Tải API thất bại') + ' — chuyển sang quét giao diện…');
       }
-      if (added === 0) {
-        noNewStreak++;
-        if (noNewStreak >= 2) {
-          // 2 bước không thấy dòng mới giữa chừng → app có thể đang tải dở, chờ nốt rồi đi tiếp
-          await sleep(260);
-          collect();
+
+      // 2) QUÉT GIAO DIỆN (dự phòng tốc độ cao) — luôn khớp đúng những gì đang thấy trên màn hình
+      const savedTop = scroller.scrollTop;
+      const found = new Map();
+      let guard = 0;
+      logLine('⚡ Đang quét danh sách trên giao diện…');
+
+      const collect = () => {
+        let added = 0;
+        visibleRows().forEach((r) => {
+          if (!found.has(r.id)) {
+            const rdx = getReduxConvById(r.id, 0);
+            const extra = rdx ? convApiRow(rdx, found.size) : {};
+            found.set(r.id, { ...extra, ...r }); // thứ tự Map = thứ tự trên→dưới
+            added++;
+          }
+        });
+        return added;
+      };
+
+      scroller.scrollTop = 0;
+      await sleep(60);
+      collect();
+      setBtn('⏹ Dừng tải (' + found.size + ' chat)');
+
+      const step = Math.max(320, Math.round(scroller.clientHeight * 1.5));
+      let noNewStreak = 0;
+      while (guard++ < 5000 && !state.scanStopRequested) {
+        const prevTop = scroller.scrollTop;
+        scroller.scrollTop = prevTop + step;
+        let atBottom = false;
+        if (scroller.scrollTop === prevTop) {
+          try {
+            scroller.dispatchEvent(new WheelEvent('wheel', { deltaY: step, bubbles: true, cancelable: true }));
+          } catch (e) { /* ignore */ }
+          await sleep(60);
+          atBottom = scroller.scrollTop === prevTop;
+        }
+        await sleep(45);
+        const added = collect();
+        if (state.mode === 'range' && state.rangeStart && state.rangeEnd && found.has(state.rangeStart.id) && found.has(state.rangeEnd.id)) {
+          break;
+        }
+        if (atBottom) {
+          const t0 = Date.now();
+          while (Date.now() - t0 < 260 && !state.scanStopRequested) {
+            await sleep(65);
+            if (collect() > 0) { setBtn('⏹ Dừng tải (' + found.size + ' chat)'); }
+          }
+          break;
+        }
+        if (added === 0) {
+          noNewStreak++;
+          if (noNewStreak >= 2) {
+            await sleep(140);
+            collect();
+            noNewStreak = 0;
+          }
+        } else {
           noNewStreak = 0;
         }
-      } else {
-        noNewStreak = 0;
+        if (guard % 6 === 0) setBtn('⏹ Dừng tải (' + found.size + ' chat)');
       }
-      if (guard % 8 === 0) setBtn('⏳ ' + found.size + ' chat…');
+
+      scroller.scrollTop = savedTop;
+      await sleep(60);
+
+      visibleRows().forEach((r) => {
+        if (found.has(r.id)) found.set(r.id, { ...found.get(r.id), ...r });
+      });
+      let ord = 0;
+      found.forEach((v) => { v.order = ord++; });
+      state.allRows = found;
+      setBtn('⚡ Tải danh sách (' + found.size + ' chat)');
+      logLine('⚡ Tải xong: ' + found.size + ' chat trong danh sách');
+      computeMatches();
+      render();
+    } finally {
+      state.scanning = false;
+      state.scanStopRequested = false;
+      if (btn && state.allRows) {
+        setBtn('⚡ Tải danh sách (' + state.allRows.size + ' chat)');
+      } else if (btn) {
+        setBtn('⚡ Tải danh sách');
+      }
     }
-
-    scroller.scrollTop = savedTop;
-    await sleep(120);
-
-    // cập nhật dữ liệu mới nhất cho các dòng còn đang render
-    visibleRows().forEach((r) => {
-      if (found.has(r.id)) found.set(r.id, { ...found.get(r.id), ...r });
-    });
-    // gán thứ tự trên→dưới để dùng cho chọn chuỗi
-    let ord = 0;
-    found.forEach((v) => { v.order = ord++; });
-    state.allRows = found;
-    setBtn('⚡ Tải danh sách (' + found.size + ' chat)');
-    logLine('⚡ Tải xong: ' + found.size + ' chat trong danh sách');
-    computeMatches();
-    render();
   }
 
   /* ============================ GỬI TIN (API → EXTENSION → GIAO DIỆN) ============================ */
@@ -1653,10 +2112,7 @@
     try {
       const res = await adapter.send(payload, { timeout: 35000 });
       if (res && res.success) {
-        return { ok: true, id: (res.data && (res.data.timestamp || res.data.id)) || '', sendBy: 'extension', sent: true };
-      }
-      if (res && res.success === false) {
-        return { ok: false, sent: false, error: 'Extension không gửi được' };
+        return { ok: true, id: (res.data && (res.data.timestamp || res.data.id)) || '' };
       }
       return { ok: false, sent: 'maybe', error: 'Extension không phản hồi' };
     } catch (e) {
@@ -1664,14 +2120,33 @@
     }
   }
 
+  function normalizePhotoItems(photo) {
+    if (!photo) return [];
+    if (Array.isArray(photo.items) && photo.items.length) return photo.items;
+    if (photo.url || photo.id || photo.fbId) {
+      return [{
+        url: photo.url || '',
+        id: photo.id || '',
+        fbId: photo.fbId || (Array.isArray(photo.fbIds) && photo.fbIds[0]) || '',
+        w: photo.w || 0,
+        h: photo.h || 0,
+      }];
+    }
+    return [];
+  }
+
+  function hasValidApiPhoto(photo) {
+    if (!photo) return true;
+    const items = normalizePhotoItems(photo);
+    if (!items.length) return false;
+    if (Array.isArray(photo.fbIds) && photo.fbIds.length >= items.length && photo.fbIds.every(Boolean)) return true;
+    return items.every((x) => !!(x && x.fbId));
+  }
+
   // Dựng request gửi inbox ĐÚNG app (dùng chung cho sendViaApi và chế độ nhanh)
-  // Đối chiếu 13 request gửi THẬT của app trong tinnhan.har (2026-10-17, 11/13 thành công):
-  //   POST .../conversations/{id}/messages   (URL KHÔNG kèm access_token — auth bằng COOKIE jwt)
-  //   body: action=reply_inbox → [is_record_ctx_7_days=true nếu dr()] → message → [ảnh] →
-  //         send_by_platform=web
-  // is_record_ctx_7_days = cờ "cửa sổ 7 ngày quảng cáo" — app thêm đúng khi dr() (xem
-  // buildRequestBody trong _app: (0,ev.dr)()&&(j.is_record_ctx_7_days=!0)). THIẾU cờ này là #551
-  // oan cho mọi chat ngoài cửa sổ 24h; có cờ thì chat ngoài 24h từ quảng cáo ≤7 ngày vẫn gửi được.
+  // Đối chiếu 13 request gửi THẬT của app trong tinnhan.har & executeByApi (@946500) + buildRequestBody (@951000) trong _app:
+  //   • Gửi chữ hoặc 1 ảnh: multipart/form-data (action=reply_inbox, [is_record_ctx_7_days], message, content_id, attachment_id, content_url, width, height, send_by_platform=web)
+  //   • Gửi >= 2 ảnh (đa ảnh): application/json ({ action: 'reply_inbox', [is_record_ctx_7_days], message, content_ids, attachment_ids, content_urls, dimensions, send_by_platform: 'web' })
   function buildInboxSend(conv, text, photo) {
     const token = getToken();
     if (!token) return { error: 'Không tìm thấy access_token — hãy tải lại trang Pancake rồi thử lại' };
@@ -1679,60 +2154,72 @@
     const url = apiBase() + '/v1/pages/' + pageId
       + '/conversations/' + encodeURIComponent(conv.id)
       + '/messages';
-    const fd = new FormData();
-    fd.append('action', 'reply_inbox');
-    // ĐÚNG buildRequestBody của app: dr() đúng (khách NGOÀI 24h từ quảng cáo ≤7 ngày, page bật
-    // ctx_7_days_enabled) → thêm is_record_ctx_7_days=true — THIẾU field này là #551 oan cho
-    // các chat ngoài cửa sổ 24h (đối chiếu 13 request gửi thật của app trong tinnhan.har
-    // 2026-10-17: field này có ở TẤT CẢ, 11/13 thành công). dr() sai → KHÔNG thêm (như curl cũ).
+    let ctx7 = false;
     try {
       const full7 = peekConv(conv) || conv;
-      if (isRecordCtx7Days(full7)) fd.append('is_record_ctx_7_days', 'true');
+      if (isRecordCtx7Days(full7)) ctx7 = true;
     } catch (e) { /* thiếu dữ liệu → gửi như request thường */ }
+
+    const items = normalizePhotoItems(photo);
+    if (items.length > 1) {
+      const fbIds = (Array.isArray(photo.fbIds) && photo.fbIds.length >= items.length)
+        ? photo.fbIds.slice(0, items.length)
+        : items.map((x) => x.fbId || '');
+      const jsonBody = {
+        action: 'reply_inbox',
+        message: text == null ? '' : text,
+        content_ids: items.map((x) => x.id || ''),
+        attachment_ids: fbIds,
+        content_urls: items.map((x) => x.url || ''),
+        dimensions: items.map((x) => ({ width: Number(x.w) || 0, height: Number(x.h) || 0 })),
+        send_by_platform: 'web',
+      };
+      if (ctx7) jsonBody.is_record_ctx_7_days = true;
+      return { url: url, isJson: true, jsonBody: jsonBody };
+    }
+
+    const fd = new FormData();
+    fd.append('action', 'reply_inbox');
+    if (ctx7) fd.append('is_record_ctx_7_days', 'true');
     fd.append('message', text);
-    if (photo && photo.fbId) {
-      // đúng field + đúng THỨ TỰ request thật của app khi gửi ảnh (đã so khớp curl):
+    const p0 = items[0] || photo;
+    const fbId0 = (p0 && p0.fbId) || (photo && photo.fbId) || (photo && Array.isArray(photo.fbIds) && photo.fbIds[0]) || '';
+    if (p0 && fbId0) {
+      // đúng field + đúng THỨ TỰ request thật của app khi gửi 1 ảnh (đã so khớp curl):
       // content_id → attachment_id → content_url → width → height
-      if (photo.id) fd.append('content_id', photo.id);
-      fd.append('attachment_id', photo.fbId);
-      fd.append('content_url', photo.url);
-      if (photo.w) fd.append('width', String(photo.w));
-      if (photo.h) fd.append('height', String(photo.h));
+      if (p0.id) fd.append('content_id', p0.id);
+      fd.append('attachment_id', fbId0);
+      fd.append('content_url', p0.url);
+      if (p0.w) fd.append('width', String(p0.w));
+      if (p0.h) fd.append('height', String(p0.h));
     }
     fd.append('send_by_platform', 'web'); // request thật của app luôn có (cả text lẫn ảnh)
-    return { url: url, fd: fd };
+    return { url: url, fd: fd, isJson: false };
   }
 
-  // ⚡ CHẾ ĐỘ NHANH: bắn request API qua cổng điều tiết apiSendLane (32 luồng HTTP song song),
+  // ⚡ CHẾ ĐỘ NHANH: bắn request API qua cổng điều tiết apiSendLane (64 luồng HTTP song song),
   // KHÔNG chờ server trả lời ở vòng ngoài — báo "đã gửi" tức thì, tránh đổ 7.000 fetch() cùng 1ms
   // làm nghẽn mạng Chrome. Nếu gặp HTTP 429 (rate-limit tạm thời, tin chắc chắn chưa xử lý) thì
   // tự động thử lại 1 lần sau 600ms.
   // Response xem TRONG NỀN: OK → im lặng; THUA RÕ (4xx/success=false) → bù Ext/Socket trong nền;
   // KHÔNG RÕ (5xx/lỗi mạng) → chỉ báo "không rõ" — KHÔNG gửi lại để tránh trùng tin.
   function fireApiAndWatch(conv, text, photo) {
-    if (photo && !photo.fbId) return { ok: false, sent: false, error: 'Không có attachment ảnh cho API' };
+    if (photo && !hasValidApiPhoto(photo)) return { ok: false, sent: false, error: 'Không có attachment ảnh cho API' };
     const req = buildInboxSend(conv, text, photo);
     if (req.error) return { ok: false, sent: false, error: req.error };
     if (state.stopRequested) return { ok: false, sent: false, error: 'Đã dừng' };
     const myRun = runSeq;
     apiSendLane(async () => {
       if (myRun !== runSeq || state.stopRequested) return;
-      let res = await fetch(req.url, {
-        method: 'POST',
-        body: req.fd,
-        headers: { Accept: 'application/json' },
-        credentials: 'include',
-      });
+      const makeFetchOpts = (rObj) => (rObj.isJson
+        ? { method: 'POST', body: JSON.stringify(rObj.jsonBody), headers: { Accept: 'application/json', 'Content-Type': 'application/json' }, credentials: 'include' }
+        : { method: 'POST', body: rObj.fd, headers: { Accept: 'application/json' }, credentials: 'include' });
+      let res = await fetch(req.url, makeFetchOpts(req));
       if (res && res.status === 429 && myRun === runSeq && !state.stopRequested) {
         await sleep(600);
         const req2 = buildInboxSend(conv, text, photo);
         if (!req2.error) {
-          res = await fetch(req2.url, {
-            method: 'POST',
-            body: req2.fd,
-            headers: { Accept: 'application/json' },
-            credentials: 'include',
-          });
+          res = await fetch(req2.url, makeFetchOpts(req2));
         }
       }
       if (myRun !== runSeq) return;
@@ -1772,31 +2259,22 @@
 
   // Đúng request mà _app-...js gửi khi nhắn tin thường (executeByApi + buildRequestBody):
   //   POST /api/v1/pages/{page_id}/conversations/{conversation.id}/messages?access_token=...
-  //   multipart/form-data: action=reply_inbox, message=<text>
-  // Nếu server từ chối dạng "(#10) ... ứng dụng khác đang kiểm soát thread" (Facebook handover)
-  // thì app tự fallback sang extension — mình làm đúng như vậy ở sendSmart().
+  //   multipart/form-data (1 ảnh / text) hoặc JSON (>= 2 ảnh): action=reply_inbox, message=<text>
   async function sendViaApi(conv, text, photo, ctx) {
     if (conv.type === 'comment') return sendCommentViaApi(conv, text, photo, ctx || {}); // chat bình luận → reply_comment
-    if (photo && !photo.fbId) return { ok: false, sent: false, error: 'Không có attachment ảnh cho API' };
+    if (photo && !hasValidApiPhoto(photo)) return { ok: false, sent: false, error: 'Không có attachment ảnh cho API' };
     const req = buildInboxSend(conv, text, photo);
     if (req.error) return { ok: false, sent: false, error: req.error };
     try {
-      let res = await fetch(req.url, {
-        method: 'POST',
-        body: req.fd,
-        headers: { Accept: 'application/json' },
-        credentials: 'include',
-      });
+      const makeFetchOpts = (rObj) => (rObj.isJson
+        ? { method: 'POST', body: JSON.stringify(rObj.jsonBody), headers: { Accept: 'application/json', 'Content-Type': 'application/json' }, credentials: 'include' }
+        : { method: 'POST', body: rObj.fd, headers: { Accept: 'application/json' }, credentials: 'include' });
+      let res = await fetch(req.url, makeFetchOpts(req));
       if (res && res.status === 429 && !state.stopRequested) {
         await sleep(600);
         const req2 = buildInboxSend(conv, text, photo);
         if (!req2.error) {
-          res = await fetch(req2.url, {
-            method: 'POST',
-            body: req2.fd,
-            headers: { Accept: 'application/json' },
-            credentials: 'include',
-          });
+          res = await fetch(req2.url, makeFetchOpts(req2));
         }
       }
       let data = {};
