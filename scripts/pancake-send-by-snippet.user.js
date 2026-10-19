@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE
 // @namespace    salescript
-// @version      1.71.0
+// @version      1.71.1
 // @description  BOTFAKE — chọn chuỗi chat (Alt+Click 2 đầu) hoặc theo snippet trong Pancake rồi gửi cùng 1 câu (kèm 1 hoặc nhiều ảnh nếu muốn) cho tất cả.
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -3878,6 +3878,7 @@
             dynamicDirect: true,
             fastOnly: !!opts.fastOnly,
             deferredCtx: opts.deferredCtx || null,
+            sockFired: !!opts.sockFired,
           };
         } else if (batchSkipApi) {
           directOpts = {
@@ -3885,6 +3886,7 @@
             dynamicDirect: true,
             fastOnly: !!opts.fastOnly,
             deferredCtx: opts.deferredCtx || null,
+            sockFired: !!opts.sockFired,
           };
         } else {
           directOpts = {
@@ -3892,6 +3894,7 @@
             dynamicDirect: true,
             fastOnly: !!opts.fastOnly,
             deferredCtx: opts.deferredCtx || null,
+            sockFired: !!opts.sockFired,
           };
         }
         if (opts.awaitDirect) {
@@ -3902,6 +3905,7 @@
           if (myRun !== runSeq) return;
           const nm2 = conv.name || conv.id;
           if (r.ok) {
+            if (r.fired) return; // bắn-nhả: xác nhận nền tự ghi nhận khi ACK về — không chốt sớm
             markDelivered(conv.id, r.sendBy || 'ext');
             postSendSideEffects(conv);
             logLine('✅ ' + nm2 + ' — gửi THÀNH CÔNG qua '
