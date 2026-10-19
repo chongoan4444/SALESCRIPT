@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE
 // @namespace    salescript
-// @version      1.75.0
+// @version      1.76.0
 // @description  BOTFAKE — chọn chuỗi chat (Alt+Click 2 đầu) hoặc theo snippet trong Pancake rồi gửi cùng 1 câu (kèm 1 hoặc nhiều ảnh nếu muốn) cho tất cả.
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -1105,7 +1105,7 @@
           if (isRangeSatisfied(allSet)) { stopAll = true; return; }
         }
       };
-      const POOL = Math.min(10, queue.length);
+      const POOL = Math.min(24, queue.length); // v1.76.0: HTTP/2+H3 — chạy gần như mọi page cùng lúc
       const workers = [];
       for (let w = 0; w < POOL; w++) {
         workers.push((async () => { while (queue.length && !stopAll && !stopped()) { const pid = queue.shift(); await chain(pid); } })());
@@ -1125,7 +1125,8 @@
         return (b.updatedTs || 0) - (a.updatedTs || 0);
       });
       rows.forEach((r, i) => { r.order = i; });
-      logLine('⚡⚡ Tải song song ' + probeIds.length + ' page: ' + rows.length + ' chat trong ' + ((Date.now() - startedAt) / 1000).toFixed(1) + 's');
+      logLine('⚡⚡ Tải song song ' + probeIds.length + ' page: ' + rows.length + ' chat trong ' + ((Date.now() - startedAt) / 1000).toFixed(1) + 's'
+        + ' (~' + Math.round(rows.length / Math.max(1, (Date.now() - startedAt) / 1000)) + ' chat/giây)');
       if (onProgress) onProgress(rows.length, rows);
       return { ok: true, rows };
     }
@@ -1175,7 +1176,9 @@
         return { ok: true, rows: seg0.items };
       }
 
-      const STRIDES = [1.1, 2.2, 3.3, 4.4, 5.5, 6.6, 7.7, 8.8, 9.9, 11];
+      // v1.76.0: 20 luồng phụ (thay vì 10), mỗi luồng bắt đầu cách nhau ~1 trang (1 span)
+      // → tổng 21 chuỗi cursor chạy song song trên cùng 1 page.
+      const STRIDES = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20];
       const samplePageId = parsed0.keyStr.split(':')[0] || String((p1.ids && p1.ids[0]) || '');
       const dummyKeyStr = samplePageId + ':' + samplePageId + '_99999999999999999999';
       const segments = [];
@@ -1292,7 +1295,8 @@
         for (let s = alive; s < STRIDES.length; s++) spawnHelper();
       }
       helpersDone = true;
-      logLine('⚡⚡ Tải đa luồng 1 page: ' + seg0.items.length + ' chat trong ' + ((Date.now() - startedAt) / 1000).toFixed(1) + 's');
+      logLine('⚡⚡ Tải đa luồng 1 page: ' + seg0.items.length + ' chat trong ' + ((Date.now() - startedAt) / 1000).toFixed(1) + 's'
+        + ' (~' + Math.round(seg0.items.length / Math.max(1, (Date.now() - startedAt) / 1000)) + ' chat/giây)');
       return { ok: true, rows: seg0.items };
     }
   }
@@ -1597,9 +1601,10 @@
           state.allRows.set(r.id, r);
         }
         lastSyncedLen = rowsArr.length;
-        computeMatches();
+        // v1.76.0: chỉ cập nhật số đếm O(1) — computeMatches() để dành chạy 1 lần khi tải xong,
+        // tránh nghẽn main-thread làm chậm giải mã JSON của các request danh sách đang bay.
         const cntEl = shadow && shadow.getElementById('ssb-count');
-        if (cntEl) cntEl.textContent = String(state.matches.length);
+        if (cntEl) cntEl.textContent = String(state.allRows.size);
       };
 
       const api = await loadListViaApi((n, rowsArr) => {
