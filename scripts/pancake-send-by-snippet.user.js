@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE
 // @namespace    salescript
-// @version      1.72.0
+// @version      1.73.0
 // @description  BOTFAKE — chọn chuỗi chat (Alt+Click 2 đầu) hoặc theo snippet trong Pancake rồi gửi cùng 1 câu (kèm 1 hoặc nhiều ảnh nếu muốn) cho tất cả.
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -3468,23 +3468,15 @@
       ctx.gid = await resolveGlobalId(full, threadId, conv.id, conv.fromPsid, ctx.gidForceFind, ctx);
       ctx.gidResolved = true;
     }
-    // Đúng chuẩn executeByExtOnce trong _app (@961019 & @965500):
-    // 1) Nếu chính findGlobalIdForConv của Extension vừa chạy và xác nhận không tìm thấy hội thoại
-    //    trên Facebook (ctx.noGidConfirmedByExt === true) và cũng không có global_id thật → dừng ngay
-    //    (khớp 100% `if (!C && !S) return { success: !1, error: "no_global_id_found" }` tại @965500),
-    //    tuyệt đối không upload ảnh thừa và không gọi REPLY_INBOX_PHOTO lần 2 vào Extension!
+    // SỬA GỐC v1.73.0: findGlobalIdForConv trong bundle (@903213) trả null cho RẤT NHIỀU trường hợp
+    // (Extension mất kết nối, adapter trả success=false, không có data.globalId, hoặc exception),
+    // KHÔNG chỉ khi khách khóa nick. Vì vậy "chưa dò được global_id" không còn được coi là bằng
+    // chứng khách chết: vẫn gọi REPLY_INBOX_PHOTO đúng 1 lần bằng thread_id + globalUserId=null.
+    // Chỉ khi chính lệnh GỬI Extension trả thất bại rõ ràng mới xét kênh/API dự phòng ở sendOne.
     const rawGlobalId = ctx.gid || null;
     const globalUserId = (ctx && ctx.gidFromPsid && threadId) ? null : rawGlobalId;
-    if (!globalUserId && ctx && ctx.noGidConfirmedByExt) {
-      return {
-        ok: false,
-        sent: false,
-        recipientUnavailable: true,
-        error: 'Không tìm thấy hội thoại trên Facebook (khách đã khóa nick hoặc xóa chat)',
-      };
-    }
     if (!globalUserId && !threadId) {
-      return { ok: false, sent: false, error: 'Không có globalId — bỏ qua Ext' };
+      return { ok: false, sent: false, error: 'Không có globalId/thread_id — bỏ qua Ext' };
     }
 
     const token = getToken();
@@ -4007,14 +3999,20 @@
           return { ok: false, sent: false, deferredToExt: true, deferredCtx: ctx };
         }
         if (ctx.noGidConfirmedByExt && (!ctx.gid || ctx.gidFromPsid)) {
-          recycleUnusedFbId(pid0, ctx);
-          return {
-            ok: false,
-            sent: false,
-            recipientUnavailable: true,
-            tried: ['ext', 'socket'],
-            error: 'Ext: Không tìm thấy global_id của khách (khách đã khóa nick hoặc xóa tài khoản)',
-          };
+          // Chưa hề có tin nào được bắn cho chat này, nên cứu hộ ở đây không thể gây trùng:
+          // thử Extension bằng thread_id trước, sau đó API bằng conversation_id (đúng fallback
+          // của luồng gửi tay trong _app: extension -> socket -> api). Không còn chốt oan
+          // "khách đã khóa nick" chỉ vì bước DÒ global_id trả null.
+          ctx.noGidConfirmedByExt = false;
+          ctx.extThreadOnlyRescue = true;
+          ctx.gid = null;
+          ctx.gidFromPsid = false;
+          ctx.gidResolved = true;
+          const canApiRescue = !batchSkipApi && seq.indexOf('api') < 0 && !(photo && !photo.fbId);
+          if (canApiRescue) seq.push('api');
+          logLine('🛟 ' + (conv.name || conv.id)
+            + ' — chưa dò được global_id; chưa kết luận khách khóa nick, sẽ thử Extension theo thread_id'
+            + (canApiRescue ? ' và API theo conversation_id như đường gửi tay' : ''));
         }
       }
       const pid = (ctx.full && (ctx.full.page_id || ctx.full.pageId)) || pid0;
