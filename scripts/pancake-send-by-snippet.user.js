@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE
 // @namespace    salescript
-// @version      1.77.0
+// @version      1.78.0
 // @description  BOTFAKE — chọn chuỗi chat (Alt+Click 2 đầu) hoặc theo snippet trong Pancake rồi gửi cùng 1 câu (kèm 1 hoặc nhiều ảnh nếu muốn) cho tất cả.
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -747,7 +747,9 @@
         if (abortTimer) { clearTimeout(abortTimer); abortTimer = null; }
         if (r.status === 429 || r.status >= 500) {
           lastErr = 'HTTP ' + r.status;
-          // 429 = server đang giới hạn tốc độ: nghỉ DÀI + jitter để các request thử lại không dội cùng lúc
+          // Đường tải danh sách (noRetry429): trả về NGAY để cổng điều tốc trung tâm hạ nhịp —
+          // tuyệt đối không tự thử lại tại đây (ôm suất chờ nhiều giây chính là nguyên nhân v1.77 siêu chậm).
+          if (r.status === 429 && reqOpts && reqOpts.noRetry429) return { ok: false, error: lastErr };
           if (t < max) { await sleep(r.status === 429 ? (1100 * t + Math.floor(Math.random() * 500)) : 400 * t); continue; }
           return { ok: false, error: lastErr };
         }
@@ -1021,7 +1023,7 @@
     // thì hạ trần (tối thiểu 3) + đóng băng chung 1,5s cho MỌI chuỗi; chạy êm 24 request liên
     // tiếp thì nâng dần (tối đa 12). Các luồng phụ vẫn sinh đủ 20 để phủ dữ liệu, chỉ request
     // thật mới phải qua cổng.
-    const listGate = { inFlight: 0, limit: 8, cooldownUntil: 0, okStreak: 0, hit429: 0 };
+    const listGate = { inFlight: 0, limit: 6, cooldownUntil: 0, okStreak: 0, hit429: 0 };
     const gateAcquire = async () => {
       for (;;) {
         if (stopped()) return false;
@@ -1037,11 +1039,11 @@
       if (was429) {
         listGate.hit429++;
         listGate.okStreak = 0;
-        listGate.limit = Math.max(3, listGate.limit - 2);
-        listGate.cooldownUntil = Date.now() + 1500;
+        listGate.limit = Math.max(2, listGate.limit - 1); // hạ NHẸ tay (v1.77 hạ -2 + ôm suất thử lại gây siêu chậm)
+        listGate.cooldownUntil = Date.now() + 2500;
       } else {
         listGate.okStreak++;
-        if (listGate.okStreak >= 24 && listGate.limit < 12) { listGate.limit++; listGate.okStreak = 0; }
+        if (listGate.okStreak >= 16 && listGate.limit < 10) { listGate.limit++; listGate.okStreak = 0; }
       }
     };
 
@@ -1052,7 +1054,7 @@
       if (!(await gateAcquire())) return { ok: false, error: 'stopped' };
       let res = null;
       try {
-        res = await fetchJson(req.url, eo.tries || 3, { method: req.method, bodyObj: req.bodyObj, timeoutMs: eo.timeoutMs || 12000 });
+        res = await fetchJson(req.url, eo.tries || 3, { method: req.method, bodyObj: req.bodyObj, timeoutMs: eo.timeoutMs || 12000, noRetry429: true });
       } finally {
         gateRelease(!!(res && !res.ok && /429/.test(res.error || '')));
       }
@@ -1124,7 +1126,7 @@
         while (guard++ < 1500 && !stopAll && !stopped()) {
           const res = await fetchPage({}, seg.cursor, seg.items.length, { singlePageId: pid, tries: seg.started ? 2 : 3, timeoutMs: 12000 });
           if (!res.ok) {
-            if (/429/.test(res.error || '') && (seg.retry429 = (seg.retry429 || 0) + 1) <= 6) { await sleep(1500 + Math.random() * 800); continue; }
+            if (/429/.test(res.error || '') && (seg.retry429 = (seg.retry429 || 0) + 1) <= 12) { await sleep(1200 + Math.random() * 800); continue; }
             if (!seg.started) firstPageErrors++; else midErrors++; return;
           }
           seg.started = true;
@@ -1299,7 +1301,7 @@
           while (!helpersDone && !stopped() && !seg.absorbed && seg.cursor) {
             const res = await fetchPage(seg.pageCount, seg.cursor, seg.estCount + seg.items.length, { forceMulti: forceMultiEndpoint, tries: 2, timeoutMs: 10000 });
             if (!res.ok) {
-              if (/429/.test(res.error || '') && (seg.retry429 = (seg.retry429 || 0) + 1) <= 6) { await sleep(1500 + Math.random() * 800); continue; }
+              if (/429/.test(res.error || '') && (seg.retry429 = (seg.retry429 || 0) + 1) <= 12) { await sleep(1200 + Math.random() * 800); continue; }
               return;
             }
             const j = res.data || {};
@@ -1326,7 +1328,7 @@
         const res = await fetchPage(seg0.pageCount, seg0.cursor, seg0.items.length, { forceMulti: forceMultiEndpoint, tries: 3, timeoutMs: 12000 });
         if (!res.ok) {
           // 429 không được cắt đứt danh sách: nghỉ cho server hạ nhiệt rồi tải tiếp ĐÚNG cursor này
-          if (/429/.test(res.error || '') && (seg0.retry429 = (seg0.retry429 || 0) + 1) <= 6) { await sleep(1800); continue; }
+          if (/429/.test(res.error || '') && (seg0.retry429 = (seg0.retry429 || 0) + 1) <= 12) { await sleep(1500); continue; }
           break;
         }
         const j = res.data || {};
