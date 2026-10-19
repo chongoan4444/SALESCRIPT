@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE
 // @namespace    salescript
-// @version      1.69.0
+// @version      1.70.0
 // @description  BOTFAKE — chọn chuỗi chat (Alt+Click 2 đầu) hoặc theo snippet trong Pancake rồi gửi cùng 1 câu (kèm 1 hoặc nhiều ảnh nếu muốn) cho tất cả.
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -2884,7 +2884,7 @@
   const socketRejectStreak = {};
   const socketReconnectPromises = {};
   const socketLastPublishAt = {};
-  const SOCKET_MIN_PACE_MS = 4; // Giãn nhịp vi mô 4ms giữa 2 khung /ls_req trên cùng 1 page (250 tin/s, chống FB MQTT burst-reject mà không giảm tốc!)
+  const SOCKET_MIN_PACE_MS = 2; // Giãn nhịp vi mô 2ms giữa 2 khung /ls_req trên cùng 1 page (500 tin/s, chống FB MQTT burst-reject mà không giảm tốc!)
 
   async function paceSocketPublish(pageId) {
     const pid = String(pageId || '');
@@ -3645,10 +3645,10 @@
   const API_SEND_PARALLEL = 48;
   const CTX_FETCH_PARALLEL = 96;
   const PHOTO_UPLOAD_PARALLEL = 96;
-  const GID_EXT_PARALLEL = 16;
+  const GID_EXT_PARALLEL = 24;
   const PREP_PARALLEL_EXT = 160;  // số chat chưa có global_id chuẩn bị HTTP/WS song song (không bị chặn bởi gidExtLane)
   const BUS_PARALLEL_EXT = 6;     // số lệnh adapter.send (REPLY_INBOX_PHOTO) chạy song song
-  const BUS_PARALLEL_SOCKET = 32; // số frame Socket (/ls_req) in-flight tối ưu trên mỗi kết nối WebSocket (kèm giãn nhịp 4ms chống burst)
+  const BUS_PARALLEL_SOCKET = 64; // số frame Socket (/ls_req) in-flight trên mỗi kết nối WebSocket (kèm giãn nhịp 2ms chống burst; vẫn giữ retry + socketRejectStreak bảo vệ)
   const SIDE_EFFECT_PARALLEL = 4; // số request nền (fill_admin_name / update_global_id) chạy song song
   function makeLane(parallel) {
     let active = 0;
@@ -4915,7 +4915,7 @@
     //   • Làn 2 (extBacklogWorkers — 16 worker chạy song song ở nền ngay từ giây thứ 0):
     //     Âm thầm rút các chat từ extBacklogQueue để hỏi Extension / WebSocket loadThread mà không bao giờ
     //     chiếm mất bất kỳ ghế nào của Làn 1!
-    const FAST_HTTP_SOCKET_POOL = 128;
+    const FAST_HTTP_SOCKET_POOL = 160;
     const EXT_BACKLOG_WORKERS = 48;
     let gtextRef = '';
     const sendBatch = async (gtext, batch) => {
@@ -4976,6 +4976,15 @@
           }
         }
       };
+
+      // ⚡ GID PREFETCH (v1.70.0): pipeline chạy nền SONG SONG với làn gửi, đi trước để nạp sẵn
+      // ngữ cảnh + global_id (GET /messages, có dedupe inflight trong ensureConvCtx) cho các chat
+      // phía sau — tới lượt worker gửi thì gid đã có sẵn trong cache (0ms), không phải đứng chờ HTTP.
+      // Không await: prefetch chậm hơn làn gửi cũng vô hại (toàn cache hit), nhanh hơn thì làn gửi bứt tốc.
+      runPool(batch, async (c) => {
+        if (state.stopRequested) return;
+        try { await ensureConvCtx(c, { force: true }); } catch (e) { /* ignore */ }
+      }, 48).catch(() => {});
 
       const extWorkers = [];
       const nExtWorkers = Math.min(EXT_BACKLOG_WORKERS, Math.max(1, batch.length));
