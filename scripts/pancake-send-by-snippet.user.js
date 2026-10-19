@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE
 // @namespace    salescript
-// @version      1.73.0
+// @version      1.75.0
 // @description  BOTFAKE — chọn chuỗi chat (Alt+Click 2 đầu) hoặc theo snippet trong Pancake rồi gửi cùng 1 câu (kèm 1 hoặc nhiều ảnh nếu muốn) cho tất cả.
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -1476,40 +1476,47 @@
         if (!Array.isArray(defs) && Array.isArray(defsByPage)) defs = defsByPage;
         return !(defs || []).some((t) => tagBanName(String((t && (t.text || t.name || t.title || t.label)) || '')));
       });
-      for (let pi = 0; pi < pagesNoDefs.length; pi++) {
-        try {
-          const pid2 = pagesNoDefs[pi];
-          const sres = await fetchJson(apiBase() + '/v1/pages/' + encodeURIComponent(pid2)
-            + '/settings?access_token=' + encodeURIComponent(getToken() || '')
-            + '&separate_pos=true&separate_qr=true', 2, { timeoutMs: 8000 });
-          const stags = (sres && sres.ok && sres.data && sres.data.settings && sres.data.settings.tags) || [];
-          stags.forEach((t) => {
-            const nm = String((t && (t.text || t.name || t.title || t.label)) || '');
-            if (tagBanName(nm)) {
-              banIds.add(t.id);
-              banNameById[String(t.id)] = nm;
-              if (banNames.indexOf(nm) < 0) banNames.push(nm);
-            }
-          });
-        } catch (e) { /* thiếu bảng tag của 1 page không được làm hỏng lượt gửi */ }
-      }
-      if (!banIds.size) {
-        logLine('⚠ Không có bảng tag của trang — soi tag theo DÒNG CHAT + dữ liệu app (filledTags).');
-      }
       const tagOf = {}; // convId → TÊN tag cấm mà nó mang (để log cho user soi)
-      // Nạp TOÀN BỘ id chat dính tag cấm vào banGuard (quét hết mọi trang, không chỉ trang đầu)
+      // 🚀 BẮN NGAY (v1.75.0): KHÔNG await quét tag nữa — lượt gửi bắt đầu tức thì với 2 lớp lọc
+      // đồng bộ có sẵn (tag trên dòng chat + filledTags/dữ liệu app). Việc tải bảng tag còn thiếu
+      // + quét TOÀN BỘ chat dính tag cấm qua API chạy NỀN: nạp tới đâu, chốt chặn trước từng tin
+      // (sendOneAndLog late-gate, check banGuard.convIds) chặn tới đó + quét lại mỗi 3.000 tin.
       banGuard.nameById = banNameById;
       banGuard.tagIds = Array.from(banIds);
       banGuard.convIds = new Set();
-      if (banIds.size) {
+      const bgBanPrep = (async () => {
+        for (let pi = 0; pi < pagesNoDefs.length; pi++) {
+          try {
+            const pid2 = pagesNoDefs[pi];
+            const sres = await fetchJson(apiBase() + '/v1/pages/' + encodeURIComponent(pid2)
+              + '/settings?access_token=' + encodeURIComponent(getToken() || '')
+              + '&separate_pos=true&separate_qr=true', 2, { timeoutMs: 8000 });
+            const stags = (sres && sres.ok && sres.data && sres.data.settings && sres.data.settings.tags) || [];
+            stags.forEach((t) => {
+              const nm = String((t && (t.text || t.name || t.title || t.label)) || '');
+              if (tagBanName(nm)) {
+                banIds.add(t.id);
+                banNameById[String(t.id)] = nm;
+                if (banNames.indexOf(nm) < 0) banNames.push(nm);
+              }
+            });
+          } catch (e) { /* thiếu bảng tag của 1 page không được làm hỏng lượt gửi */ }
+        }
+        banGuard.nameById = banNameById;
+        banGuard.tagIds = Array.from(banIds);
+        if (!banIds.size) {
+          logLine('⚠ Không có bảng tag của trang — soi tag theo DÒNG CHAT + dữ liệu app (filledTags).');
+          return;
+        }
         const preview = banNames.slice(0, 3).map((x) => '"' + x + '"').join(', ')
           + (banNames.length > 3 ? '… +' + (banNames.length - 3) + ' tag' : '');
-        logLine('🔎 Lọc tag lúc gửi: trang có ' + banNames.length + ' tag cấm (' + preview
-          + ') — đang quét TOÀN BỘ chat dính các tag này qua API…');
+        logLine('🔎 Quét nền tag cấm: trang có ' + banNames.length + ' tag cấm (' + preview
+          + ') — đang quét TOÀN BỘ chat dính các tag này qua API (vẫn bắn ngay, chat nào bị phát hiện sẽ bị chặn ở chốt trước từng tin)…');
         const sweep0 = await sweepBannedConvIds();
         Object.keys(sweep0.nameOf || {}).forEach((cid) => { tagOf[cid] = sweep0.nameOf[cid]; });
-        logLine('🛡 Đã nạp ' + banGuard.convIds.size + ' chat đang dính tag cấm — các chat này sẽ bị bỏ qua 100%.');
-      }
+        logLine('🛡 Đã nạp ' + banGuard.convIds.size + ' chat đang dính tag cấm — từ đây các chat này sẽ bị bỏ qua 100%.');
+      })();
+      bgBanPrep.catch(() => {});
       // BẰNG CHỨNG ĐỦ 3 LỚP cho từng chat — lớp nào bắt được trước thì dùng, log kèm tên tag:
       //   1) tag hiển thị TRÊN DÒNG CHAT (DOM) — mắt thấy gì dùng nấy
       //   2) dữ liệu app: filledTags (app tự map tên) / tags id + bảng tag trang
