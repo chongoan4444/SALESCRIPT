@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE
 // @namespace    salescript
-// @version      1.70.0
+// @version      1.71.0
 // @description  BOTFAKE — chọn chuỗi chat (Alt+Click 2 đầu) hoặc theo snippet trong Pancake rồi gửi cùng 1 câu (kèm 1 hoặc nhiều ảnh nếu muốn) cho tất cả.
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -2934,7 +2934,7 @@
   // Hỗ trợ đầy đủ cả ẢNH (task label "46" với attachment_fbids, send_type: 3, source: 0) lẫn TEXT
   // (task label "46" với send_type: 1, source: 4456448) + watermark label "21", khớp 100% với
   // ef.Z.sendMessage (@831250) trong _app-9331d46f21a84eb1.v6.js!
-  async function socketPublishSend(helper, pageId, gid, text, attFbIds) {
+  async function socketPublishSend(helper, pageId, gid, text, attFbIds, firedCb) {
     let sock = helper.SOCKETS && helper.SOCKETS[pageId];
     const warm = socketWarmPromises[pageId];
     if (warm) {
@@ -3001,7 +3001,7 @@
     };
     await paceSocketPublish(pageId);
     const nextReqId = (typeof sock.requestId === 'number') ? (sock.requestId + 1) : null;
-    const g = await new Promise((resolve) => {
+    const publishPromise = new Promise((resolve) => {
       let done = false;
       const timer = setTimeout(() => {
         if (done) return;
@@ -3032,24 +3032,37 @@
           resolve(null);
         });
     });
-    if (!(g && g.payload)) {
-      socketNoAckStreak[pageId] = (socketNoAckStreak[pageId] || 0) + 1;
-      if (!isSocketAlive(helper.SOCKETS && helper.SOCKETS[pageId])) return { kind: 'dead' };
-      return { kind: 'noack' };
+    // Phân loại kết quả từ gói /ls_resp của FB (dùng chung cho cả đường chờ ACK lẫn đường bắn-nhả)
+    const classify = (g) => {
+      if (!(g && g.payload)) {
+        socketNoAckStreak[pageId] = (socketNoAckStreak[pageId] || 0) + 1;
+        if (!isSocketAlive(helper.SOCKETS && helper.SOCKETS[pageId])) return { kind: 'dead' };
+        return { kind: 'noack' };
+      }
+      socketNoAckStreak[pageId] = 0;
+      let resp = null;
+      try { resp = JSON.parse(g.payload); } catch (e) { return { kind: 'noack' }; }
+      const replaced = helper.findAllBlockActions(resp.step, 'replaceOptimsiticMessage') || [];
+      const failed = helper.findAllBlockActions(resp.step, 'markOptimisticMessageFailed') || [];
+      if (failed.length && !replaced.length) return { kind: 'rejected' };
+      // QUAN TRỌNG: Khi gửi CẢ ẢNH LẪN CHỮ (2 task label "46"), nếu chữ đi được (replaced.length > 0)
+      // nhưng ảnh bị từ chối (failed.length > 0), TUYỆT ĐỐI không được trả về 'ok' (sẽ làm mất ảnh mà chỉ có chữ!),
+      // mà phải báo 'photo_failed_text_ok' để sendViaSocket upload fbId mới và bắn bù riêng phần ảnh!
+      if (hasPhoto && hasText && failed.length > 0 && replaced.length > 0) {
+        return { kind: 'photo_failed_text_ok' };
+      }
+      return { kind: 'ok' };
+    };
+    // 🔥 NẤC 2 (v1.71.0): bắn xong NHẢ NGAY — không giữ worker chờ ACK của FB (vốn mất ~2,8s/tin).
+    // Kết quả thật được classify ở nền khi /ls_resp về và gọi firedCb đúng 1 lần.
+    if (typeof firedCb === 'function') {
+      publishPromise
+        .then((g) => { try { firedCb(classify(g)); } catch (e) { firedCb({ kind: 'noack' }); } })
+        .catch(() => firedCb({ kind: 'noack' }));
+      return { kind: 'fired' };
     }
-    socketNoAckStreak[pageId] = 0;
-    let resp = null;
-    try { resp = JSON.parse(g.payload); } catch (e) { return { kind: 'noack' }; }
-    const replaced = helper.findAllBlockActions(resp.step, 'replaceOptimsiticMessage') || [];
-    const failed = helper.findAllBlockActions(resp.step, 'markOptimisticMessageFailed') || [];
-    if (failed.length && !replaced.length) return { kind: 'rejected' };
-    // QUAN TRỌNG: Khi gửi CẢ ẢNH LẪN CHỮ (2 task label "46"), nếu chữ đi được (replaced.length > 0)
-    // nhưng ảnh bị từ chối (failed.length > 0), TUYỆT ĐỐI không được trả về 'ok' (sẽ làm mất ảnh mà chỉ có chữ!),
-    // mà phải báo 'photo_failed_text_ok' để sendViaSocket upload fbId mới và bắn bù riêng phần ảnh!
-    if (hasPhoto && hasText && failed.length > 0 && replaced.length > 0) {
-      return { kind: 'photo_failed_text_ok' };
-    }
-    return { kind: 'ok' };
+    const g = await publishPromise;
+    return classify(g);
   }
 
   const updatedGidConvSet = new Set();
@@ -3201,7 +3214,10 @@
 
     try {
       const pageLane = getPageSocketLane(pageId);
-      let raw = await pageLane(() => socketPublishSend(helper, pageId, gid, text, attFbIds));
+      // settleSocketResult: TOÀN BỘ xử lý sau khi có kết quả publish (retry khi bị từ chối, bù ảnh,
+      // phân loại lỗi…) — dùng chung cho đường chờ ACK (lô nhỏ) và đường bắn-nhả (lô lớn, chạy nền).
+      const settleSocketResult = async (rawIn) => {
+      let raw = rawIn;
       // Tiêu thụ xong fbId của lần bắn này: nếu có bắn lại phải lấy fbId mới tinh
       if (photo && !inBlockedCluster) ctx.nonReusableFbId = null;
 
@@ -3355,6 +3371,46 @@
         return { ok: false, sent: false, error: 'Socket không kết nối' };
       }
       return { ok: false, sent: 'maybe', error: 'Socket không rõ kết quả' + (reason ? ' (' + reason + ')' : '') };
+      };
+      // 🔥 NẤC 2 (v1.71.0): bắn-nhả cho lô lớn — publish xong trả kết quả ngay cho worker đi bắn tiếp;
+      // ACK thật của FB về sau sẽ chạy settleSocketResult ở nền: thành công → markDelivered (im lặng,
+      // tổng hợp tự cập nhật), bị từ chối → bù kênh khác đúng 1 lần qua scheduleBuRetry, không rõ → ⚠.
+      if (ctx.sockFired) {
+        const myRun = runSeq;
+        const finalizeSockBg = (res) => {
+          if (myRun !== runSeq) return;
+          const nm = conv.name || conv.id;
+          if (res && res.ok) { markDelivered(conv.id, 'socket'); postSendSideEffects(conv); return; }
+          if (res && (res.uncertain || res.sent === 'maybe')) {
+            if (window && typeof window.__botfakeTrackStatus__ === 'function') window.__botfakeTrackStatus__(conv.id, 'uncertain');
+            logLine('⚠ ' + nm + ' — ' + (res.error || 'Socket không rõ kết quả') + ' (xác nhận nền — không gửi thêm để tránh trùng)');
+            return;
+          }
+          if (res && !res.recipientUnavailable && isRetryableLoss(res.error || '')) {
+            logLine('❌ ' + nm + ' — ' + (res.error || 'Socket thất bại') + ' (xác nhận nền — sẽ bù kênh khác)');
+            scheduleBuRetry(conv, text, photo, nm, 'Socket bị từ chối (xác nhận nền)', ['socket']);
+          } else {
+            if (window && typeof window.__botfakeTrackStatus__ === 'function') window.__botfakeTrackStatus__(conv.id, 'fail');
+            logLine('❌ ' + nm + ' — ' + ((res && res.error) || 'Socket thất bại') + ' (xác nhận nền)');
+          }
+        };
+        const settleAndFinalize = (rawKind) => {
+          if (myRun !== runSeq) return;
+          settleSocketResult(rawKind)
+            .then((res) => { if (myRun === runSeq) finalizeSockBg(res); })
+            .catch(() => {});
+        };
+        pageLane(() => socketPublishSend(helper, pageId, gid, text, attFbIds, settleAndFinalize))
+          .then((imm) => {
+            if (!imm || imm.kind === 'fired') return;
+            settleAndFinalize(imm.kind ? imm : { kind: 'noack' });
+          })
+          .catch(() => settleAndFinalize({ kind: 'noack' }));
+        if (photo && !inBlockedCluster) ctx.nonReusableFbId = null;
+        return { ok: true, id: gid, sendBy: 'socket', sent: true, fired: true };
+      }
+      const rawSync = await pageLane(() => socketPublishSend(helper, pageId, gid, text, attFbIds));
+      return settleSocketResult(rawSync);
     } catch (e) {
       return { ok: false, sent: 'maybe', error: 'Socket lỗi: ' + (e && e.message || e) };
     }
@@ -3873,6 +3929,7 @@
     // ngữ cảnh dùng chung cho các kênh của CÙNG 1 chat: conversation, threadId, globalId, nonReusableFbId…
     const ctx = (opts.deferredCtx && typeof opts.deferredCtx === 'object') ? opts.deferredCtx : {};
     ctx.fastOnly = !!opts.fastOnly;
+    ctx.sockFired = !!opts.sockFired;
     ctx.hasTextMsg = !!(text && String(text).trim().length > 0);
     ctx.deferredToExt = false;
     if (!ctx.fastOnly && ctx.gidResolved && !ctx.gid) {
@@ -3974,7 +4031,7 @@
       }
       if (r.ok) {
         markChannel(conv.id, ch);
-        return { ok: true, id: r.id || '', sendBy: r.sendBy || ch, sent: true };
+        return { ok: true, id: r.id || '', sendBy: r.sendBy || ch, sent: true, fired: !!r.fired };
       }
       triedCh.push(ch);
       tried.push((ch === 'ext' ? 'Ext' : ch) + ': ' + (r.error || 'fail'));
@@ -4830,6 +4887,9 @@
         awaitDirect: true,
         fastOnly: !!(itemOpts && itemOpts.fastOnly),
         deferredCtx: (itemOpts && itemOpts.deferredCtx) || null,
+        // 🔥 Nấc 2 chỉ bật cho lô lớn (>50 tin): bắn-nhả qua Socket + xác nhận nền.
+        // Lô nhỏ vẫn chờ ACK trực tiếp để báo kết quả tức thì như cũ.
+        sockFired: totalAll > 50,
       };
       let r;
       if (photo) {
