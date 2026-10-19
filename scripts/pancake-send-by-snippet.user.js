@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE
 // @namespace    salescript
-// @version      1.71.2
+// @version      1.72.0
 // @description  BOTFAKE — chọn chuỗi chat (Alt+Click 2 đầu) hoặc theo snippet trong Pancake rồi gửi cùng 1 câu (kèm 1 hoặc nhiều ảnh nếu muốn) cho tất cả.
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -3070,6 +3070,10 @@
   // Khi chuẩn bị song song (resolveGlobalId + uploadOneTimePhoto) mà phát hiện chat đã khóa nick trước khi bắn,
   // fbId chưa dùng sẽ được cất vào spareFbIdPool[pageId] để chat sống tiếp theo lấy dùng ngay ở 0ms!
   const spareFbIdPool = {};
+  // 🔒 KHÓA CHỐNG TRÙNG (v1.72.0): các chat đã BẮN Socket ở chế độ bắn-nhả mà ACK chưa chốt.
+  // Khi chat còn trong tập này: không kênh nào được bắn thêm cho chat đó (kể cả bù Extension) —
+  // chỉ khi FB XÁC NHẬN TỪ CHỐI (rejected) thì mới được bù. Chặn đứng mọi đường bắn chồng gây lặp câu.
+  const sockFiredPending = new Set();
 
   function recycleUnusedFbId(pageId, ctx) {
     if (!ctx || !ctx.nonReusableFbId || !pageId) return;
@@ -3288,6 +3292,8 @@
         socketRejectStreak[pageId] = 0;
       }
       if (raw && raw.kind === 'rejected' && (!ctx || !ctx.gidFromPsid) && !ctx.socketRetriedOnce && (socketRejectStreak[pageId] || 0) <= 4) {
+        // Chat đã được kênh khác xác nhận đến nơi trong lúc chờ ACK → dừng, không bắn lại (chống trùng)
+        if (deliveredIds[conv.id]) return { ok: true, id: gid, sendBy: 'socket', sent: true };
         ctx.socketRetriedOnce = true;
         await sleep(100);
         // Kiểm tra xem trong 100ms đó WebSocket threadMappingStoreV2 có nạp được global_id mới hơn không
@@ -3337,7 +3343,8 @@
         // Khi chat ĐÃ CÓ global_id thật (!ctx.gidFromPsid) và ĐÃ THỬ ĐỦ 2 LẦN qua Socket cách xa nhau
         // (lần 1 ở Làn 1 + lần 2 ở Hồ Nền sau khi hết burst) mà Facebook WebSocket vẫn trả về
         // markOptimisticMessageFailed: 100% khách hiện không có mặt / đã khóa nick (fbErrorCode 1545041)!
-        const isConfirmedUnavailable = (!ctx || !ctx.gidFromPsid) && batchStats && batchStats.total > 50;
+        const isConfirmedUnavailable = ((!ctx || !ctx.gidFromPsid) && batchStats && batchStats.total > 50)
+          || !!(ctx && ctx.socketRetriedOnce); // đã bắn lại 1 lần vẫn bị từ chối = FB xác nhận khách không nhận tin
         return {
           ok: false,
           sent: false,
@@ -3376,8 +3383,14 @@
       // ACK thật của FB về sau sẽ chạy settleSocketResult ở nền: thành công → markDelivered (im lặng,
       // tổng hợp tự cập nhật), bị từ chối → bù kênh khác đúng 1 lần qua scheduleBuRetry, không rõ → ⚠.
       if (ctx.sockFired) {
+        if (sockFiredPending.has(conv.id)) {
+          // Đã bắn rồi và đang chờ ACK — tuyệt đối không bắn lần 2 (chống trùng tận gốc)
+          return { ok: true, id: gid, sendBy: 'socket', sent: true, fired: true };
+        }
+        sockFiredPending.add(conv.id);
         const myRun = runSeq;
         const finalizeSockBg = (res) => {
+          sockFiredPending.delete(conv.id);
           if (myRun !== runSeq) return;
           const nm = conv.name || conv.id;
           if (res && res.ok) { markDelivered(conv.id, 'socket'); postSendSideEffects(conv); return; }
@@ -3398,7 +3411,7 @@
           if (myRun !== runSeq) return;
           settleSocketResult(rawKind)
             .then((res) => { if (myRun === runSeq) finalizeSockBg(res); })
-            .catch(() => {});
+            .catch(() => { sockFiredPending.delete(conv.id); });
         };
         pageLane(() => socketPublishSend(helper, pageId, gid, text, attFbIds, settleAndFinalize))
           .then((imm) => {
@@ -4579,6 +4592,11 @@
   // hỗ trợ API/Extension. 'maybe'/đã đến nơi → DỪNG tuyệt đối (chống trùng).
   function scheduleBuRetry(conv, text, photo, name, why, tried) {
     if (!conv) return;
+    if (sockFiredPending.has(conv.id)) {
+      // Socket đã bắn và ACK chưa chốt — bù kênh khác lúc này có thể gây TRÙNG câu. Chờ xác nhận nền chốt.
+      logLine('⏳ ' + name + ' — đang chờ xác nhận Socket (bắn-nhả) — không bù chồng để tránh trùng');
+      return;
+    }
     if (deliveredIds[conv.id]) {
       // đã có kênh XÁC NHẬN thành công thật — không gửi lại (chống trùng). Có log để không im lặng.
       logLine('✓ ' + name + ' — tin đã đến nơi (xác nhận) — không bù.');
@@ -4732,6 +4750,7 @@
     buRetrySeq = 0;
     Object.keys(buRetryDone).forEach((k) => { delete buRetryDone[k]; });
     Object.keys(deliveredIds).forEach((k) => { delete deliveredIds[k]; });
+    sockFiredPending.clear();
     Object.keys(finalFailedIds).forEach((k) => { delete finalFailedIds[k]; });
     Object.keys(uncertainIds).forEach((k) => { delete uncertainIds[k]; });
     Object.keys(skippedLateIds).forEach((k) => { delete skippedLateIds[k]; });
