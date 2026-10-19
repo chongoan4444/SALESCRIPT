@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE
 // @namespace    salescript
-// @version      1.76.0
+// @version      1.77.0
 // @description  BOTFAKE — chọn chuỗi chat (Alt+Click 2 đầu) hoặc theo snippet trong Pancake rồi gửi cùng 1 câu (kèm 1 hoặc nhiều ảnh nếu muốn) cho tất cả.
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -747,7 +747,8 @@
         if (abortTimer) { clearTimeout(abortTimer); abortTimer = null; }
         if (r.status === 429 || r.status >= 500) {
           lastErr = 'HTTP ' + r.status;
-          if (t < max) { await sleep(400 * t); continue; }
+          // 429 = server đang giới hạn tốc độ: nghỉ DÀI + jitter để các request thử lại không dội cùng lúc
+          if (t < max) { await sleep(r.status === 429 ? (1100 * t + Math.floor(Math.random() * 500)) : 400 * t); continue; }
           return { ok: false, error: lastErr };
         }
         if (!r.ok) {
@@ -1014,12 +1015,48 @@
     };
     const stopped = () => state.scanStopRequested;
 
+    // 🧯 CỔNG ĐIỀU TỐC TẢI DANH SÁCH (v1.77.0): log console cho thấy server Pancake trả 429
+    // (Too Many Requests) hàng loạt khi mở 21 chuỗi cùng lúc — request bị từ chối phải thử lại
+    // nên tổng thời gian còn LÂU hơn. Cổng này: tối đa 8 request danh sách đang bay; hễ gặp 429
+    // thì hạ trần (tối thiểu 3) + đóng băng chung 1,5s cho MỌI chuỗi; chạy êm 24 request liên
+    // tiếp thì nâng dần (tối đa 12). Các luồng phụ vẫn sinh đủ 20 để phủ dữ liệu, chỉ request
+    // thật mới phải qua cổng.
+    const listGate = { inFlight: 0, limit: 8, cooldownUntil: 0, okStreak: 0, hit429: 0 };
+    const gateAcquire = async () => {
+      for (;;) {
+        if (stopped()) return false;
+        if (listGate.inFlight < listGate.limit && Date.now() >= listGate.cooldownUntil) {
+          listGate.inFlight++;
+          return true;
+        }
+        await sleep(60);
+      }
+    };
+    const gateRelease = (was429) => {
+      listGate.inFlight = Math.max(0, listGate.inFlight - 1);
+      if (was429) {
+        listGate.hit429++;
+        listGate.okStreak = 0;
+        listGate.limit = Math.max(3, listGate.limit - 2);
+        listGate.cooldownUntil = Date.now() + 1500;
+      } else {
+        listGate.okStreak++;
+        if (listGate.okStreak >= 24 && listGate.limit < 12) { listGate.limit++; listGate.okStreak = 0; }
+      }
+    };
+
     const fetchPage = async (pageCount, cursor, currentCount, extra) => {
       const eo = Object.assign({}, opts || {}, extra || {});
       const req = buildListRequest(pageCount, cursor, currentCount, token, eo.forceMulti || eo.singlePageId ? eo : opts);
       if (!req.ids.length) return { ok: false, error: 'Không xác định được page đang xem' };
-      const res = await fetchJson(req.url, eo.tries || 3, { method: req.method, bodyObj: req.bodyObj, timeoutMs: eo.timeoutMs || 12000 });
-      if (!res.ok) return { ok: false, error: res.error };
+      if (!(await gateAcquire())) return { ok: false, error: 'stopped' };
+      let res = null;
+      try {
+        res = await fetchJson(req.url, eo.tries || 3, { method: req.method, bodyObj: req.bodyObj, timeoutMs: eo.timeoutMs || 12000 });
+      } finally {
+        gateRelease(!!(res && !res.ok && /429/.test(res.error || '')));
+      }
+      if (!res || !res.ok) return { ok: false, error: (res && res.error) || 'fetch lỗi' };
       const j = res.data || {};
       if (j.success === false) return { ok: false, error: j.message || j.error || 'success=false' };
       return { ok: true, data: j, ids: req.ids, unreadFirst: req.unreadFirst };
@@ -1086,7 +1123,10 @@
         let guard = 0;
         while (guard++ < 1500 && !stopAll && !stopped()) {
           const res = await fetchPage({}, seg.cursor, seg.items.length, { singlePageId: pid, tries: seg.started ? 2 : 3, timeoutMs: 12000 });
-          if (!res.ok) { if (!seg.started) firstPageErrors++; else midErrors++; return; }
+          if (!res.ok) {
+            if (/429/.test(res.error || '') && (seg.retry429 = (seg.retry429 || 0) + 1) <= 6) { await sleep(1500 + Math.random() * 800); continue; }
+            if (!seg.started) firstPageErrors++; else midErrors++; return;
+          }
           seg.started = true;
           const j = res.data || {};
           const convs = j.conversations || [];
@@ -1126,7 +1166,8 @@
       });
       rows.forEach((r, i) => { r.order = i; });
       logLine('⚡⚡ Tải song song ' + probeIds.length + ' page: ' + rows.length + ' chat trong ' + ((Date.now() - startedAt) / 1000).toFixed(1) + 's'
-        + ' (~' + Math.round(rows.length / Math.max(1, (Date.now() - startedAt) / 1000)) + ' chat/giây)');
+        + ' (~' + Math.round(rows.length / Math.max(1, (Date.now() - startedAt) / 1000)) + ' chat/giây)'
+        + (listGate.hit429 ? ' · ⚠ dính 429×' + listGate.hit429 + ' (đã tự điều tốc)' : ''));
       if (onProgress) onProgress(rows.length, rows);
       return { ok: true, rows };
     }
@@ -1257,7 +1298,10 @@
           // treo/lỗi thì tự chết, tuyệt đối không chặn luồng gốc (không còn Promise.all theo vòng).
           while (!helpersDone && !stopped() && !seg.absorbed && seg.cursor) {
             const res = await fetchPage(seg.pageCount, seg.cursor, seg.estCount + seg.items.length, { forceMulti: forceMultiEndpoint, tries: 2, timeoutMs: 10000 });
-            if (!res.ok) return;
+            if (!res.ok) {
+              if (/429/.test(res.error || '') && (seg.retry429 = (seg.retry429 || 0) + 1) <= 6) { await sleep(1500 + Math.random() * 800); continue; }
+              return;
+            }
             const j = res.data || {};
             const convs = j.conversations || [];
             if (!convs.length) { seg.cursor = null; return; }
@@ -1280,7 +1324,11 @@
       while (guard++ < 1500 && seg0.cursor && !stopped()) {
         const before = seg0.items.length;
         const res = await fetchPage(seg0.pageCount, seg0.cursor, seg0.items.length, { forceMulti: forceMultiEndpoint, tries: 3, timeoutMs: 12000 });
-        if (!res.ok) break;
+        if (!res.ok) {
+          // 429 không được cắt đứt danh sách: nghỉ cho server hạ nhiệt rồi tải tiếp ĐÚNG cursor này
+          if (/429/.test(res.error || '') && (seg0.retry429 = (seg0.retry429 || 0) + 1) <= 6) { await sleep(1800); continue; }
+          break;
+        }
         const j = res.data || {};
         const convs = j.conversations || [];
         pushConvs(seg0, convs);
@@ -1296,7 +1344,8 @@
       }
       helpersDone = true;
       logLine('⚡⚡ Tải đa luồng 1 page: ' + seg0.items.length + ' chat trong ' + ((Date.now() - startedAt) / 1000).toFixed(1) + 's'
-        + ' (~' + Math.round(seg0.items.length / Math.max(1, (Date.now() - startedAt) / 1000)) + ' chat/giây)');
+        + ' (~' + Math.round(seg0.items.length / Math.max(1, (Date.now() - startedAt) / 1000)) + ' chat/giây)'
+        + (listGate.hit429 ? ' · ⚠ dính 429×' + listGate.hit429 + ' (đã tự điều tốc)' : ''));
       return { ok: true, rows: seg0.items };
     }
   }
