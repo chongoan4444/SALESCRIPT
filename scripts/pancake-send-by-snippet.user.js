@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE
 // @namespace    salescript
-// @version      1.73.0
+// @version      1.74.0
 // @description  BOTFAKE — chọn chuỗi chat (Alt+Click 2 đầu) hoặc theo snippet trong Pancake rồi gửi cùng 1 câu (kèm 1 hoặc nhiều ảnh nếu muốn) cho tất cả.
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -3553,11 +3553,23 @@
         return { ok: true, id: (res.data && (res.data.timestamp || res.data.convId)) || '', sendBy: 'extension', sent: true };
       }
       if (res && res.success === false) {
-        // Trong __ExtensionAdapter__.send (@715835), khi setTimeout hết giờ nó trả về { success: false, data: null }
+        // 🔴 GỐC LỖI TRÙNG Ở LÔ LỚN (v1.74.0): trong __ExtensionAdapter__.send của bundle (@869517),
+        // khi setTimeout hết giờ adapter resolve { success: false, data: null } — đây là TIMEOUT
+        // (Extension CÓ THỂ ĐÃ GỬI XONG nhưng phản hồi về không kịp), KHÔNG phải thua chắc chắn.
+        // Trước đây hình này bị xếp là "thua chắc" → script bắn tiếp Socket/API → khách nhận 2 tin
+        // cách nhau ~1 phút (35s timeout + hàng đợi kênh kế). Nay: data rỗng = 'maybe' → DỪNG,
+        // tuyệt đối không bắn thêm kênh nào cho chat này.
+        if (!res.data) {
+          return { ok: false, sent: 'maybe', error: 'Extension quá thời gian chờ phản hồi (có thể đã gửi) — không gửi thêm để tránh trùng' };
+        }
         const d = res.data || {};
         let why = d.errorMessage || d.error || d.reason || d.code || '';
         if (why && typeof why !== 'string') {
           try { why = JSON.stringify(why); } catch (e2) { why = ''; } // không bao giờ lộ "[object Object]"
+        }
+        if (!why) {
+          // Có data nhưng không có lý do lỗi rõ ràng → không đủ bằng chứng "chắc chắn chưa gửi" → dừng an toàn
+          return { ok: false, sent: 'maybe', error: 'Extension báo thất bại không rõ lý do — không gửi thêm để tránh trùng' };
         }
         const errStr = 'Extension không gửi được' + (why ? ' (' + why + ')' : '');
         // Chỉ kết luận khách khóa nick thật (deadUser) khi đã gửi bằng globalUserId thật (khác null, !ctx.gidFromPsid)
