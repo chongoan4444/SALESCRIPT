@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE
 // @namespace    salescript
-// @version      1.79.0
+// @version      1.75.0
 // @description  BOTFAKE — chọn chuỗi chat (Alt+Click 2 đầu) hoặc theo snippet trong Pancake rồi gửi cùng 1 câu (kèm 1 hoặc nhiều ảnh nếu muốn) cho tất cả.
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -1014,17 +1014,12 @@
     };
     const stopped = () => state.scanStopRequested;
 
-    // v1.79.0: BỎ cổng điều tốc (v1.77/1.78 làm chậm hẳn so với v1.75 đo được ~160 chat/giây).
-    // Quay về chạy trực tiếp đúng nhịp v1.75: 10 luồng phụ + luồng gốc (1 page) / 10 chuỗi page.
-    // Chỉ đếm số lần dính 429 để in vào dòng ⚡⚡ đối chiếu.
-    let listHit429 = 0;
-
     const fetchPage = async (pageCount, cursor, currentCount, extra) => {
       const eo = Object.assign({}, opts || {}, extra || {});
       const req = buildListRequest(pageCount, cursor, currentCount, token, eo.forceMulti || eo.singlePageId ? eo : opts);
       if (!req.ids.length) return { ok: false, error: 'Không xác định được page đang xem' };
       const res = await fetchJson(req.url, eo.tries || 3, { method: req.method, bodyObj: req.bodyObj, timeoutMs: eo.timeoutMs || 12000 });
-      if (!res.ok) { if (/429/.test(res.error || '')) listHit429++; return { ok: false, error: res.error }; }
+      if (!res.ok) return { ok: false, error: res.error };
       const j = res.data || {};
       if (j.success === false) return { ok: false, error: j.message || j.error || 'success=false' };
       return { ok: true, data: j, ids: req.ids, unreadFirst: req.unreadFirst };
@@ -1091,10 +1086,7 @@
         let guard = 0;
         while (guard++ < 1500 && !stopAll && !stopped()) {
           const res = await fetchPage({}, seg.cursor, seg.items.length, { singlePageId: pid, tries: seg.started ? 2 : 3, timeoutMs: 12000 });
-          if (!res.ok) {
-            if (/429/.test(res.error || '') && (seg.retry429 = (seg.retry429 || 0) + 1) <= 12) { await sleep(1200 + Math.random() * 800); continue; }
-            if (!seg.started) firstPageErrors++; else midErrors++; return;
-          }
+          if (!res.ok) { if (!seg.started) firstPageErrors++; else midErrors++; return; }
           seg.started = true;
           const j = res.data || {};
           const convs = j.conversations || [];
@@ -1113,7 +1105,7 @@
           if (isRangeSatisfied(allSet)) { stopAll = true; return; }
         }
       };
-      const POOL = Math.min(10, queue.length); // đúng nhịp v1.75 (24 chuỗi ở v1.76 gây bão 429)
+      const POOL = Math.min(10, queue.length);
       const workers = [];
       for (let w = 0; w < POOL; w++) {
         workers.push((async () => { while (queue.length && !stopAll && !stopped()) { const pid = queue.shift(); await chain(pid); } })());
@@ -1133,9 +1125,7 @@
         return (b.updatedTs || 0) - (a.updatedTs || 0);
       });
       rows.forEach((r, i) => { r.order = i; });
-      logLine('⚡⚡ Tải song song ' + probeIds.length + ' page: ' + rows.length + ' chat trong ' + ((Date.now() - startedAt) / 1000).toFixed(1) + 's'
-        + ' (~' + Math.round(rows.length / Math.max(1, (Date.now() - startedAt) / 1000)) + ' chat/giây)'
-        + (listHit429 ? ' · ⚠ dính 429×' + listHit429 + ' (các chuỗi đã tự nghỉ + đi tiếp)' : ''));
+      logLine('⚡⚡ Tải song song ' + probeIds.length + ' page: ' + rows.length + ' chat trong ' + ((Date.now() - startedAt) / 1000).toFixed(1) + 's');
       if (onProgress) onProgress(rows.length, rows);
       return { ok: true, rows };
     }
@@ -1185,7 +1175,6 @@
         return { ok: true, rows: seg0.items };
       }
 
-      // Đúng thông số v1.75 (đo được ~160 chat/giây): 10 luồng phụ, bước nhảy 1.1→11 span.
       const STRIDES = [1.1, 2.2, 3.3, 4.4, 5.5, 6.6, 7.7, 8.8, 9.9, 11];
       const samplePageId = parsed0.keyStr.split(':')[0] || String((p1.ids && p1.ids[0]) || '');
       const dummyKeyStr = samplePageId + ':' + samplePageId + '_99999999999999999999';
@@ -1265,10 +1254,7 @@
           // treo/lỗi thì tự chết, tuyệt đối không chặn luồng gốc (không còn Promise.all theo vòng).
           while (!helpersDone && !stopped() && !seg.absorbed && seg.cursor) {
             const res = await fetchPage(seg.pageCount, seg.cursor, seg.estCount + seg.items.length, { forceMulti: forceMultiEndpoint, tries: 2, timeoutMs: 10000 });
-            if (!res.ok) {
-              if (/429/.test(res.error || '') && (seg.retry429 = (seg.retry429 || 0) + 1) <= 12) { await sleep(1200 + Math.random() * 800); continue; }
-              return;
-            }
+            if (!res.ok) return;
             const j = res.data || {};
             const convs = j.conversations || [];
             if (!convs.length) { seg.cursor = null; return; }
@@ -1291,11 +1277,7 @@
       while (guard++ < 1500 && seg0.cursor && !stopped()) {
         const before = seg0.items.length;
         const res = await fetchPage(seg0.pageCount, seg0.cursor, seg0.items.length, { forceMulti: forceMultiEndpoint, tries: 3, timeoutMs: 12000 });
-        if (!res.ok) {
-          // 429 không được cắt đứt danh sách: nghỉ cho server hạ nhiệt rồi tải tiếp ĐÚNG cursor này
-          if (/429/.test(res.error || '') && (seg0.retry429 = (seg0.retry429 || 0) + 1) <= 12) { await sleep(1500); continue; }
-          break;
-        }
+        if (!res.ok) break;
         const j = res.data || {};
         const convs = j.conversations || [];
         pushConvs(seg0, convs);
@@ -1310,9 +1292,7 @@
         for (let s = alive; s < STRIDES.length; s++) spawnHelper();
       }
       helpersDone = true;
-      logLine('⚡⚡ Tải đa luồng 1 page: ' + seg0.items.length + ' chat trong ' + ((Date.now() - startedAt) / 1000).toFixed(1) + 's'
-        + ' (~' + Math.round(seg0.items.length / Math.max(1, (Date.now() - startedAt) / 1000)) + ' chat/giây)'
-        + (listHit429 ? ' · ⚠ dính 429×' + listHit429 + ' (các chuỗi đã tự nghỉ + đi tiếp)' : ''));
+      logLine('⚡⚡ Tải đa luồng 1 page: ' + seg0.items.length + ' chat trong ' + ((Date.now() - startedAt) / 1000).toFixed(1) + 's');
       return { ok: true, rows: seg0.items };
     }
   }
@@ -1617,10 +1597,9 @@
           state.allRows.set(r.id, r);
         }
         lastSyncedLen = rowsArr.length;
-        // v1.76.0: chỉ cập nhật số đếm O(1) — computeMatches() để dành chạy 1 lần khi tải xong,
-        // tránh nghẽn main-thread làm chậm giải mã JSON của các request danh sách đang bay.
+        computeMatches();
         const cntEl = shadow && shadow.getElementById('ssb-count');
-        if (cntEl) cntEl.textContent = String(state.allRows.size);
+        if (cntEl) cntEl.textContent = String(state.matches.length);
       };
 
       const api = await loadListViaApi((n, rowsArr) => {
