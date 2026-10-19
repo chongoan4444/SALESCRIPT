@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE
 // @namespace    salescript
-// @version      1.75.0
+// @version      1.80.0
 // @description  BOTFAKE — chọn chuỗi chat (Alt+Click 2 đầu) hoặc theo snippet trong Pancake rồi gửi cùng 1 câu (kèm 1 hoặc nhiều ảnh nếu muốn) cho tất cả.
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -2891,7 +2891,7 @@
   const socketRejectStreak = {};
   const socketReconnectPromises = {};
   const socketLastPublishAt = {};
-  const SOCKET_MIN_PACE_MS = 2; // Giãn nhịp vi mô 2ms giữa 2 khung /ls_req trên cùng 1 page (500 tin/s, chống FB MQTT burst-reject mà không giảm tốc!)
+  const SOCKET_MIN_PACE_MS = 1; // v1.80.0: giãn 1ms (1000 khung/s/page) — vẫn là nhịp đều từng khung, KHÔNG bắn chùm 0ms (lỗi burst-reject v1.62); còn nguyên retry + socketRejectStreak bảo vệ
 
   async function paceSocketPublish(pageId) {
     const pid = String(pageId || '');
@@ -3711,7 +3711,7 @@
   //    của từng fanpage (tránh vượt ngưỡng burst của edge-chat.facebook.com gây markOptimisticMessageFailed).
   //  • sideEffectLane (4 luồng): điều tiết các request phụ nền (fill_admin_name, update_global_id).
   const API_SEND_PARALLEL = 48;
-  const CTX_FETCH_PARALLEL = 96;
+  const CTX_FETCH_PARALLEL = 128; // v1.80.0: nới làn nạp ngữ cảnh cho quy mô 100k
   const PHOTO_UPLOAD_PARALLEL = 96;
   const GID_EXT_PARALLEL = 24;
   const PREP_PARALLEL_EXT = 160;  // số chat chưa có global_id chuẩn bị HTTP/WS song song (không bị chặn bởi gidExtLane)
@@ -5003,7 +5003,7 @@
     //   • Làn 2 (extBacklogWorkers — 16 worker chạy song song ở nền ngay từ giây thứ 0):
     //     Âm thầm rút các chat từ extBacklogQueue để hỏi Extension / WebSocket loadThread mà không bao giờ
     //     chiếm mất bất kỳ ghế nào của Làn 1!
-    const FAST_HTTP_SOCKET_POOL = 160;
+    const FAST_HTTP_SOCKET_POOL = 192; // v1.80.0: 160→192 worker làn nhanh
     const EXT_BACKLOG_WORKERS = 48;
     let gtextRef = '';
     const sendBatch = async (gtext, batch) => {
@@ -5072,7 +5072,7 @@
       runPool(batch, async (c) => {
         if (state.stopRequested) return;
         try { await ensureConvCtx(c, { force: true }); } catch (e) { /* ignore */ }
-      }, 48).catch(() => {});
+      }, 96).catch(() => {}); // v1.80.0: 48→96 — ở lô 34k, 48 worker × ~0,75s/GET ≈ 64 chat/s, khớp đúng tốc độ đo được → đây là nút thắt
 
       const extWorkers = [];
       const nExtWorkers = Math.min(EXT_BACKLOG_WORKERS, Math.max(1, batch.length));
