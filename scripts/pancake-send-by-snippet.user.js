@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE
 // @namespace    salescript
-// @version      1.71.1
+// @version      1.71.2
 // @description  BOTFAKE — chọn chuỗi chat (Alt+Click 2 đầu) hoặc theo snippet trong Pancake rồi gửi cùng 1 câu (kèm 1 hoặc nhiều ảnh nếu muốn) cho tất cả.
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -5133,8 +5133,10 @@
         + ', ' + sumNow.failTotal + ' lỗi.'
         + (sumNow.unsureTotal ? ' ' + sumNow.unsureTotal + ' tin không rõ kết quả (không gửi thêm).' : '')
         + (windowBlocked ? ' 🚫 ' + windowBlocked + ' lần API bị chặn ngoài cửa sổ 24h (đã bù kênh khác).' : '')
-        + ' ⏱ Tổng thời gian: ' + (((Date.now() - batchStats.startedAt) / 60000).toFixed(1)) + ' phút'
-        + ' (trung bình ' + (totalAll / Math.max(1, (Date.now() - batchStats.startedAt) / 1000) * 60).toFixed(0) + ' tin/phút).');
+        + (sumNow.pending > 0
+          ? ' ⏱ Đã phát lệnh xong trong ' + (((Date.now() - batchStats.startedAt) / 1000).toFixed(0)) + 's — tốc độ chốt xem ở dòng TỔNG HỢP cuối cùng.'
+          : ' ⏱ Tổng thời gian: ' + (((Date.now() - batchStats.startedAt) / 60000).toFixed(1)) + ' phút'
+            + ' (trung bình ' + (totalAll / Math.max(1, (Date.now() - batchStats.startedAt) / 1000) * 60).toFixed(0) + ' tin/phút).'));
     }
     updateBatchSummaryUI();
     // CÂU ĐÃ CHỐT TIÊU THỤ từ đầu lượt → dùng xong TỰ XÓA (mỗi câu chỉ gửi 1 lần — tránh gửi trùng).
