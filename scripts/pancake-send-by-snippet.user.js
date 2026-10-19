@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE
 // @namespace    salescript
-// @version      1.78.0
+// @version      1.79.0
 // @description  BOTFAKE — chọn chuỗi chat (Alt+Click 2 đầu) hoặc theo snippet trong Pancake rồi gửi cùng 1 câu (kèm 1 hoặc nhiều ảnh nếu muốn) cho tất cả.
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -747,10 +747,7 @@
         if (abortTimer) { clearTimeout(abortTimer); abortTimer = null; }
         if (r.status === 429 || r.status >= 500) {
           lastErr = 'HTTP ' + r.status;
-          // Đường tải danh sách (noRetry429): trả về NGAY để cổng điều tốc trung tâm hạ nhịp —
-          // tuyệt đối không tự thử lại tại đây (ôm suất chờ nhiều giây chính là nguyên nhân v1.77 siêu chậm).
-          if (r.status === 429 && reqOpts && reqOpts.noRetry429) return { ok: false, error: lastErr };
-          if (t < max) { await sleep(r.status === 429 ? (1100 * t + Math.floor(Math.random() * 500)) : 400 * t); continue; }
+          if (t < max) { await sleep(400 * t); continue; }
           return { ok: false, error: lastErr };
         }
         if (!r.ok) {
@@ -1017,48 +1014,17 @@
     };
     const stopped = () => state.scanStopRequested;
 
-    // 🧯 CỔNG ĐIỀU TỐC TẢI DANH SÁCH (v1.77.0): log console cho thấy server Pancake trả 429
-    // (Too Many Requests) hàng loạt khi mở 21 chuỗi cùng lúc — request bị từ chối phải thử lại
-    // nên tổng thời gian còn LÂU hơn. Cổng này: tối đa 8 request danh sách đang bay; hễ gặp 429
-    // thì hạ trần (tối thiểu 3) + đóng băng chung 1,5s cho MỌI chuỗi; chạy êm 24 request liên
-    // tiếp thì nâng dần (tối đa 12). Các luồng phụ vẫn sinh đủ 20 để phủ dữ liệu, chỉ request
-    // thật mới phải qua cổng.
-    const listGate = { inFlight: 0, limit: 6, cooldownUntil: 0, okStreak: 0, hit429: 0 };
-    const gateAcquire = async () => {
-      for (;;) {
-        if (stopped()) return false;
-        if (listGate.inFlight < listGate.limit && Date.now() >= listGate.cooldownUntil) {
-          listGate.inFlight++;
-          return true;
-        }
-        await sleep(60);
-      }
-    };
-    const gateRelease = (was429) => {
-      listGate.inFlight = Math.max(0, listGate.inFlight - 1);
-      if (was429) {
-        listGate.hit429++;
-        listGate.okStreak = 0;
-        listGate.limit = Math.max(2, listGate.limit - 1); // hạ NHẸ tay (v1.77 hạ -2 + ôm suất thử lại gây siêu chậm)
-        listGate.cooldownUntil = Date.now() + 2500;
-      } else {
-        listGate.okStreak++;
-        if (listGate.okStreak >= 16 && listGate.limit < 10) { listGate.limit++; listGate.okStreak = 0; }
-      }
-    };
+    // v1.79.0: BỎ cổng điều tốc (v1.77/1.78 làm chậm hẳn so với v1.75 đo được ~160 chat/giây).
+    // Quay về chạy trực tiếp đúng nhịp v1.75: 10 luồng phụ + luồng gốc (1 page) / 10 chuỗi page.
+    // Chỉ đếm số lần dính 429 để in vào dòng ⚡⚡ đối chiếu.
+    let listHit429 = 0;
 
     const fetchPage = async (pageCount, cursor, currentCount, extra) => {
       const eo = Object.assign({}, opts || {}, extra || {});
       const req = buildListRequest(pageCount, cursor, currentCount, token, eo.forceMulti || eo.singlePageId ? eo : opts);
       if (!req.ids.length) return { ok: false, error: 'Không xác định được page đang xem' };
-      if (!(await gateAcquire())) return { ok: false, error: 'stopped' };
-      let res = null;
-      try {
-        res = await fetchJson(req.url, eo.tries || 3, { method: req.method, bodyObj: req.bodyObj, timeoutMs: eo.timeoutMs || 12000, noRetry429: true });
-      } finally {
-        gateRelease(!!(res && !res.ok && /429/.test(res.error || '')));
-      }
-      if (!res || !res.ok) return { ok: false, error: (res && res.error) || 'fetch lỗi' };
+      const res = await fetchJson(req.url, eo.tries || 3, { method: req.method, bodyObj: req.bodyObj, timeoutMs: eo.timeoutMs || 12000 });
+      if (!res.ok) { if (/429/.test(res.error || '')) listHit429++; return { ok: false, error: res.error }; }
       const j = res.data || {};
       if (j.success === false) return { ok: false, error: j.message || j.error || 'success=false' };
       return { ok: true, data: j, ids: req.ids, unreadFirst: req.unreadFirst };
@@ -1147,7 +1113,7 @@
           if (isRangeSatisfied(allSet)) { stopAll = true; return; }
         }
       };
-      const POOL = Math.min(24, queue.length); // v1.76.0: HTTP/2+H3 — chạy gần như mọi page cùng lúc
+      const POOL = Math.min(10, queue.length); // đúng nhịp v1.75 (24 chuỗi ở v1.76 gây bão 429)
       const workers = [];
       for (let w = 0; w < POOL; w++) {
         workers.push((async () => { while (queue.length && !stopAll && !stopped()) { const pid = queue.shift(); await chain(pid); } })());
@@ -1169,7 +1135,7 @@
       rows.forEach((r, i) => { r.order = i; });
       logLine('⚡⚡ Tải song song ' + probeIds.length + ' page: ' + rows.length + ' chat trong ' + ((Date.now() - startedAt) / 1000).toFixed(1) + 's'
         + ' (~' + Math.round(rows.length / Math.max(1, (Date.now() - startedAt) / 1000)) + ' chat/giây)'
-        + (listGate.hit429 ? ' · ⚠ dính 429×' + listGate.hit429 + ' (đã tự điều tốc)' : ''));
+        + (listHit429 ? ' · ⚠ dính 429×' + listHit429 + ' (các chuỗi đã tự nghỉ + đi tiếp)' : ''));
       if (onProgress) onProgress(rows.length, rows);
       return { ok: true, rows };
     }
@@ -1219,9 +1185,8 @@
         return { ok: true, rows: seg0.items };
       }
 
-      // v1.76.0: 20 luồng phụ (thay vì 10), mỗi luồng bắt đầu cách nhau ~1 trang (1 span)
-      // → tổng 21 chuỗi cursor chạy song song trên cùng 1 page.
-      const STRIDES = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20];
+      // Đúng thông số v1.75 (đo được ~160 chat/giây): 10 luồng phụ, bước nhảy 1.1→11 span.
+      const STRIDES = [1.1, 2.2, 3.3, 4.4, 5.5, 6.6, 7.7, 8.8, 9.9, 11];
       const samplePageId = parsed0.keyStr.split(':')[0] || String((p1.ids && p1.ids[0]) || '');
       const dummyKeyStr = samplePageId + ':' + samplePageId + '_99999999999999999999';
       const segments = [];
@@ -1347,7 +1312,7 @@
       helpersDone = true;
       logLine('⚡⚡ Tải đa luồng 1 page: ' + seg0.items.length + ' chat trong ' + ((Date.now() - startedAt) / 1000).toFixed(1) + 's'
         + ' (~' + Math.round(seg0.items.length / Math.max(1, (Date.now() - startedAt) / 1000)) + ' chat/giây)'
-        + (listGate.hit429 ? ' · ⚠ dính 429×' + listGate.hit429 + ' (đã tự điều tốc)' : ''));
+        + (listHit429 ? ' · ⚠ dính 429×' + listHit429 + ' (các chuỗi đã tự nghỉ + đi tiếp)' : ''));
       return { ok: true, rows: seg0.items };
     }
   }
