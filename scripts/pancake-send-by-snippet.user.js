@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE
 // @namespace    salescript
-// @version      1.80.0
+// @version      1.81.0
 // @description  BOTFAKE — chọn chuỗi chat (Alt+Click 2 đầu) hoặc theo snippet trong Pancake rồi gửi cùng 1 câu (kèm 1 hoặc nhiều ảnh nếu muốn) cho tất cả.
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -1175,7 +1175,7 @@
         return { ok: true, rows: seg0.items };
       }
 
-      const STRIDES = [1.1, 2.2, 3.3, 4.4, 5.5, 6.6, 7.7, 8.8, 9.9, 11];
+      const STRIDES = [1.1, 2.2, 3.3, 4.4, 5.5, 6.6, 7.7, 8.8, 9.9, 11, 12.1, 13.2, 14.3, 15.4]; // v1.81.0: 14 luồng phụ (v1.76 dùng 20 → bão 429; 10 luồng đo được chỉ ~100 chat/s)
       const samplePageId = parsed0.keyStr.split(':')[0] || String((p1.ids && p1.ids[0]) || '');
       const dummyKeyStr = samplePageId + ':' + samplePageId + '_99999999999999999999';
       const segments = [];
@@ -1254,7 +1254,10 @@
           // treo/lỗi thì tự chết, tuyệt đối không chặn luồng gốc (không còn Promise.all theo vòng).
           while (!helpersDone && !stopped() && !seg.absorbed && seg.cursor) {
             const res = await fetchPage(seg.pageCount, seg.cursor, seg.estCount + seg.items.length, { forceMulti: forceMultiEndpoint, tries: 2, timeoutMs: 10000 });
-            if (!res.ok) return;
+            if (!res.ok) {
+              if (/429/.test(res.error || '') && (seg.retry429 = (seg.retry429 || 0) + 1) <= 12) { await sleep(1200 + Math.random() * 800); continue; }
+              return;
+            }
             const j = res.data || {};
             const convs = j.conversations || [];
             if (!convs.length) { seg.cursor = null; return; }
@@ -1277,7 +1280,11 @@
       while (guard++ < 1500 && seg0.cursor && !stopped()) {
         const before = seg0.items.length;
         const res = await fetchPage(seg0.pageCount, seg0.cursor, seg0.items.length, { forceMulti: forceMultiEndpoint, tries: 3, timeoutMs: 12000 });
-        if (!res.ok) break;
+        if (!res.ok) {
+          // 429 không được cắt đứt danh sách: nghỉ rồi tải tiếp ĐÚNG cursor này
+          if (/429/.test(res.error || '') && (seg0.retry429 = (seg0.retry429 || 0) + 1) <= 12) { await sleep(1500); continue; }
+          break;
+        }
         const j = res.data || {};
         const convs = j.conversations || [];
         pushConvs(seg0, convs);
@@ -1292,7 +1299,8 @@
         for (let s = alive; s < STRIDES.length; s++) spawnHelper();
       }
       helpersDone = true;
-      logLine('⚡⚡ Tải đa luồng 1 page: ' + seg0.items.length + ' chat trong ' + ((Date.now() - startedAt) / 1000).toFixed(1) + 's');
+      logLine('⚡⚡ Tải đa luồng 1 page: ' + seg0.items.length + ' chat trong ' + ((Date.now() - startedAt) / 1000).toFixed(1) + 's'
+        + ' (~' + Math.round(seg0.items.length / Math.max(1, (Date.now() - startedAt) / 1000)) + ' chat/giây)');
       return { ok: true, rows: seg0.items };
     }
   }
@@ -1597,9 +1605,11 @@
           state.allRows.set(r.id, r);
         }
         lastSyncedLen = rowsArr.length;
-        computeMatches();
+        // v1.81.0: KHÔNG computeMatches() trong lúc tải — hàm đó quét toàn bộ danh sách (vài chục
+        // nghìn dòng) mỗi 400ms ngay trên luồng giao diện, càng về cuối càng nặng và giành CPU
+        // với chính việc xử lý dữ liệu tải về. Trong lúc tải chỉ đếm O(1); khớp 1 lần khi tải xong.
         const cntEl = shadow && shadow.getElementById('ssb-count');
-        if (cntEl) cntEl.textContent = String(state.matches.length);
+        if (cntEl) cntEl.textContent = String(state.allRows.size);
       };
 
       const api = await loadListViaApi((n, rowsArr) => {
