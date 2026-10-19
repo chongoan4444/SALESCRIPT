@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE
 // @namespace    salescript
-// @version      1.65.0
+// @version      1.66.0
 // @description  BOTFAKE — chọn chuỗi chat (Alt+Click 2 đầu) hoặc theo snippet trong Pancake rồi gửi cùng 1 câu (kèm ảnh nếu muốn) cho tất cả.
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -2603,9 +2603,9 @@
       ctx.gidResolved = true;
     }
     let gid = ctx.gid;
-    // Nếu đang ở lần thử thứ 2 (Hồ Nền sau khi Làn 1 bị rejected), kiểm tra xem WebSocket threadMappingStoreV2
-    // có vừa nạp được global_id mới chính xác hơn cho threadId này không:
-    if (ctx.socketRetriedOnce && threadId && pageId) {
+    // Luôn ưu tiên đối chiếu global_id mới nhất từ WebSocket threadMappingStoreV2 ngay từ trước lần bắn đầu tiên
+    // (đảm bảo nếu có khách sống nằm lẫn trong cục khách chặn mà cache cũ lệch id thì vẫn lấy đúng global_id mới nhất!)
+    if (threadId && pageId) {
       try {
         const sk = helper.SOCKETS && helper.SOCKETS[pageId];
         const ip = sk && sk.context && sk.context.initPageData;
@@ -2614,6 +2614,7 @@
         if (wsGid && String(wsGid) !== String(gid)) {
           gid = String(wsGid);
           ctx.gid = gid;
+          ctx.gidFromPsid = false;
         }
       } catch (e0) { /* ignore */ }
     }
@@ -2623,10 +2624,27 @@
       recycleUnusedFbId(pageId, ctx);
       return { ok: false, sent: false, error: 'Không tìm thấy globalId thật cho Socket' };
     }
+    // Lưu ngay global_id thật vào cache bền vững (kể cả khi khách đã chặn page), để ở các lần gửi sau
+    // cục khách đã chặn này có sẵn fastGid0 ở 0ms mà không phải gọi lại GET /messages hay đợi loadThread!
+    try {
+      if (typeof window.__botfakeSaveGid__ === 'function') {
+        window.__botfakeSaveGid__(conv.id, pageId, threadId, gid);
+      }
+    } catch (e0) { /* ignore */ }
 
-    // 2) Khi đã có chắc chắn globalId, mới upload attachment ảnh riêng (reusable=false) cho chat này
+    // 2) CƠ CHẾ LƯỚT SIÊU TỐC QUA "CỤC KHÁCH ĐÃ CHẶN PAGE" (Cluster-Skip Probe v1.66.0):
+    //    • Bình thường (socketRejectStreak < 3): upload attachment ảnh riêng (reusable=false) rồi bắn gộp [Ảnh + Chữ].
+    //    • Khi gặp chuỗi >= 3 khách liên tiếp bị từ chối (socketRejectStreak[pageId] >= 3 — tức là đang đi vào
+    //      "cục khách đã chặn page" như dải 130..287) và tin nhắn có cả chữ lẫn ảnh:
+    //      TẠM NGỪNG gọi HTTP POST /contents/facebook upload ảnh trước! Bắn gói Chữ qua WebSocket trước (~30ms,
+    //      0 HTTP request upload ảnh!):
+    //        - Nếu khách đã chặn (99.9% trong cục): FB trả rejected sau 30ms → báo lỗi ngay mà KHÔNG TỐN 1 lần upload ảnh nào!
+    //        - Nếu gặp khách còn sống nằm lẫn trong cục: gói Chữ đi thành công (ok) → reset streak = 0 và lập tức
+    //          upload ảnh bắn tiếp phần Ảnh ngay lập tức (khách sống vẫn nhận đủ 100% cả chữ lẫn ảnh)!
+    const hasTextMsg = !!(text && String(text).trim().length > 0);
+    const inBlockedCluster = !!(photo && hasTextMsg && !ctx.nonReusableFbId && (socketRejectStreak[pageId] || 0) >= 3);
     let attFbIds = null;
-    if (photo) {
+    if (photo && !inBlockedCluster) {
       const up = await uploadOneTimePhoto(pageId, photo, conv.id, ctx, false);
       if (!up || !up.ok || !up.fbId) {
         return { ok: false, sent: false, error: 'Không gắn được ảnh cho Socket (' + ((up && up.error) || 'lỗi upload') + ')' };
@@ -2658,7 +2676,39 @@
       const pageLane = getPageSocketLane(pageId);
       let raw = await pageLane(() => socketPublishSend(helper, pageId, gid, text, attFbIds));
       // Tiêu thụ xong fbId của lần bắn này: nếu có bắn lại phải lấy fbId mới tinh
-      if (photo) ctx.nonReusableFbId = null;
+      if (photo && !inBlockedCluster) ctx.nonReusableFbId = null;
+
+      // Nếu đang ở chế độ thăm dò trong cục khách chặn (inBlockedCluster) mà gói Chữ đi THÀNH CÔNG (gặp khách sống!):
+      // Reset ngay socketRejectStreak = 0 và lập tức upload ảnh + bắn bù RIÊNG PHẦN ẢNH (text = '') cho khách này!
+      if (inBlockedCluster && raw && raw.kind === 'ok' && photo) {
+        socketRejectStreak[pageId] = 0;
+        let probePhotoUp = await uploadOneTimePhoto(pageId, photo, conv.id, ctx, false);
+        if (probePhotoUp && probePhotoUp.ok && probePhotoUp.fbId) {
+          ctx.nonReusableFbId = null;
+          let sendPhotoRes = await pageLane(() => socketPublishSend(helper, pageId, gid, '', [probePhotoUp.fbId]));
+          if (sendPhotoRes && sendPhotoRes.kind === 'ok') {
+            recordSocketGidSuccess();
+            return { ok: true, id: gid, sendBy: 'socket', sent: true };
+          }
+          // Nếu gói Ảnh bắn sát ngay sau gói Chữ trên cùng thread bị nhịp trễ, nghỉ 80ms và thử lại 1 lần với fbId mới
+          await sleep(80);
+          probePhotoUp = await uploadOneTimePhoto(pageId, photo, conv.id, ctx, true);
+          if (probePhotoUp && probePhotoUp.ok && probePhotoUp.fbId) {
+            ctx.nonReusableFbId = null;
+            sendPhotoRes = await pageLane(() => socketPublishSend(helper, pageId, gid, '', [probePhotoUp.fbId]));
+            if (sendPhotoRes && sendPhotoRes.kind === 'ok') {
+              recordSocketGidSuccess();
+              return { ok: true, id: gid, sendBy: 'socket', sent: true };
+            }
+          }
+        }
+        const extPhotoFallback = await sendViaExtension(conv, '', photo, ctx);
+        if (extPhotoFallback && extPhotoFallback.ok) {
+          recordSocketGidSuccess();
+          return { ok: true, id: gid, sendBy: 'socket', sent: true };
+        }
+        return { ok: false, sent: 'maybe', error: 'Socket: đã gửi được chữ nhưng FB từ chối ảnh đính kèm' };
+      }
 
       // Trường hợp đặc biệt: chữ đã đi thành công nhưng task ảnh bị markOptimisticMessageFailed
       // → TUYỆT ĐỐI không gửi lại chữ (tránh trùng chữ), mà upload 1 fbId mới và bắn bù RIÊNG PHẦN ẢNH (text = '')!
@@ -3152,8 +3202,9 @@
       ctx.threadId = threadId || null;
       ctx.threadResolved = true;
     }
+    const skipPhotoForBlockedCluster = !!(ctx.hasTextMsg && (socketRejectStreak[pageId] || 0) >= 3 && isPageSocketReady(pageId));
     if (!ctx.gidResolved && ctx.threadId) {
-      if (ctx.fastOnly && photo && !ctx.nonReusableFbId) {
+      if (ctx.fastOnly && photo && !ctx.nonReusableFbId && !skipPhotoForBlockedCluster) {
         const [gidRes, upRes] = await Promise.all([
           resolveGlobalId(full, ctx.threadId, conv.id, conv.fromPsid, ctx.gidForceFind, ctx),
           uploadOneTimePhoto(pageId, photo, conv.id, ctx, false),
@@ -3181,7 +3232,8 @@
       recycleUnusedFbId(pageId, ctx);
       return ctx;
     }
-    if (photo && !ctx.nonReusableFbId && canSend) {
+    const skipNow = !!(ctx.hasTextMsg && (socketRejectStreak[pageId] || 0) >= 3 && ctx.gid && !ctx.gidFromPsid && isPageSocketReady(pageId));
+    if (photo && !ctx.nonReusableFbId && canSend && !skipNow) {
       const up = await uploadOneTimePhoto(pageId, photo, conv.id, ctx, false);
       if (up && up.ok && up.fbId) ctx.nonReusableFbId = up.fbId;
     }
@@ -3294,6 +3346,7 @@
     // ngữ cảnh dùng chung cho các kênh của CÙNG 1 chat: conversation, threadId, globalId, nonReusableFbId…
     const ctx = (opts.deferredCtx && typeof opts.deferredCtx === 'object') ? opts.deferredCtx : {};
     ctx.fastOnly = !!opts.fastOnly;
+    ctx.hasTextMsg = !!(text && String(text).trim().length > 0);
     ctx.deferredToExt = false;
     if (!ctx.fastOnly && ctx.gidResolved && !ctx.gid) {
       ctx.gidResolved = false;
