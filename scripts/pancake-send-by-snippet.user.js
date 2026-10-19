@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE
 // @namespace    salescript
-// @version      1.67.0
+// @version      1.68.0
 // @description  BOTFAKE — chọn chuỗi chat (Alt+Click 2 đầu) hoặc theo snippet trong Pancake rồi gửi cùng 1 câu (kèm 1 hoặc nhiều ảnh nếu muốn) cho tất cả.
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -3594,8 +3594,8 @@
   //    của từng fanpage (tránh vượt ngưỡng burst của edge-chat.facebook.com gây markOptimisticMessageFailed).
   //  • sideEffectLane (4 luồng): điều tiết các request phụ nền (fill_admin_name, update_global_id).
   const API_SEND_PARALLEL = 48;
-  const CTX_FETCH_PARALLEL = 64;
-  const PHOTO_UPLOAD_PARALLEL = 64;
+  const CTX_FETCH_PARALLEL = 96;
+  const PHOTO_UPLOAD_PARALLEL = 96;
   const GID_EXT_PARALLEL = 16;
   const PREP_PARALLEL_EXT = 160;  // số chat chưa có global_id chuẩn bị HTTP/WS song song (không bị chặn bởi gidExtLane)
   const BUS_PARALLEL_EXT = 6;     // số lệnh adapter.send (REPLY_INBOX_PHOTO) chạy song song
@@ -4709,7 +4709,7 @@
     // Gửi theo lượt: hỗ trợ tới 50.000 tin/lượt cho quy mô 20.000–30.000 tin nhắn
     const waveEl = shadow && shadow.getElementById('ssb-wave');
     const gapEl = shadow && shadow.getElementById('ssb-gap');
-    const WAVE_SIZE = Math.max(1, Math.min(50000, parseInt((waveEl && waveEl.value) || '30000', 10) || 30000));
+    const WAVE_SIZE = Math.max(1, Math.min(100000, parseInt((waveEl && waveEl.value) || '30000', 10) || 30000));
     const gapRaw = parseInt((gapEl && gapEl.value) || '500', 10);
     const WAVE_GAP = isNaN(gapRaw) ? 0 : Math.max(0, Math.min(60000, gapRaw));
     // gửi theo từng nhóm nội dung (câu khác câu → chữ khác chữ)
@@ -4732,6 +4732,7 @@
       : '🚀 Bắt đầu gửi ' + totalAll + ' chat (1 lượt — ' + WAVE_SIZE + ' tin/lượt)…');
 
     let ok = 0, fail = 0, done = 0, unsure = 0, firedN = 0;
+    let lastSpeedLogAt = Date.now();
     const quickEl0 = shadow && shadow.getElementById('ssb-quick');
     const quickOn = !!(quickEl0 && quickEl0.checked);
 
@@ -4833,6 +4834,16 @@
         }
       }
       updateBatchSummaryUI();
+      // 📊 ĐỒNG HỒ TỐC ĐỘ (mỗi 30s): tin/phút thực tế + dự kiến thời gian còn lại cho lô lớn
+      if (totalAll > 200 && Date.now() - lastSpeedLogAt >= 30000) {
+        lastSpeedLogAt = Date.now();
+        const elapsedS = Math.max(1, (Date.now() - batchStats.startedAt) / 1000);
+        const rate = done / elapsedS; // tin/giây từ đầu lượt
+        const remainS = rate > 0 ? Math.round((totalAll - done) / rate) : 0;
+        const fmtDur = (sec) => sec >= 3600 ? (sec / 3600).toFixed(1) + ' giờ' : Math.max(1, Math.round(sec / 60)) + ' phút';
+        logLine('📊 Đã xử lý ' + done + '/' + totalAll + ' · tốc độ ' + (rate * 60).toFixed(0) + ' tin/phút'
+          + ' · dự kiến còn ~' + fmtDur(remainS) + ' nữa');
+      }
       return r;
     };
 
@@ -4845,8 +4856,8 @@
     //   • Làn 2 (extBacklogWorkers — 16 worker chạy song song ở nền ngay từ giây thứ 0):
     //     Âm thầm rút các chat từ extBacklogQueue để hỏi Extension / WebSocket loadThread mà không bao giờ
     //     chiếm mất bất kỳ ghế nào của Làn 1!
-    const FAST_HTTP_SOCKET_POOL = 96;
-    const EXT_BACKLOG_WORKERS = 32;
+    const FAST_HTTP_SOCKET_POOL = 128;
+    const EXT_BACKLOG_WORKERS = 48;
     let gtextRef = '';
     const sendBatch = async (gtext, batch) => {
       gtextRef = gtext;
@@ -4989,7 +5000,9 @@
         + (sumNow.pending > 0 ? ' (còn ' + sumNow.pending + ' tin đang xác nhận/bù nền — bảng TỔNG HỢP sẽ tự chốt khi xong hết)' : '')
         + ', ' + sumNow.failTotal + ' lỗi.'
         + (sumNow.unsureTotal ? ' ' + sumNow.unsureTotal + ' tin không rõ kết quả (không gửi thêm).' : '')
-        + (windowBlocked ? ' 🚫 ' + windowBlocked + ' lần API bị chặn ngoài cửa sổ 24h (đã bù kênh khác).' : ''));
+        + (windowBlocked ? ' 🚫 ' + windowBlocked + ' lần API bị chặn ngoài cửa sổ 24h (đã bù kênh khác).' : '')
+        + ' ⏱ Tổng thời gian: ' + (((Date.now() - batchStats.startedAt) / 60000).toFixed(1)) + ' phút'
+        + ' (trung bình ' + (totalAll / Math.max(1, (Date.now() - batchStats.startedAt) / 1000) * 60).toFixed(0) + ' tin/phút).');
     }
     updateBatchSummaryUI();
     // CÂU ĐÃ CHỐT TIÊU THỤ từ đầu lượt → dùng xong TỰ XÓA (mỗi câu chỉ gửi 1 lần — tránh gửi trùng).
@@ -5300,7 +5313,7 @@
             </div>
             <div class="row" style="align-items:center">
               <span class="hint">Mỗi lượt:</span>
-              <input type="number" id="ssb-wave" value="30000" min="1" max="50000" step="500" style="width:72px" title="Số tin mỗi lượt (tối đa 50.000)">
+              <input type="number" id="ssb-wave" value="30000" min="1" max="100000" step="500" style="width:72px" title="Số tin mỗi lượt (tối đa 100.000)">
               <span class="hint">tin — nghỉ</span>
               <input type="number" id="ssb-gap" value="0" min="0" step="50" style="width:72px" title="Số ms nghỉ giữa các lượt">
               <span class="hint">ms giữa các lượt</span>
