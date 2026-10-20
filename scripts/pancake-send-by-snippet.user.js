@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE
 // @namespace    salescript
-// @version      1.92.0
+// @version      1.93.0
 // @description  BOTFAKE — chọn chuỗi chat (Alt+Click 2 đầu) hoặc theo snippet trong Pancake rồi gửi cùng 1 câu (kèm 1 hoặc nhiều ảnh nếu muốn) cho tất cả.
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -403,7 +403,34 @@
   const UI_KEY = 'ssb_ui_state';       // tick câu + ô nội dung đang gõ — giữ qua F5
   const SL_BAK = SL_KEY + '_bak';      // bản dự phòng câu — chống mất dữ liệu
 
+  // v1.93.0: MỖI TAB MỘT DANH TÍNH RIÊNG (sessionStorage: khác nhau giữa các tab, vẫn giữ
+  // nguyên qua F5 trong cùng 1 tab) — dữ liệu "đang làm dở" của tab nào nằm riêng tab đó,
+  // mở 2 tab cùng lúc KHÔNG dính vào nhau. Dữ liệu CHUNG (câu đã lưu, kho global_id) thì
+  // HỢP NHẤT khi ghi (persistSavedLists / flushPersistentGids) — không tab nào ghi đè mất của ai.
+  const TAB_ID = (() => {
+    try {
+      let t = sessionStorage.getItem('ssb_tab_id');
+      if (!t) {
+        t = Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
+        sessionStorage.setItem('ssb_tab_id', t);
+      }
+      return t;
+    } catch (e) { return 'tab'; }
+  })();
+  const UI_TAB_KEY = UI_KEY + '__' + TAB_ID;    // trạng thái gõ dở (tick câu + ô nội dung) — riêng từng tab
+  const LOG_TAB_KEY = LOG_KEY + '__' + TAB_ID;   // nhật ký — riêng từng tab
+  const SL_GONE_KEY = SL_KEY + '_gone_v1';      // id câu đã XÓA/TIÊU THỤ ở MỌI tab — chống tab khác hồi sinh
+  const HB_KEY = 'ssb_sending_hb_v1';           // heartbeat "có tab đang gửi" — chỉ để cảnh báo gửi song song
+  const goneListIds = new Set();                // id câu TAB NÀY vừa xóa/tiêu thụ → ghi tombstone khi lưu
+  function readGoneIds() {
+    try {
+      const a = JSON.parse(localStorage.getItem(SL_GONE_KEY) || '[]');
+      return new Set(Array.isArray(a) ? a : []);
+    } catch (e) { return new Set(); }
+  }
+
   function loadSavedLists() {
+    const goneNow = readGoneIds(); // v1.93.0: câu đã xóa/tiêu thụ ở tab khác thì không hiện lại
     try {
       const raw = localStorage.getItem(SL_KEY);
       let arr;
@@ -416,7 +443,7 @@
       }
       if (!Array.isArray(arr)) return [];
       // câu cũ (lưu trước khi có text) → nội dung rỗng — vẫn gửi được bằng ô đang gõ
-      return arr.filter((l) => l && l.id && Array.isArray(l.items))
+      return arr.filter((l) => l && l.id && Array.isArray(l.items) && !goneNow.has(l.id))
         .map((l) => ({ ...l, text: String(l.text || '') }));
     } catch (e) {
       // dữ liệu chính hỏng → thử bản dự phòng trước khi bỏ cuộc
@@ -424,7 +451,7 @@
         const bak = JSON.parse(localStorage.getItem(SL_BAK) || '[]');
         if (Array.isArray(bak) && bak.length) {
           logLine('💾 Dữ liệu câu bị hỏng — đã khôi phục ' + bak.length + ' câu từ bản dự phòng.');
-          return bak.filter((l) => l && l.id && Array.isArray(l.items))
+          return bak.filter((l) => l && l.id && Array.isArray(l.items) && !goneNow.has(l.id))
             .map((l) => ({ ...l, text: String(l.text || '') }));
         }
       } catch (e2) { /* ignore */ }
@@ -436,7 +463,27 @@
     try {
       const prev = localStorage.getItem(SL_KEY);
       if (prev && prev !== '[]') localStorage.setItem(SL_BAK, prev); // giữ 1 bản trước — chống mất dữ liệu
-      localStorage.setItem(SL_KEY, JSON.stringify(state.savedLists));
+      // v1.93.0: HỢP NHẤT ĐA TAB — không ghi đè mù bằng bản RAM của tab này nữa:
+      //  • câu của TAB KHÁC (có trong bản đang lưu, tab này không giữ, chưa bị đánh dấu đã xóa) → GIỮ NGUYÊN;
+      //  • câu trùng id ở cả 2 phía → lấy bản sửa MỚI HƠN (updatedAt);
+      //  • câu đã xóa/đã tiêu thụ ở bất kỳ tab nào (tombstone SL_GONE_KEY) → KHÔNG bao giờ hồi sinh.
+      let stored = [];
+      try { const p = JSON.parse(prev || '[]'); if (Array.isArray(p)) stored = p; } catch (e) { stored = []; }
+      const gone = readGoneIds();
+      goneListIds.forEach((id) => gone.add(id));
+      const storedById = new Map(stored.filter((l) => l && l.id).map((l) => [l.id, l]));
+      const mine = (state.savedLists || []).filter((l) => l && l.id && !gone.has(l.id)).map((l) => {
+        const st = storedById.get(l.id);
+        return (st && (st.updatedAt || 0) > (l.updatedAt || 0)) ? st : l;
+      });
+      const myIds = new Set(mine.map((l) => l.id));
+      const others = stored.filter((l) => l && l.id && !myIds.has(l.id) && !gone.has(l.id));
+      const merged = mine.concat(others);
+      localStorage.setItem(SL_KEY, JSON.stringify(merged));
+      const mergedIds = new Set(merged.map((l) => l.id));
+      let goneArr = Array.from(gone).filter((id) => !mergedIds.has(id));
+      if (goneArr.length > 1000) goneArr = goneArr.slice(goneArr.length - 1000);
+      try { localStorage.setItem(SL_GONE_KEY, JSON.stringify(goneArr)); } catch (e) { /* ignore */ }
       return true;
     } catch (e) {
       logLine('⚠ Không lưu được câu vào localStorage: ' + (e && e.message || e));
@@ -448,12 +495,27 @@
   function persistUiState() {
     try {
       const msgEl = shadow && shadow.getElementById('ssb-msg');
-      localStorage.setItem(UI_KEY, JSON.stringify({
+      localStorage.setItem(UI_TAB_KEY, JSON.stringify({
         sel: Array.from(state.listSel || []),
         msg: (msgEl && msgEl.value) || '',
       }));
     } catch (e) { /* ignore — lưu trạng thái là việc phụ */ }
   }
+
+  // v1.93.0: tab khác vừa thêm/sửa/xóa câu → tab này tự đồng bộ lại danh sách câu (chỉ khi
+  // KHÔNG đang gửi — đang gửi thì RAM của tab này là chuẩn, không ai được sửa giữa chừng).
+  window.addEventListener('storage', (ev) => {
+    try {
+      if (!ev || (ev.key !== SL_KEY && ev.key !== SL_GONE_KEY)) return;
+      if (state.sending) return;
+      state.savedLists = loadSavedLists();
+      if (state.listSel) {
+        const okIds = new Set(state.savedLists.map((l) => l.id));
+        state.listSel = new Set(Array.from(state.listSel).filter((id) => okIds.has(id)));
+      }
+      renderSavedLists();
+    } catch (e) { /* ignore */ }
+  });
 
   // Từ các câu ĐANG TÍCH → dựng lựa chọn hiện tại (gộp chat của mọi câu, loại trùng id)
   function rebuildFromLists() {
@@ -571,6 +633,7 @@
       const changed = newName !== l.name || newText !== (l.text || '');
       l.name = newName;
       l.text = newText;
+      l.updatedAt = Date.now(); // v1.93.0: dấu thời gian sửa — tab khác hợp nhất sẽ lấy bản mới hơn
       persistSavedLists();
       renderSavedLists();
       if (state.listSel.has(l.id)) rebuildFromLists(); // câu đang tích → ô cần gửi cập nhật theo
@@ -4214,7 +4277,14 @@
   let gidSaveTimer = null;
   function flushPersistentGids() {
     gidSaveTimer = null;
-    try { localStorage.setItem(GID_LS_KEY, JSON.stringify(persistentGidMap)); } catch (e) { /* ignore */ }
+    try {
+      // v1.93.0: hợp nhất đa tab — global_id là dữ kiện thật (cùng chat → cùng mã): gộp cả bản
+      // đang lưu (tab khác vừa tra được) vào RAM rồi mới ghi — không tab nào ghi đè mất mã của ai.
+      let storedG = {};
+      try { storedG = JSON.parse(localStorage.getItem(GID_LS_KEY) || '{}') || {}; } catch (e) { storedG = {}; }
+      Object.assign(persistentGidMap, storedG);
+      localStorage.setItem(GID_LS_KEY, JSON.stringify(persistentGidMap));
+    } catch (e) { /* ignore */ }
   }
 
   function putGidToMemCaches(key, val) {
@@ -4579,6 +4649,7 @@
   let summaryUiTimer = null;
   let windowBlocked = 0; // số lần API từ chối "(#10)/(#551)… ngoài cửa sổ 24h" trong lượt (đều được bù kênh khác)
   const SUMMARY_LS_KEY = 'ssb_last_summary_v1';
+  const SUMMARY_TAB_KEY = SUMMARY_LS_KEY + '__' + TAB_ID; // v1.93.0: bảng TỔNG HỢP riêng từng tab
   const batchStats = {
     active: false,
     total: 0,
@@ -4607,10 +4678,16 @@
     };
   }
 
+  let lastHbWrite = 0; // v1.93.0: mốc ghi heartbeat gần nhất (thưa 4s)
   function flushBatchSummaryUI() {
     summaryUiTimer = null;
     try {
       if (!batchStats.active && !batchStats.total) return;
+      // v1.93.0: heartbeat "tab này đang gửi" để tab khác phát hiện gửi song song mà cảnh báo
+      if (batchStats.active && Date.now() - lastHbWrite > 4000) {
+        lastHbWrite = Date.now();
+        try { localStorage.setItem(HB_KEY, JSON.stringify({ tab: TAB_ID, ts: Date.now() })); } catch (e) { /* ignore */ }
+      }
       const c = getBatchSummaryCounts();
       const pct = c.total ? ((c.okTotal / c.total) * 100).toFixed(1) : '0.0';
       const elapsedSec = batchStats.startedAt ? Math.max(1, Math.round((Date.now() - batchStats.startedAt) / 1000)) : 0;
@@ -4634,11 +4711,11 @@
       }
       if (c.total > 0) setProgress(c.settled, c.total);
       if (isDoneAll || c.total <= 200) {
-        try { localStorage.setItem(SUMMARY_LS_KEY, html); } catch (e) { /* ignore */ }
+        try { localStorage.setItem(SUMMARY_TAB_KEY, html); } catch (e) { /* ignore */ }
       }
       if (isDoneAll && !batchStats.finalLogged && c.total > 0) {
         batchStats.finalLogged = true;
-        try { localStorage.setItem(SUMMARY_LS_KEY, html); } catch (e) { /* ignore */ }
+        try { localStorage.setItem(SUMMARY_TAB_KEY, html); } catch (e) { /* ignore */ }
         logLine('📊 TỔNG HỢP CHỐT LƯỢT GỬI: ✅ Đã gửi thành công ' + c.okTotal + '/' + c.total
           + ' tin (' + pct + '%)' + chStr
           + ' | ❌ Lỗi: ' + c.failTotal
@@ -4962,6 +5039,15 @@
     // không chặn đúp ở đây thì bấm lần 2 chạy song song lần 1 (log hiện 2 dòng lọc)
     state.sending = true;
     state.stopRequested = false;
+    // v1.93.0: phát hiện tab BOTFAKE khác đang gửi cùng lúc → chỉ CẢNH BÁO, không chặn:
+    // 2 tab độc lập hoàn toàn về danh sách/câu (RAM riêng) nhưng dùng chung 1 tài khoản
+    // Pancake/Facebook → tốc độ mỗi tab có thể chậm hơn và dễ dính 429 hơn.
+    try {
+      const hb = JSON.parse(localStorage.getItem(HB_KEY) || 'null');
+      if (hb && hb.tab && hb.tab !== TAB_ID && Date.now() - (hb.ts || 0) < 15000) {
+        logLine('⚠ Đang có 1 tab BOTFAKE khác cũng gửi cùng lúc — tin KHÔNG lẫn nhau (mỗi tab gửi đúng danh sách + câu của nó), nhưng chung tài khoản nên có thể chậm/dễ 429 hơn.');
+      }
+    } catch (e) { /* ignore */ }
     batchSkipApi = false;
     windowBlocked = 0;
     // trạng thái theo LƯỢT gửi: chat đã đến nơi trong lượt này không bao giờ bị gửi lại;
@@ -5450,6 +5536,7 @@
       const ids = Array.from(consumeIds);
       const delNames = state.savedLists.filter((l) => ids.indexOf(l.id) > -1).map((l) => l.name);
       state.savedLists = state.savedLists.filter((l) => ids.indexOf(l.id) === -1);
+      ids.forEach((id) => goneListIds.add(id)); // v1.93.0: đã tiêu thụ — tab khác không được hồi sinh câu này
       state.listSel = new Set();
       state.loadedName = null;
       persistSavedLists();
@@ -5975,6 +6062,7 @@
         id: 'l' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
         name,
         text: cauText, // CÂU CẦN GỬI đang gõ lúc tạo → gắn liền với câu này (sửa được bằng nút ✎)
+        updatedAt: Date.now(), // v1.93.0: hợp nhất đa tab lấy bản sửa mới hơn
         items: sel.map((m) => ({
           id: m.id,
           pageId: m.pageId || String(m.id).split('_')[0] || '',
@@ -6017,6 +6105,7 @@
             if (!confirm('Xóa câu “' + l.name + '” (' + l.items.length + ' chat)?')) return;
             const wasSel = state.listSel.has(l.id);
             state.savedLists = state.savedLists.filter((x) => x.id !== id);
+            goneListIds.add(id); // v1.93.0: đã xóa — tab khác không được hồi sinh câu này
             if (wasSel) { state.listSel.delete(id); rebuildFromLists(); }
             persistSavedLists();
             renderSavedLists();
@@ -6072,20 +6161,20 @@
     }
     // ===== KHÔI PHỤC SAU F5: câu đang tick + ô nội dung đang gõ + nhật ký — dữ liệu không mất =====
     try {
-      const ui = JSON.parse(localStorage.getItem(UI_KEY) || 'null');
+      const ui = JSON.parse(localStorage.getItem(UI_TAB_KEY) || localStorage.getItem(UI_KEY) || 'null'); // v1.93.0: trạng thái gõ dở của chính tab này
       if (ui && Array.isArray(ui.sel)) {
         const msgEl3 = root.getElementById('ssb-msg');
         if (msgEl3 && ui.msg) msgEl3.value = String(ui.msg); // khôi phục chữ đang gõ trước
         state.listSel = new Set(ui.sel.filter((id) => state.savedLists.some((l) => l.id === id)));
         if (state.listSel.size) rebuildFromLists(); // tích 1 câu → ô gõ nạp theo nội dung câu (đúng UX)
       }
-      const oldLog = JSON.parse(localStorage.getItem(LOG_KEY) || '[]');
+      const oldLog = JSON.parse(localStorage.getItem(LOG_TAB_KEY) || localStorage.getItem(LOG_KEY) || '[]'); // v1.93.0: nhật ký của chính tab này
       if (Array.isArray(oldLog) && oldLog.length) {
         state.log = oldLog.slice(-300);
         const elLog = root.getElementById('ssb-log');
         if (elLog) elLog.textContent = state.log.join('\n');
       }
-      const oldSum = localStorage.getItem(SUMMARY_LS_KEY) || '';
+      const oldSum = localStorage.getItem(SUMMARY_TAB_KEY) || localStorage.getItem(SUMMARY_LS_KEY) || ''; // v1.93.0: ưu tiên bản của chính tab này
       if (oldSum) {
         const elSum = root.getElementById('ssb-summary');
         if (elSum) { elSum.style.display = ''; elSum.innerHTML = oldSum; }
@@ -6233,7 +6322,7 @@
   let logFlushTimer = null;
   function flushLogUI() {
     logFlushTimer = null;
-    try { localStorage.setItem(LOG_KEY, JSON.stringify(state.log)); } catch (e) { /* ignore */ }
+    try { localStorage.setItem(LOG_TAB_KEY, JSON.stringify(state.log)); } catch (e) { /* ignore */ }
     const el = shadow && shadow.getElementById('ssb-log');
     if (el) {
       el.textContent = state.log.join('\n');
@@ -6249,7 +6338,7 @@
     if (state.log.length > 300) state.log.shift();
     const el = shadow && shadow.getElementById('ssb-log');
     if (!el) {
-      try { localStorage.setItem(LOG_KEY, JSON.stringify(state.log)); } catch (e) { /* ignore */ }
+      try { localStorage.setItem(LOG_TAB_KEY, JSON.stringify(state.log)); } catch (e) { /* ignore */ }
       console.log('[SSB]', s);
       return;
     }
