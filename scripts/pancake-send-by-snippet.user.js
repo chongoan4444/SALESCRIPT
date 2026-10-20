@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE
 // @namespace    salescript
-// @version      1.94.0
+// @version      1.95.0
 // @description  BOTFAKE — chọn chuỗi chat (Alt+Click 2 đầu) hoặc theo snippet trong Pancake rồi gửi cùng 1 câu (kèm 1 hoặc nhiều ảnh nếu muốn) cho tất cả.
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -1680,11 +1680,18 @@
           if (rows.length > 200 && doneN % 2000 === 0) {
             logLine('🧰 Chuẩn bị sau tải: ' + doneN + '/' + rows.length + ' chat (có global_id: ' + gidN + ', tra mới: ' + foundN + ')…');
           }
-        }, 128);
+        }, 256); // v1.95.0: 128→256 luồng chuẩn bị
         if (mySeq === loadPrepSeq) {
-          logLine('🧰 Chuẩn bị sau tải XONG: ' + doneN + ' chat (có global_id thật: ' + gidN
-            + ', tra mới: ' + foundN + (skipN ? ', đã sẵn từ trước: ' + skipN : '')
-            + ') — giờ bấm gửi là vào thẳng đợt bắn 1 lượt.');
+          // v1.95.0: báo ĐÚNG trạng thái — bị ngắt giữa chừng (bấm gửi / tải lại) thì nói tạm
+          // dừng ở đâu, không báo "XONG" sai như trước (log 20:27 báo XONG ở 1.462/28.555).
+          if (doneN + skipN >= rows.length) {
+            logLine('🧰 Chuẩn bị sau tải XONG: ' + doneN + ' chat (có global_id thật: ' + gidN
+              + ', tra mới: ' + foundN + (skipN ? ', đã sẵn từ trước: ' + skipN : '')
+              + ') — giờ bấm gửi là vào thẳng đợt bắn 1 lượt.');
+          } else {
+            logLine('⏸ Chuẩn bị sau tải tạm dừng ở ' + (doneN + skipN) + '/' + rows.length
+              + ' chat (đang gửi hoặc tải lại) — phần còn lại sẽ được chuẩn bị tiếp ở lượt gửi.');
+          }
         }
       })().catch(() => {});
     } catch (e) { /* ignore */ }
@@ -4676,6 +4683,7 @@
   // v1.91.0: trong lượt gửi, bù KHÔNG rải theo timer nữa — gom vào 1 hàng đợi để chạy ĐỢT BÙ
   // TẬP TRUNG ngay sau đợt bắn chính (hết cảnh tin bù nhỏ giọt lẻ tẻ suốt nhiều phút sau).
   let buBatchMode = false;
+  let buPhaseActive = false; // v1.95.0: đang chạy đợt bù tập trung — chặn TỔNG HỢP chốt sớm
   const buBatchQueue = [];       // [{conv, text, photo, name, tried}]
   const buBatchQueuedIds = {};   // convId → item trong buBatchQueue (chống gom trùng 1 chat)
   let runSeq = 0; // mỗi lượt gửi 1 số — bù của lượt cũ tự hủy khi có lượt mới (chống gửi lẫn/lặp)
@@ -4735,7 +4743,7 @@
       if (c.okExt) byCh.push('Ext: ' + c.okExt);
       if (c.okSocket) byCh.push('Socket: ' + c.okSocket);
       const chStr = byCh.length ? ' [' + byCh.join(' · ') + ']' : '';
-      const isDoneAll = batchStats.loopFinished && (c.pending === 0 || state.stopRequested);
+      const isDoneAll = batchStats.loopFinished && !buPhaseActive && (c.pending === 0 || state.stopRequested);
       const html = (isDoneAll ? '🏁 <b>TỔNG HỢP:</b> ' : '📊 <b>Đang gửi:</b> ')
         + '<span style="color:#4ade80;font-weight:700">✅ Thành công: ' + c.okTotal + '/' + c.total + ' (' + pct + '%)' + chStr + '</span>'
         + (c.pending > 0 && !state.stopRequested ? ' · <span style="color:#38bdf8">⏳ Đang xử lý: ' + c.pending + '</span>' : '')
@@ -4767,7 +4775,7 @@
 
   function updateBatchSummaryUI() {
     const c = getBatchSummaryCounts();
-    const isDoneAll = batchStats.loopFinished && (c.pending === 0 || state.stopRequested);
+    const isDoneAll = batchStats.loopFinished && !buPhaseActive && (c.pending === 0 || state.stopRequested);
     // Khi chạy lô lớn (>200 chat) và chưa kết thúc: throttle cập nhật DOM 80ms/lần để không treo UI Chrome
     if (!isDoneAll && c.total > 200) {
       if (!summaryUiTimer) summaryUiTimer = setTimeout(flushBatchSummaryUI, 80);
@@ -5424,25 +5432,32 @@
       let prepDone = 0, prepHit = 0, prepFound = 0, prepDeferred = 0, prepLastLog = 0;
       const prepStartedAt = Date.now();
       const PREP_DEADLINE_MS = 120000;
+      let prepDeadline = prepStartedAt + PREP_DEADLINE_MS;
+      let prepMarkDone = 0, prepMarkAt = prepStartedAt;
       if (batch.length > 50) {
         logLine('🧰 Đang CHUẨN BỊ ' + batch.length + ' chat (tra global_id' + (photo ? ' + upload ảnh' : '') + ') — xong là bắn 1 lượt…');
       }
       await runPool(batch, async (c) => {
         if (state.stopRequested) return;
-        if (Date.now() - prepStartedAt > PREP_DEADLINE_MS) { prepDeferred++; return; }
+        if (Date.now() > prepDeadline) { prepDeferred++; return; }
         const pctx = await prepConvForSend(c, photo);
         prepCtxById[c.id] = pctx;
         prepDone++;
         if (pctx.gid && !pctx.gidFromPsid) { if (pctx.gidFromServerOrCache) prepHit++; else prepFound++; }
         if (batch.length > 200 && (prepDone % 2000 === 0 || Date.now() - prepLastLog >= 20000)) {
           prepLastLog = Date.now();
+          // v1.95.0: đang chạy nhanh đều (>=60 chat/s) thì GIA HẠN hạn chót — chỉ cắt khi
+          // thật sự ì vì đuôi chat thiếu mã, không cắt oan lúc máy đang bứt tốc.
+          const rateP = (prepDone - prepMarkDone) / Math.max(1, (Date.now() - prepMarkAt) / 1000);
+          if (rateP >= 60) prepDeadline = Date.now() + PREP_DEADLINE_MS;
+          prepMarkDone = prepDone; prepMarkAt = Date.now();
           logLine('🧰 Chuẩn bị: ' + prepDone + '/' + batch.length + ' (có mã sẵn: ' + prepHit + ' · tra thêm: ' + prepFound + ')…');
         }
-      }, 128);
+      }, 256); // v1.95.0: 128→256 — phần lớn thời gian là CHỜ dò mã nên tăng luồng an toàn, đuôi chat thiếu mã qua nhanh gấp đôi
       if (batch.length > 50 && !state.stopRequested) {
         logLine('🧰 Chuẩn bị xong ' + prepDone + '/' + batch.length + ' chat (có mã sẵn: ' + prepHit + ' · tra thêm: ' + prepFound
           + ' · chưa có mã: ' + (prepDone - prepHit - prepFound) + ')'
-          + (prepDeferred ? ' — ⏭ hết ' + Math.round(PREP_DEADLINE_MS / 1000) + 's nên ' + prepDeferred + ' chat còn lại để đợt bắn tự xử' : '')
+          + (prepDeferred ? ' — ⏭ quá hạn chót chuẩn bị nên ' + prepDeferred + ' chat còn lại để đợt bắn tự xử' : '')
           + ' — BẮT ĐẦU BẮN 1 LƯỢT…');
       }
 
@@ -5513,6 +5528,7 @@
     // 🧺 v1.91.0: ĐỢT BÙ TẬP TRUNG — đợt chính đã bắn xong 1 lượt. Chờ xác nhận nền (Socket
     // bắn-nhả) chốt hết để mọi chat bị từ chối gom đủ vào hàng đợi, rồi bù MỘT ĐỢT gọn ngay
     // tại đây (mỗi kênh còn lại đúng 1 lần/chat) — hết cảnh bù nhỏ giọt lẻ tẻ cả chục phút.
+    buPhaseActive = true; // v1.95.0: từ đây tới hết đợt bù, TỔNG HỢP chưa được chốt (tránh chốt trước dòng bù tạo ra số đó)
     if (buBatchQueue.length && !state.stopRequested) {
       let waited = 0;
       while (sockFiredPending.size > 0 && !state.stopRequested && waited < 180000) {
@@ -5540,6 +5556,7 @@
         if (window && typeof window.__botfakeTrackStatus__ === 'function') window.__botfakeTrackStatus__(it.conv.id, 'fail');
       });
     }
+    buPhaseActive = false;
     buBatchMode = false;
     Object.keys(buBatchQueuedIds).forEach((k) => { delete buBatchQueuedIds[k]; });
     state.sending = false;
