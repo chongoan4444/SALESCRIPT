@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE
 // @namespace    salescript
-// @version      1.97.0
+// @version      1.98.0
 // @description  BOTFAKE — chọn chuỗi chat (Alt+Click 2 đầu) hoặc theo snippet trong Pancake rồi gửi cùng 1 câu (kèm 1 hoặc nhiều ảnh nếu muốn) cho tất cả.
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -4316,9 +4316,20 @@
         recycleUnusedFbId(pid0, ctx);
         return r; // token hỏng — dừng hẳn
       }
+      // v1.98.0: CHỐT KÊNH LƯỢT ĐẦU — trong lượt gửi (buBatchMode), mỗi chat chỉ bắn ĐÚNG 1
+      // kênh tốt nhất đã phân loại (có mã thật + Socket sẵn sàng → Socket; ngoài 24h → Ext/API
+      // theo cờ quảng cáo; kênh từng thắng với khách này được ghi nhớ ưu tiên). Thua hẳn ở
+      // kênh đầu thì DỪNG ngay tại đây — không đi tiếp kênh 2/3 trong đợt chính nữa; các kênh
+      // còn lại để ĐỢT BÙ TẬP TRUNG thử (mỗi kênh đúng 1 lần). Các nhánh 'maybe' (có thể đã
+      // tới — dừng chống trùng), khách không nhận, token hỏng đã return ở phía trên rồi.
+      if (buBatchMode) break;
     }
     recycleUnusedFbId(pid0, ctx);
-    return { ok: false, sent: false, tried: triedCh.slice(), error: tried.join(' | ') };
+    // v1.98.0: thua ở kênh chốt đầu mà còn kênh chưa thử → gắn cờ firstShotFailed để nơi gọi
+    // đưa thẳng vào đợt bù tập trung (kể cả khi câu chữ lỗi không khớp mẫu "đáng bù" cũ —
+    // trước đây không cần qua cổng đó vì đợt chính tự đi tiếp kênh ngay tại chỗ).
+    const firstShotFailed = !!(buBatchMode && triedCh.length && seq.some((x) => triedCh.indexOf(x) < 0));
+    return { ok: false, sent: false, tried: triedCh.slice(), error: tried.join(' | '), firstShotFailed: firstShotFailed };
   }
 
   // ===== CACHE BỀN VỮNG GLOBAL_ID (LOCALSTORAGE + INDEXEDDB "fb_meta_data") & VÁ MQTTHELPER =====
@@ -5338,7 +5349,9 @@
         if (r.windowClosed) windowBlocked++;
         logLine('❌ [' + done + '/' + totalAll + '] ' + (c.name || c.id) + ' — ' + r.error);
         // cửa sổ 24h VẪN bù kênh khác (Thanh Binh); kênh đã thử hết → scheduleBuRetry tự bỏ
-        if (!r.uncertain && !r.recipientUnavailable && isRetryableLoss(r.error)) {
+        // v1.98.0: thua ở kênh chốt lượt đầu (firstShotFailed) → vào thẳng đợt bù tập trung,
+        // không cần khớp mẫu lỗi "đáng bù" như trước (vì đợt chính không còn tự đi tiếp kênh)
+        if (!r.uncertain && !r.recipientUnavailable && (r.firstShotFailed || isRetryableLoss(r.error))) {
           const p2 = c.pageId || String(c.id).split('_')[0];
           scheduleBuRetry(c, gtext, photo
             ? { url: photo.url, id: photo.id, fbId: fbIdByPage[p2] || '', w: photo.w, h: photo.h }
