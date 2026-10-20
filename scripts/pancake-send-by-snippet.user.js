@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE
 // @namespace    salescript
-// @version      1.91.0
+// @version      1.92.0
 // @description  BOTFAKE — chọn chuỗi chat (Alt+Click 2 đầu) hoặc theo snippet trong Pancake rồi gửi cùng 1 câu (kèm 1 hoặc nhiều ảnh nếu muốn) cho tất cả.
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -1586,6 +1586,49 @@
   }
 
   // Danh sách là virtual list (rc-virtual-list): chỉ render các dòng đang thấy.
+  // 🧰 v1.92.0: CHUẨN BỊ NGAY KHI TẢI DANH SÁCH (theo yêu cầu người dùng): vừa tải xong là
+  // tự chạy khâu chuẩn bị cho toàn bộ danh sách — nạp ngữ cảnh + tra global_id bằng mọi đường
+  // (WebSocket / Extension / MAKE_MESSENGER_LINK) và LƯU VÀO KHO BỀN (localStorage + IndexedDB
+  // qua saveCache sẵn có) → tới lúc bấm gửi, giai đoạn chuẩn bị trong sendBatch gần như chỉ
+  // chạm cache (0ms) và vào thẳng đợt bắn 1 lượt. Chạy nền 96 luồng, không chặn giao diện;
+  // người dùng vẫn chọn câu/soạn nội dung trong lúc chuẩn bị. Tải lại danh sách → phiên cũ
+  // tự hủy (loadPrepSeq); đang gửi hoặc đang tải lại → nhường ngay (khâu chuẩn bị lúc gửi lo).
+  let loadPrepSeq = 0;
+  const loadPreppedIds = new Set(); // convId đã chuẩn bị ở khâu tải trong phiên trang này
+  function startPrepAfterLoad() {
+    try {
+      if (!state.allRows || !state.allRows.size) return;
+      const mySeq = ++loadPrepSeq;
+      const rows = Array.from(state.allRows.values());
+      (async () => {
+        try { warmUpSockets(rows); } catch (e) { /* ignore */ }
+        let doneN = 0, gidN = 0, skipN = 0;
+        logLine('🧰 Tải xong — TỰ CHUẨN BỊ NGAY ' + rows.length + ' chat (tra global_id trước, để lúc bấm gửi là bắn luôn)…');
+        await runPool(rows, async (c) => {
+          if (mySeq !== loadPrepSeq) return; // đã tải lại danh sách mới → phiên chuẩn bị cũ dừng
+          if (state.scanning || state.sending) return; // đang tải lại / đang gửi → nhường
+          if (!c || !c.id || loadPreppedIds.has(c.id)) { skipN++; return; }
+          loadPreppedIds.add(c.id);
+          try {
+            await ensureConvCtx(c, { force: true });
+            const pctx = { __prepped: true };
+            await prepareDirectCtx(c, null, pctx);
+            if (pctx.gid && !pctx.gidFromPsid) gidN++;
+          } catch (e) { /* ignore — chat lỗi khâu này sẽ tự chuẩn bị lại lúc gửi */ }
+          doneN++;
+          if (rows.length > 200 && doneN % 2000 === 0) {
+            logLine('🧰 Chuẩn bị sau tải: ' + doneN + '/' + rows.length + ' chat (đã có global_id thật: ' + gidN + ')…');
+          }
+        }, 96);
+        if (mySeq === loadPrepSeq) {
+          logLine('🧰 Chuẩn bị sau tải XONG: ' + doneN + ' chat (có global_id thật: ' + gidN
+            + (skipN ? ', đã sẵn từ trước: ' + skipN : '')
+            + ') — giờ bấm gửi là vào thẳng đợt bắn 1 lượt.');
+        }
+      })().catch(() => {});
+    } catch (e) { /* ignore */ }
+  }
+
   // Khi người dùng bấm "⚡ Tải danh sách": PHẢI XÓA SẠCH DANH SÁCH CŨ (state.allRows = null)
   // rồi tải lại danh sách mới hoàn toàn từ đầu. Nếu đang tải dở mà bấm lần 2 → dừng ngay & dùng số chat đã tải!
   async function scanFullList() {
@@ -1769,6 +1812,8 @@
     } finally {
       state.scanning = false;
       state.scanStopRequested = false;
+      // v1.92.0: tải xong (kể cả dừng giữa chừng dùng số đã tải) → CHUẨN BỊ LUÔN tại chỗ
+      startPrepAfterLoad();
       if (btn && state.allRows) {
         setBtn('⚡ Tải danh sách (' + state.allRows.size + ' chat)');
       } else if (btn) {
