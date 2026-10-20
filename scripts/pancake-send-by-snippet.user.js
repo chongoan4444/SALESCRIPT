@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE
 // @namespace    salescript
-// @version      1.80.0
+// @version      1.84.0
 // @description  BOTFAKE — chọn chuỗi chat (Alt+Click 2 đầu) hoặc theo snippet trong Pancake rồi gửi cùng 1 câu (kèm 1 hoặc nhiều ảnh nếu muốn) cho tất cả.
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -1254,7 +1254,12 @@
           // treo/lỗi thì tự chết, tuyệt đối không chặn luồng gốc (không còn Promise.all theo vòng).
           while (!helpersDone && !stopped() && !seg.absorbed && seg.cursor) {
             const res = await fetchPage(seg.pageCount, seg.cursor, seg.estCount + seg.items.length, { forceMulti: forceMultiEndpoint, tries: 2, timeoutMs: 10000 });
-            if (!res.ok) return;
+            if (!res.ok) {
+              // v1.84.0: lỗi lẻ không giết luồng phụ nữa (chết sớm = mất hẳn 1 đường tải song song)
+              if ((seg.errRetry = (seg.errRetry || 0) + 1) <= 6) { await sleep(1200 + Math.random() * 800); continue; }
+              return;
+            }
+            seg.errRetry = 0;
             const j = res.data || {};
             const convs = j.conversations || [];
             if (!convs.length) { seg.cursor = null; return; }
@@ -1277,7 +1282,17 @@
       while (guard++ < 1500 && seg0.cursor && !stopped()) {
         const before = seg0.items.length;
         const res = await fetchPage(seg0.pageCount, seg0.cursor, seg0.items.length, { forceMulti: forceMultiEndpoint, tries: 3, timeoutMs: 12000 });
-        if (!res.ok) break;
+        if (!res.ok) {
+          // v1.84.0: luồng gốc gặp lỗi lẻ (mạng chập chờn/server ì) thì nghỉ rồi tải tiếp ĐÚNG
+          // cursor, tối đa 8 lần — danh sách chỉ thật sự hết khi server báo hết dữ liệu.
+          seg0.errRetry = (seg0.errRetry || 0) + 1;
+          if (seg0.errRetry === 1) logLine('⏸ Tải bị gián đoạn (' + (res.error || 'lỗi') + ') ở ' + seg0.items.length + ' chat — đang tự thử lại…');
+          if (seg0.errRetry <= 8) { await sleep(2000); continue; }
+          logLine('⚠ Không tải tiếp được sau 8 lần thử — danh sách CHƯA đầy đủ (' + seg0.items.length + ' chat), bấm tải lại để tiếp tục.');
+          seg0.truncated = true;
+          break;
+        }
+        seg0.errRetry = 0;
         const j = res.data || {};
         const convs = j.conversations || [];
         pushConvs(seg0, convs);
@@ -1292,7 +1307,9 @@
         for (let s = alive; s < STRIDES.length; s++) spawnHelper();
       }
       helpersDone = true;
-      logLine('⚡⚡ Tải đa luồng 1 page: ' + seg0.items.length + ' chat trong ' + ((Date.now() - startedAt) / 1000).toFixed(1) + 's');
+      logLine('⚡⚡ Tải đa luồng 1 page: ' + seg0.items.length + ' chat trong ' + ((Date.now() - startedAt) / 1000).toFixed(1) + 's'
+        + ' (~' + Math.round(seg0.items.length / Math.max(1, (Date.now() - startedAt) / 1000)) + ' chat/giây)'
+        + (seg0.truncated ? ' · ⚠ CHƯA ĐẦY ĐỦ' : ''));
       return { ok: true, rows: seg0.items };
     }
   }
@@ -1597,9 +1614,11 @@
           state.allRows.set(r.id, r);
         }
         lastSyncedLen = rowsArr.length;
-        computeMatches();
+        // v1.84.0: KHÔNG computeMatches() trong lúc tải — quét toàn bộ danh sách (30k dòng) mỗi
+        // 400ms trên luồng giao diện, giành CPU với việc xử lý dữ liệu tải về (máy yếu càng rõ).
+        // Lúc tải chỉ đếm O(1); khớp 1 lần duy nhất khi tải xong (ở cuối scanFullList).
         const cntEl = shadow && shadow.getElementById('ssb-count');
-        if (cntEl) cntEl.textContent = String(state.matches.length);
+        if (cntEl) cntEl.textContent = String(state.allRows.size);
       };
 
       const api = await loadListViaApi((n, rowsArr) => {
