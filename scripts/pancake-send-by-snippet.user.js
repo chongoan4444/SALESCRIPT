@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE
 // @namespace    salescript
-// @version      1.95.0
+// @version      1.96.0
 // @description  BOTFAKE — chọn chuỗi chat (Alt+Click 2 đầu) hoặc theo snippet trong Pancake rồi gửi cùng 1 câu (kèm 1 hoặc nhiều ảnh nếu muốn) cho tất cả.
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -5419,47 +5419,35 @@
         }
       };
 
-      // ⚡ GID PREFETCH (v1.70.0): pipeline chạy nền SONG SONG với làn gửi, đi trước để nạp sẵn
-      // ngữ cảnh + global_id (GET /messages, có dedupe inflight trong ensureConvCtx) cho các chat
-      // phía sau — tới lượt worker gửi thì gid đã có sẵn trong cache (0ms), không phải đứng chờ HTTP.
-      // Không await: prefetch chậm hơn làn gửi cũng vô hại (toàn cache hit), nhanh hơn thì làn gửi bứt tốc.
-      // 🧰 v1.91.0 + v1.94.0: GIAI ĐOẠN CHUẨN BỊ — chuẩn bị trước rồi bắn 1 lượt, nhưng CHIA
-      // TẦNG cho nhanh: chat có sẵn global_id qua 0ms (không gọi server), chỉ chat thiếu mới
-      // tra thật (prepConvForSend/prepMode — bỏ bão GET /messages + không đốt MAKE_MESSENGER_LINK,
-      // đường cứu chậm đó dành cho đợt bù). Thêm HẠN CHÓT 120s: quá hạn thì số chat còn lại để
-      // đợt bắn tự xử như bản nhanh cũ — không bao giờ bắt người dùng chờ chuẩn bị cả tiếng.
+      // 🚀 v1.96.0: GỬI NGAY KIỂU LAI (theo lựa chọn của người dùng) — BỎ rào chắn "chuẩn bị
+      // xong mới bắn" của v1.91: bấm gửi là tin bay ngay bằng kho mã đã chuẩn bị từ lúc tải
+      // danh sách (v1.92); khâu chuẩn bị quay lại dạng PIPELINE CHẠY TRƯỚC Ở NỀN (như bản
+      // nhanh v1.70/v1.80 đã đo 143 tin/s): chạy song song cùng thứ tự với làn bắn — bắn tới
+      // chat nào thì ngữ cảnh chat đó thường đã tra sẵn trong prepCtxById (chỉ gán vào bảng
+      // SAU khi chuẩn bị xong hẳn, nên làn bắn hoặc thấy trọn vẹn, hoặc không thấy và tự xử
+      // như bản nhanh — không bao giờ đụng phải ngữ cảnh đang làm dở, không đứng chờ).
+      // Đợt bù tập trung cuối lượt (v1.91) giữ nguyên — đó mới là thứ trị tin lẻ tẻ.
       const prepCtxById = {};
-      let prepDone = 0, prepHit = 0, prepFound = 0, prepDeferred = 0, prepLastLog = 0;
-      const prepStartedAt = Date.now();
-      const PREP_DEADLINE_MS = 120000;
-      let prepDeadline = prepStartedAt + PREP_DEADLINE_MS;
-      let prepMarkDone = 0, prepMarkAt = prepStartedAt;
+      const prepRun = runSeq; // lượt gửi mới bắt đầu → pipeline của lượt cũ tự dừng
+      let prepDone = 0, prepHit = 0, prepFound = 0, prepLastLog = 0;
       if (batch.length > 50) {
-        logLine('🧰 Đang CHUẨN BỊ ' + batch.length + ' chat (tra global_id' + (photo ? ' + upload ảnh' : '') + ') — xong là bắn 1 lượt…');
+        logLine('🚀 Bắn ngay ' + batch.length + ' chat (không chờ chuẩn bị) — chuẩn bị chạy trước ở nền, bổ sung mã cho các chat phía sau…');
       }
-      await runPool(batch, async (c) => {
-        if (state.stopRequested) return;
-        if (Date.now() > prepDeadline) { prepDeferred++; return; }
+      runPool(batch, async (c) => {
+        if (state.stopRequested || prepRun !== runSeq) return;
         const pctx = await prepConvForSend(c, photo);
         prepCtxById[c.id] = pctx;
         prepDone++;
         if (pctx.gid && !pctx.gidFromPsid) { if (pctx.gidFromServerOrCache) prepHit++; else prepFound++; }
-        if (batch.length > 200 && (prepDone % 2000 === 0 || Date.now() - prepLastLog >= 20000)) {
+        if (batch.length > 200 && (prepDone % 5000 === 0 || Date.now() - prepLastLog >= 30000)) {
           prepLastLog = Date.now();
-          // v1.95.0: đang chạy nhanh đều (>=60 chat/s) thì GIA HẠN hạn chót — chỉ cắt khi
-          // thật sự ì vì đuôi chat thiếu mã, không cắt oan lúc máy đang bứt tốc.
-          const rateP = (prepDone - prepMarkDone) / Math.max(1, (Date.now() - prepMarkAt) / 1000);
-          if (rateP >= 60) prepDeadline = Date.now() + PREP_DEADLINE_MS;
-          prepMarkDone = prepDone; prepMarkAt = Date.now();
-          logLine('🧰 Chuẩn bị: ' + prepDone + '/' + batch.length + ' (có mã sẵn: ' + prepHit + ' · tra thêm: ' + prepFound + ')…');
+          logLine('🧰 Chuẩn bị nền: ' + prepDone + '/' + batch.length + ' (có mã sẵn: ' + prepHit + ' · tra thêm: ' + prepFound + ')…');
         }
-      }, 256); // v1.95.0: 128→256 — phần lớn thời gian là CHỜ dò mã nên tăng luồng an toàn, đuôi chat thiếu mã qua nhanh gấp đôi
-      if (batch.length > 50 && !state.stopRequested) {
-        logLine('🧰 Chuẩn bị xong ' + prepDone + '/' + batch.length + ' chat (có mã sẵn: ' + prepHit + ' · tra thêm: ' + prepFound
-          + ' · chưa có mã: ' + (prepDone - prepHit - prepFound) + ')'
-          + (prepDeferred ? ' — ⏭ quá hạn chót chuẩn bị nên ' + prepDeferred + ' chat còn lại để đợt bắn tự xử' : '')
-          + ' — BẮT ĐẦU BẮN 1 LƯỢT…');
-      }
+      }, 256).then(() => {
+        if (batch.length > 50 && !state.stopRequested && prepRun === runSeq && prepDone > 0) {
+          logLine('🧰 Chuẩn bị nền xong ' + prepDone + '/' + batch.length + ' chat (có mã sẵn: ' + prepHit + ' · tra thêm: ' + prepFound + ' · chưa có mã: ' + (prepDone - prepHit - prepFound) + ').');
+        }
+      }).catch(() => {});
 
       const extWorkers = [];
       const nExtWorkers = Math.min(EXT_BACKLOG_WORKERS, Math.max(1, batch.length));
