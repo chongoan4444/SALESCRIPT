@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE
 // @namespace    salescript
-// @version      1.81.0
+// @version      1.82.0
 // @description  BOTFAKE — chọn chuỗi chat (Alt+Click 2 đầu) hoặc theo snippet trong Pancake rồi gửi cùng 1 câu (kèm 1 hoặc nhiều ảnh nếu muốn) cho tất cả.
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -737,7 +737,7 @@
       try {
         // fetch trần KHÔNG tự hết hạn — kết nối treo là await treo theo → chặn toàn bộ lượt gửi
         const ctl = (typeof AbortController === 'function') ? new AbortController() : null;
-        if (ctl) abortTimer = setTimeout(() => ctl.abort(), 15000);
+        if (ctl) abortTimer = setTimeout(() => ctl.abort(), (reqOpts && reqOpts.timeoutMs) || 15000); // v1.82.0: tôn trọng timeoutMs (trước cố định 15s → request treo lâu gấp nhiều lần khi server ì)
         const r = await fetch(url, {
           method: isPost ? 'POST' : 'GET',
           body: (isPost && reqOpts.bodyObj) ? buildFormDataFromObj(reqOpts.bodyObj) : undefined,
@@ -1175,7 +1175,7 @@
         return { ok: true, rows: seg0.items };
       }
 
-      const STRIDES = [1.1, 2.2, 3.3, 4.4, 5.5, 6.6, 7.7, 8.8, 9.9, 11, 12.1, 13.2, 14.3, 15.4]; // v1.81.0: 14 luồng phụ (v1.76 dùng 20 → bão 429; 10 luồng đo được chỉ ~100 chat/s)
+      const STRIDES = [1.1, 2.2, 3.3, 4.4, 5.5, 6.6, 7.7, 8.8, 9.9, 11]; // v1.82.0: về 10 luồng phụ — bản 14 luồng (v1.81) đẩy server vào 429 khiến cả luồng gốc đứng im ở ~200 chat
       const samplePageId = parsed0.keyStr.split(':')[0] || String((p1.ids && p1.ids[0]) || '');
       const dummyKeyStr = samplePageId + ':' + samplePageId + '_99999999999999999999';
       const segments = [];
@@ -1279,10 +1279,16 @@
       let guard = 0;
       while (guard++ < 1500 && seg0.cursor && !stopped()) {
         const before = seg0.items.length;
-        const res = await fetchPage(seg0.pageCount, seg0.cursor, seg0.items.length, { forceMulti: forceMultiEndpoint, tries: 3, timeoutMs: 12000 });
+        const res = await fetchPage(seg0.pageCount, seg0.cursor, seg0.items.length, { forceMulti: forceMultiEndpoint, tries: 2, timeoutMs: 10000 });
         if (!res.ok) {
-          // 429 không được cắt đứt danh sách: nghỉ rồi tải tiếp ĐÚNG cursor này
-          if (/429/.test(res.error || '') && (seg0.retry429 = (seg0.retry429 || 0) + 1) <= 12) { await sleep(1500); continue; }
+          // 429: nghỉ rồi tải tiếp ĐÚNG cursor này (không cắt cụt danh sách) nhưng có GIỚI HẠN số lần
+          // và PHẢI có log — bản v1.81 thử lại 12 lần trong im lặng khiến người dùng thấy tải "đứng im".
+          if (/429/.test(res.error || '')) {
+            seg0.retry429 = (seg0.retry429 || 0) + 1;
+            if (seg0.retry429 === 1) logLine('⏸ Server đang giới hạn tốc độ tải (429) — tạm nghỉ rồi tải tiếp từ vị trí ' + seg0.items.length + ' chat…');
+            if (seg0.retry429 <= 5) { await sleep(2000); continue; }
+            logLine('⚠ Server giới hạn tốc độ quá lâu — dừng ở ' + seg0.items.length + ' chat đã tải. Hãy bấm tải lại (nên tắt bớt các tool Pancake khác đang chạy cùng lúc).');
+          }
           break;
         }
         const j = res.data || {};
