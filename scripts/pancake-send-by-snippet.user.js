@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE
 // @namespace    salescript
-// @version      1.86.0
+// @version      1.87.0
 // @description  BOTFAKE — chọn chuỗi chat (Alt+Click 2 đầu) hoặc theo snippet trong Pancake rồi gửi cùng 1 câu (kèm 1 hoặc nhiều ảnh nếu muốn) cho tất cả.
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -2693,11 +2693,11 @@
       }
     };
 
-    // v1.86.0: làn nền chờ bản đồ thread WebSocket tới 9s (trước 1,5s) — loadThread nạp dần,
-    // nhiều chat có global_id ở giây 3–8; cuộc đua vốn đã bị chặn bởi timeout 10s của Extension
-    // nên chờ thêm KHÔNG tốn thời gian, chỉ tăng tỉ lệ dò trúng. Làn nhanh vẫn 1,5s cho thoáng.
-    const wsWaitMs = (ctx && ctx.fastOnly) ? 1500 : 9000;
-    const extWaitMs = 10000;
+    // v1.87.0: CẮT CỨNG thời gian dò global_id ở làn nền (WS 5s, Ext 6s, deadline tổng 6s).
+    // Bản 1.86 cho chờ 9–10s/chat khiến nhóm chưa có sẵn global_id chỉ đạt ~5 chat/s qua 48 worker.
+    // Quá deadline → đi thẳng đường cứu hộ API/Extension (v1.86) thay vì đứng chờ đủ 10 giây.
+    const wsWaitMs = (ctx && ctx.fastOnly) ? 1500 : 5000;
+    const extWaitMs = 6000;
     const raceTasks = [];
 
     // Nhánh 1: WebSocket PENDING_MESSAGES + wakingUpLoadThread + wsPoll 60ms (bắt ngay global_id ở <60ms khi loadThread về,
@@ -2881,7 +2881,10 @@
       })());
     }
 
-    const gid = raceTasks.length ? await firstNonNull(raceTasks) : null;
+    const gidDeadlineMs = (ctx && ctx.fastOnly) ? 1500 : 6000;
+    const gid = raceTasks.length
+      ? await Promise.race([firstNonNull(raceTasks), sleep(gidDeadlineMs).then(() => null)])
+      : null;
     cleanupRace();
     if (gid && String(gid) !== badGid) {
       saveCache(gid);
@@ -3760,7 +3763,7 @@
   const PHOTO_UPLOAD_PARALLEL = 96;
   const GID_EXT_PARALLEL = 24;
   const PREP_PARALLEL_EXT = 160;  // số chat chưa có global_id chuẩn bị HTTP/WS song song (không bị chặn bởi gidExtLane)
-  const BUS_PARALLEL_EXT = 6;     // số lệnh adapter.send (REPLY_INBOX_PHOTO) chạy song song
+  const BUS_PARALLEL_EXT = 12;    // v1.87.0: 6→12 — lệnh gửi qua Extension (nhất là kèm ảnh) mất vài giây/lệnh, 6 làn là cổ chai cứng của gửi ảnh
   const BUS_PARALLEL_SOCKET = 64; // số frame Socket (/ls_req) in-flight trên mỗi kết nối WebSocket (kèm giãn nhịp 2ms chống burst; vẫn giữ retry + socketRejectStreak bảo vệ)
   const SIDE_EFFECT_PARALLEL = 4; // số request nền (fill_admin_name / update_global_id) chạy song song
   function makeLane(parallel) {
@@ -5058,7 +5061,7 @@
     //     Âm thầm rút các chat từ extBacklogQueue để hỏi Extension / WebSocket loadThread mà không bao giờ
     //     chiếm mất bất kỳ ghế nào của Làn 1!
     const FAST_HTTP_SOCKET_POOL = 192; // v1.80.0: 160→192 worker làn nhanh
-    const EXT_BACKLOG_WORKERS = 48;
+    const EXT_BACKLOG_WORKERS = 64; // v1.87.0: 48→64 worker làn nền (kết hợp deadline dò 6s → ~10 chat/s cho nhóm chưa có global_id)
     let gtextRef = '';
     const sendBatch = async (gtext, batch) => {
       gtextRef = gtext;
