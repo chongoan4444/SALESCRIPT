@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE
 // @namespace    salescript
-// @version      1.88.0
+// @version      1.89.0
 // @description  BOTFAKE — chọn chuỗi chat (Alt+Click 2 đầu) hoặc theo snippet trong Pancake rồi gửi cùng 1 câu (kèm 1 hoặc nhiều ảnh nếu muốn) cho tất cả.
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -2693,11 +2693,12 @@
       }
     };
 
-    // v1.87.0: CẮT CỨNG thời gian dò global_id ở làn nền (WS 5s, Ext 6s, deadline tổng 6s).
-    // Bản 1.86 cho chờ 9–10s/chat khiến nhóm chưa có sẵn global_id chỉ đạt ~5 chat/s qua 48 worker.
-    // Quá deadline → đi thẳng đường cứu hộ API/Extension (v1.86) thay vì đứng chờ đủ 10 giây.
-    const wsWaitMs = (ctx && ctx.fastOnly) ? 1500 : 5000;
-    const extWaitMs = 6000;
+    // v1.89.0: thời gian dò về ĐÚNG bản nhanh v1.80 (WS chờ 1,5s). Bản 1.86/1.87 chờ 9s/6s làm
+    // mỗi chat chưa có sẵn global_id nằm đủ cửa sổ trong làn nền → tốc độ sập còn ~41 tin/s.
+    // global_id về muộn vẫn được bắt lại ngay trước khi bắn (sendViaSocket đối chiếu
+    // threadMappingStoreV2 lần cuối), nên chờ ngắn không làm mất cơ hội gửi của chat nào.
+    const wsWaitMs = 1500;
+    const extWaitMs = 10000;
     const raceTasks = [];
 
     // Nhánh 1: WebSocket PENDING_MESSAGES + wakingUpLoadThread + wsPoll 60ms (bắt ngay global_id ở <60ms khi loadThread về,
@@ -2881,10 +2882,7 @@
       })());
     }
 
-    const gidDeadlineMs = (ctx && ctx.fastOnly) ? 1500 : 6000;
-    const gid = raceTasks.length
-      ? await Promise.race([firstNonNull(raceTasks), sleep(gidDeadlineMs).then(() => null)])
-      : null;
+    const gid = raceTasks.length ? await firstNonNull(raceTasks) : null;
     cleanupRace();
     if (gid && String(gid) !== badGid) {
       saveCache(gid);
