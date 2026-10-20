@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE
 // @namespace    salescript
-// @version      1.96.0
+// @version      1.97.0
 // @description  BOTFAKE — chọn chuỗi chat (Alt+Click 2 đầu) hoặc theo snippet trong Pancake rồi gửi cùng 1 câu (kèm 1 hoặc nhiều ảnh nếu muốn) cho tất cả.
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -2690,7 +2690,23 @@
   //     (extBacklogQueue), TUYỆT ĐỐI KHÔNG giữ chân worker của Làn Nhanh!
   //   • Bước 2 + 3 (Chạy trong hồ nền extBacklogQueue): Đua song song WebSocket PENDING_MESSAGES + Extension,
   //     kèm mạch ngắt thông minh (extNullStreak) và TUYỆT ĐỐI không trả về from_psid sai để bắn mù vào Socket!
+  // v1.97.0: CHỐNG DÒ TRÙNG — pipeline chuẩn bị nền và làn gửi cùng dò global_id cho 1 chat
+  // thì dùng CHUNG 1 lượt dò đang chạy (đắt nhất là các ca phải hỏi Extension), không đốt 2
+  // lần và không tranh làn Extension với nhau. forceFind (đợt bù ép dò lại) không dùng chung.
+  const gidResolveInflight = new Map();
   async function resolveGlobalId(full, threadId, cacheKey, convFromPsid, forceFind, ctx) {
+    const dKey = String(cacheKey || (full && full.id) || '') + '|' + String(threadId || '');
+    if (!forceFind && dKey !== '|') {
+      const flying = gidResolveInflight.get(dKey);
+      if (flying) return flying;
+      const p = resolveGlobalIdInner(full, threadId, cacheKey, convFromPsid, forceFind, ctx);
+      gidResolveInflight.set(dKey, p);
+      try { return await p; } finally { gidResolveInflight.delete(dKey); }
+    }
+    return resolveGlobalIdInner(full, threadId, cacheKey, convFromPsid, forceFind, ctx);
+  }
+
+  async function resolveGlobalIdInner(full, threadId, cacheKey, convFromPsid, forceFind, ctx) {
     const key = (full && full.id) || cacheKey;
     const pageId = (full && full.page_id) || (full && full.pageId) || String(cacheKey || '').split('_')[0];
     const tKey = (pageId && threadId) ? (pageId + '_' + threadId) : '';
@@ -2949,7 +2965,11 @@
             finishExt(null, !!(mlRes && mlRes.timedOut !== true));
           }).catch(() => finishExt(null, false));
         };
-        if (typeof window.findGlobalIdForConv === 'function') {
+        if (ctx && ctx.prepLight) {
+          // v1.97.0: pipeline nền lúc đang bắn chỉ dò NHẸ (cache + WebSocket) — không hỏi
+          // Extension ở đây để khỏi tranh làn Ext với các tin đang gửi; ca khó để làn gửi/đợt bù lo.
+          finishExt(null, false);
+        } else if (typeof window.findGlobalIdForConv === 'function') {
           Promise.resolve().then(() => window.findGlobalIdForConv({
             pageId: pageId,
             threadId: threadId,
@@ -3960,8 +3980,9 @@
   // không đốt MAKE_MESSENGER_LINK — xem resolveGlobalId). Dùng chung cho chuẩn-bị-sau-tải và
   // chuẩn-bị-trước-khi-bắn; pctx trả về cho làn bắn dùng lại, lúc tải thì bỏ qua (chỉ lấy tác
   // dụng phụ: làm ấm mọi kho cache + lưu bền global_id vừa tra được).
-  async function prepConvForSend(c, photo) {
+  async function prepConvForSend(c, photo, opts) {
     const pctx = { __prepped: true, prepMode: true };
+    if (opts && opts.light) pctx.prepLight = true; // v1.97.0: pipeline nền lúc đang bắn — dò nhẹ, không tranh làn Ext với tin đang gửi
     try {
       if (!c || c.type === 'comment') return pctx;
       const peeked = peekConv(c) || c;
@@ -5435,7 +5456,7 @@
       }
       runPool(batch, async (c) => {
         if (state.stopRequested || prepRun !== runSeq) return;
-        const pctx = await prepConvForSend(c, photo);
+        const pctx = await prepConvForSend(c, photo, { light: true }); // v1.97.0: dò nhẹ, không tranh làn Ext
         prepCtxById[c.id] = pctx;
         prepDone++;
         if (pctx.gid && !pctx.gidFromPsid) { if (pctx.gidFromServerOrCache) prepHit++; else prepFound++; }
