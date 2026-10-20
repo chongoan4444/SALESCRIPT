@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE
 // @namespace    salescript
-// @version      1.89.0
+// @version      1.90.0
 // @description  BOTFAKE — chọn chuỗi chat (Alt+Click 2 đầu) hoặc theo snippet trong Pancake rồi gửi cùng 1 câu (kèm 1 hoặc nhiều ảnh nếu muốn) cho tất cả.
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -2848,18 +2848,14 @@
           })).then((v) => {
             if (v && String(v) !== badGid) {
               finishExt(v, false);
-            } else if (isLargeBatch) {
-              // Chính findGlobalIdForConv của Extension đã chạy xong và trả về null → xác nhận khách khóa nick
-              finishExt(null, true);
             } else {
+              // v1.90.0: kể cả lô lớn cũng thử tiếp MAKE_MESSENGER_LINK (đường app dùng để đọc
+              // selected_item_id làm global_id) trước khi kết luận không có global_id — trước đây
+              // lô lớn bỏ qua bước này nên cả một lớp chat lỗi oan cả 3 kênh.
               tryMessengerLink();
             }
           }).catch(() => {
-            if (isLargeBatch) {
-              finishExt(null, false);
-            } else {
-              tryMessengerLink();
-            }
+            tryMessengerLink();
           });
         } else {
           tryMessengerLink();
@@ -5154,7 +5150,7 @@
             }
           }
         } catch (e) { /* ignore */ }
-      }, 128).catch(() => {}); // v1.88.0: 96→128 worker nạp nền (khớp làn GET ngữ cảnh 128) + upload ảnh trước
+      }, 96).catch(() => {}); // v1.90.0: về 96 worker (mức của bản nhanh v1.80) — 128 worker tự gây 429 cho chính GET /messages khiến nhiều chat mất global_id oan; vẫn upload ảnh trước như v1.88
 
       const extWorkers = [];
       const nExtWorkers = Math.min(EXT_BACKLOG_WORKERS, Math.max(1, batch.length));
