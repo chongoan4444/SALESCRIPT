@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE
 // @namespace    salescript
-// @version      1.90.0
+// @version      1.91.0
 // @description  BOTFAKE — chọn chuỗi chat (Alt+Click 2 đầu) hoặc theo snippet trong Pancake rồi gửi cùng 1 câu (kèm 1 hoặc nhiều ảnh nếu muốn) cho tất cả.
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -4002,7 +4002,7 @@
     ctx.sockFired = !!opts.sockFired;
     ctx.hasTextMsg = !!(text && String(text).trim().length > 0);
     ctx.deferredToExt = false;
-    if (!ctx.fastOnly && ctx.gidResolved && !ctx.gid) {
+    if (!ctx.fastOnly && ctx.gidResolved && !ctx.gid && !ctx.__prepped) {
       ctx.gidResolved = false;
     }
     const channels = {
@@ -4519,6 +4519,11 @@
   const BU_SPREAD_MS = 50;      // rải nhẹ 50ms — hàng đợi Socket/Ext vốn đã tự điều tiết
   const buRetryDone = {}; // convId → đã bù trong lượt này
   let buRetrySeq = 0;
+  // v1.91.0: trong lượt gửi, bù KHÔNG rải theo timer nữa — gom vào 1 hàng đợi để chạy ĐỢT BÙ
+  // TẬP TRUNG ngay sau đợt bắn chính (hết cảnh tin bù nhỏ giọt lẻ tẻ suốt nhiều phút sau).
+  let buBatchMode = false;
+  const buBatchQueue = [];       // [{conv, text, photo, name, tried}]
+  const buBatchQueuedIds = {};   // convId → item trong buBatchQueue (chống gom trùng 1 chat)
   let runSeq = 0; // mỗi lượt gửi 1 số — bù của lượt cũ tự hủy khi có lượt mới (chống gửi lẫn/lặp)
   const deliveredIds = {}; // convId → ĐÃ có kênh báo thành công trong lượt này ('api'|'ext'|'socket') — tuyệt đối không gửi lại
   const finalFailedIds = {}; // convId → đã thất bại hẳn (hết kênh hoặc khách khóa nick)
@@ -4690,6 +4695,19 @@
     // Chỉ bật gidForceFind khi đã từng thử 'ext' hoặc 'socket' mà thất bại; nếu mới chỉ thử 'api'
     // (API từ chối ngoài 24h) thì global_id trong cache/GET /messages vẫn hoàn toàn hợp lệ!
     const hadDirectFail = triedCh.indexOf('ext') > -1 || triedCh.indexOf('socket') > -1 || done.length > 0;
+    // v1.91.0: đang trong lượt gửi → gom vào ĐỢT BÙ TẬP TRUNG (chạy gọn 1 lần sau đợt chính),
+    // không setTimeout rải rác nữa. Chat đã có trong hàng đợi thì chỉ gộp thêm kênh đã thử.
+    if (buBatchMode) {
+      const ex = buBatchQueuedIds[conv.id];
+      if (ex) {
+        triedCh.forEach((t) => { if (ex.tried.indexOf(t) < 0) ex.tried.push(t); });
+      } else {
+        const item = { conv: conv, text: text, photo: photo, name: name, tried: triedCh.slice() };
+        buBatchQueuedIds[conv.id] = item;
+        buBatchQueue.push(item);
+      }
+      return;
+    }
     const delay = hadDirectFail ? (150 + Math.min(buRetrySeq++, 6) * BU_SPREAD_MS) : BU_RETRY_EXT_MS;
     logLine('⏳ ' + name + ' — ' + why + ' — đang bù'
       + (remaining.length > 1 ? ' (Socket/Extension)' : (' qua ' + (remaining[0] === 'ext' ? 'Extension' : 'Socket'))) + '…');
@@ -4742,6 +4760,95 @@
         logLine('❌ ' + name + ' — bù lỗi: ' + (e && e.message || e));
       });
     }, delay);
+  }
+
+  // v1.91.0: chạy bù cho 1 chat trong ĐỢT BÙ TẬP TRUNG — thử lần lượt từng kênh CÒN LẠI (mỗi
+  // kênh đúng 1 lần, dùng chung sổ buRetryDone với đường bù thường) và chốt kết quả ngay tại
+  // chỗ: đến nơi → markDelivered; 'maybe' → ⚠ dừng (chống trùng); khách không nhận → ❌ dừng;
+  // hết kênh → ❌ chốt lỗi. Không bao giờ gửi lại cho chat đã xác nhận đến nơi.
+  async function runBuBatchItem(item) {
+    const conv = item.conv, text = item.text, photo = item.photo, name = item.name;
+    const myRun = runSeq;
+    try {
+      if (!conv || deliveredIds[conv.id]) return;
+      const done = buRetryDone[conv.id] || (buRetryDone[conv.id] = []);
+      let triedCh = (item.tried || []).slice();
+      const hadDirectFail = triedCh.indexOf('ext') > -1 || triedCh.indexOf('socket') > -1 || done.length > 0;
+      for (let step = 0; step < 3; step++) {
+        if (myRun !== runSeq) return; // đã có lượt gửi mới — bỏ, không đụng sổ sách của lượt mới
+        if (deliveredIds[conv.id]) return; // vừa đến nơi qua đường khác — thôi
+        if (state.stopRequested) {
+          if (window && typeof window.__botfakeTrackStatus__ === 'function') window.__botfakeTrackStatus__(conv.id, 'fail');
+          logLine('⏸ ' + name + ' — bỏ bù (đang dừng).');
+          return;
+        }
+        const hasExt = !!(window.__ExtensionAdapter__ && typeof window.__ExtensionAdapter__.send === 'function');
+        const baseCandidates = (conv.type === 'comment')
+          ? ['ext']
+          : (hasExt ? ['ext', 'socket'] : ['socket']);
+        const remaining = baseCandidates.filter((c) => triedCh.indexOf(c) < 0 && done.indexOf(c) < 0);
+        if (!remaining.length) {
+          if (window && typeof window.__botfakeTrackStatus__ === 'function') window.__botfakeTrackStatus__(conv.id, 'fail');
+          const seen = {};
+          const names2 = triedCh.concat(done).filter((x) => (seen[x] ? false : (seen[x] = true)));
+          logLine('❌ ' + name + ' — đợt bù tập trung: đã thử hết kênh (' + (names2.join(', ') || 'không rõ') + ')'
+            + (conv.type === 'comment' ? ' — bình luận chỉ API/Extension gửi được (Socket không hỗ trợ)' : '')
+            + ' — không bù nữa (mỗi kênh đúng 1 lần)');
+          return;
+        }
+        const buCtx = { gidForceFind: hadDirectFail };
+        const out = await busEnqueue(async () => {
+          await prepareDirectCtx(conv, photo, buCtx);
+          const pid = (buCtx.full && (buCtx.full.page_id || buCtx.full.pageId)) || conv.pageId || String(conv.id || '').split('_')[0];
+          const ordered = (remaining.length > 1)
+            ? pickBestDirectOrder(conv, pid, buCtx, remaining)
+            : remaining.slice();
+          const ch = ordered.find((c) => triedCh.indexOf(c) < 0 && done.indexOf(c) < 0) || remaining[0];
+          done.push(ch);
+          const r = (ch === 'ext')
+            ? await sendViaExtension(conv, text, photo, buCtx)
+            : await sendViaSocket(conv, text, photo, buCtx);
+          return { ch: ch, r: r };
+        });
+        if (!out || !out.ch) {
+          if (window && typeof window.__botfakeTrackStatus__ === 'function') window.__botfakeTrackStatus__(conv.id, 'fail');
+          logLine('❌ ' + name + ' — đợt bù tập trung: không chạy được kênh bù — chốt lỗi.');
+          return;
+        }
+        const ch = out.ch;
+        const r = out.r;
+        if (r && r.ok) {
+          markDelivered(conv.id, ch);
+          postSendSideEffects(conv);
+          markChannel(conv.id, ch); // lần gửi sau vào thẳng kênh vừa thắng
+          logLine('✅ ' + name + ' — bù tập trung THÀNH CÔNG qua ' + (ch === 'ext' ? 'Extension' : 'Socket'));
+          return;
+        }
+        if (r && r.sent === 'maybe') {
+          if (window && typeof window.__botfakeTrackStatus__ === 'function') window.__botfakeTrackStatus__(conv.id, 'uncertain');
+          logLine('⚠ ' + name + ' — bù tập trung không rõ kết quả — KHÔNG gửi thêm (chống trùng)');
+          return;
+        }
+        if (r && r.recipientUnavailable) {
+          if (window && typeof window.__botfakeTrackStatus__ === 'function') window.__botfakeTrackStatus__(conv.id, 'fail');
+          logLine('❌ ' + name + ' — bù tập trung ' + (ch === 'ext' ? 'Extension' : 'Socket') + ' không được: '
+            + clip((r && r.error) || 'lỗi không rõ', 90) + ' — khách hiện không nhận được tin (không thử tiếp kênh khác)');
+          return;
+        }
+        logLine('❌ ' + name + ' — bù tập trung ' + (ch === 'ext' ? 'Extension' : 'Socket') + ' không được: '
+          + clip((r && r.error) || 'lỗi không rõ', 90) + ' — sang kênh kế nếu còn');
+        triedCh = triedCh.concat([ch]);
+      }
+      // Tối đa 2 kênh bù/chat — quá vòng lặp mà chưa chốt thì chốt lỗi để tổng hợp không treo
+      if (!deliveredIds[conv.id]) {
+        if (window && typeof window.__botfakeTrackStatus__ === 'function') window.__botfakeTrackStatus__(conv.id, 'fail');
+      }
+    } catch (e) {
+      if (conv && !deliveredIds[conv.id]) {
+        if (window && typeof window.__botfakeTrackStatus__ === 'function') window.__botfakeTrackStatus__(conv.id, 'fail');
+      }
+      logLine('❌ ' + name + ' — bù tập trung lỗi: ' + (e && e.message || e));
+    }
   }
 
   // Nhóm chat theo NỘI DUNG sẽ gửi: chat thuộc câu nào → ĐÚNG chữ của câu đó;
@@ -4816,6 +4923,10 @@
     // bù của lượt trước đang chờ sẽ tự hủy (runSeq) — không gửi lẫn vào lượt mới
     runSeq++;
     buRetrySeq = 0;
+    // v1.91.0: lượt này gom toàn bộ bù vào ĐỢT BÙ TẬP TRUNG sau đợt chính
+    buBatchMode = true;
+    buBatchQueue.length = 0;
+    Object.keys(buBatchQueuedIds).forEach((k) => { delete buBatchQueuedIds[k]; });
     Object.keys(buRetryDone).forEach((k) => { delete buRetryDone[k]; });
     Object.keys(deliveredIds).forEach((k) => { delete deliveredIds[k]; });
     sockFiredPending.clear();
@@ -4937,6 +5048,7 @@
 
     const sendOneAndLog = async (c, gtext, itemOpts) => {
       const isDeferredPass = !!(itemOpts && itemOpts.deferredCtx);
+      const prepCtx = (itemOpts && itemOpts.prepCtx) || null; // v1.91.0: ctx đã chuẩn bị xong ở giai đoạn CHUẨN BỊ
       if (!isDeferredPass) {
         // CHỐT PHÚT CHÓT — soi lại tag/icon NGAY TRƯỚC khi bắn từng chat: tag cấm có thể vừa
         // được gắn SAU bước lọc trước, và đây là lớp an toàn cuối cho mọi lỗ dữ liệu
@@ -4961,7 +5073,7 @@
       // 🚀 Tối ưu quyết định cho 20.000–30.000 tin:
       // Nếu đang bật Chế độ nhanh (quickOn) và chat ngoài 24h ĐÃ CÓ SẴN global_id thật trong RAM/WebSocket
       // hoặc Socket đang mở → bỏ qua pre-ctx ở ngoài (để resolveGlobalId bên trong tự gọi ensureConvCtx khi cần).
-      let skipPreCtx = isDeferredPass;
+      let skipPreCtx = isDeferredPass || !!prepCtx; // đã chuẩn bị trước → khỏi nạp lại ngữ cảnh
       if (!skipPreCtx && quickOn && c.type !== 'comment') {
         const full0 = peekConv(c) || c;
         const pid0 = (full0 && (full0.page_id || full0.pageId)) || c.pageId || String(c.id || '').split('_')[0];
@@ -4978,7 +5090,7 @@
         quick: quickOn,
         awaitDirect: true,
         fastOnly: !!(itemOpts && itemOpts.fastOnly),
-        deferredCtx: (itemOpts && itemOpts.deferredCtx) || null,
+        deferredCtx: (itemOpts && itemOpts.deferredCtx) || prepCtx || null,
         // 🔥 Nấc 2 chỉ bật cho lô lớn (>50 tin): bắn-nhả qua Socket + xác nhận nền.
         // Lô nhỏ vẫn chờ ACK trực tiếp để báo kết quả tức thì như cũ.
         sockFired: totalAll > 50,
@@ -5133,24 +5245,36 @@
       // ngữ cảnh + global_id (GET /messages, có dedupe inflight trong ensureConvCtx) cho các chat
       // phía sau — tới lượt worker gửi thì gid đã có sẵn trong cache (0ms), không phải đứng chờ HTTP.
       // Không await: prefetch chậm hơn làn gửi cũng vô hại (toàn cache hit), nhanh hơn thì làn gửi bứt tốc.
-      runPool(batch, async (c) => {
+      // 🧰 v1.91.0: GIAI ĐOẠN CHUẨN BỊ — chuẩn bị HẾT rồi mới bắn 1 lượt (đúng lựa chọn của
+      // người dùng: hết cảnh vừa bắn vừa tra mã khiến tin ra lẻ tẻ). Chạy prepareDirectCtx cho
+      // TOÀN BỘ batch và CHỜ XONG: nạp ngữ cảnh + tra global_id bằng mọi đường (gồm
+      // MAKE_MESSENGER_LINK của v1.90) + upload ảnh trước. Xong mới mở làn bắn → đợt bắn chính
+      // chỉ việc bắn liên tục, tin tới dày và gần như đồng loạt. Vẫn 96 worker như v1.90 (mức
+      // của bản nhanh v1.80 — cao hơn là tự gây 429 cho chính GET /messages).
+      const prepCtxById = {};
+      let prepDone = 0, prepGid = 0, prepLastLog = 0;
+      if (batch.length > 50) {
+        logLine('🧰 Đang CHUẨN BỊ ' + batch.length + ' chat (nạp ngữ cảnh + tra global_id'
+          + (photo ? ' + upload ảnh' : '') + ') — chuẩn bị xong mới bắn 1 lượt…');
+      }
+      await runPool(batch, async (c) => {
         if (state.stopRequested) return;
         try {
-          const entry = await ensureConvCtx(c, { force: true });
-          // v1.88.0: lượt có ảnh + chat ĐÃ có global_id → upload sẵn fbId riêng của chat này
-          // (chạy nền đi trước làn gửi; tới lượt bắn lấy dùng ở 0ms thay vì chờ ~1,5s).
-          // Đang ở cụm khách chặn (reject streak ≥3) thì KHÔNG upload trước — giữ cơ chế
-          // thăm dò bằng chữ trước để khỏi đốt upload cho khách đã khóa nick.
-          if (photo && entry && entry.gid) {
-            const pid = c.pageId || String(c.id || '').split('_')[0];
-            if (pid && (socketRejectStreak[pid] || 0) < 3 && !prefetchPhotoFbId[c.id]) {
-              const tctx = {};
-              const up = await uploadOneTimePhoto(pid, photo, c.id, tctx, false).catch(() => null);
-              if (up && up.ok && up.fbId) prefetchPhotoFbId[c.id] = up.fbId;
-            }
-          }
-        } catch (e) { /* ignore */ }
-      }, 96).catch(() => {}); // v1.90.0: về 96 worker (mức của bản nhanh v1.80) — 128 worker tự gây 429 cho chính GET /messages khiến nhiều chat mất global_id oan; vẫn upload ảnh trước như v1.88
+          await ensureConvCtx(c, { force: true });
+          const pctx = { hasTextMsg: !!(gtext && String(gtext).trim()), __prepped: true };
+          await prepareDirectCtx(c, photo, pctx);
+          prepCtxById[c.id] = pctx;
+          if (pctx.gid && !pctx.gidFromPsid) prepGid++;
+        } catch (e) { /* ignore — chat lỗi khâu chuẩn bị vẫn tự xử ở đợt bắn như cũ */ }
+        prepDone++;
+        if (batch.length > 200 && (prepDone % 2000 === 0 || Date.now() - prepLastLog >= 20000)) {
+          prepLastLog = Date.now();
+          logLine('🧰 Chuẩn bị: ' + prepDone + '/' + batch.length + ' chat (đã có global_id thật: ' + prepGid + ')…');
+        }
+      }, 96);
+      if (batch.length > 50 && !state.stopRequested) {
+        logLine('🧰 Chuẩn bị xong ' + prepDone + '/' + batch.length + ' chat (có global_id thật: ' + prepGid + ') — BẮT ĐẦU BẮN 1 LƯỢT…');
+      }
 
       const extWorkers = [];
       const nExtWorkers = Math.min(EXT_BACKLOG_WORKERS, Math.max(1, batch.length));
@@ -5160,7 +5284,7 @@
 
       const runFastItem = async (c) => {
         if (state.stopRequested) return null;
-        const r = await sendOneAndLog(c, gtextRef, { fastOnly: true });
+        const r = await sendOneAndLog(c, gtextRef, { fastOnly: true, prepCtx: prepCtxById[c.id] || null });
         if (r && r.deferredToExt) {
           pushToExtBacklog({ c, deferredCtx: r.deferredCtx || null });
           return r;
@@ -5215,8 +5339,40 @@
       logLine('⚠ Gửi lỗi giữa chừng (' + (e && e.message || e) + ') — vẫn xóa câu đã gửi + bỏ chọn để không gửi trùng.');
     }
 
-    state.sending = false;
     batchStats.loopFinished = true;
+    // 🧺 v1.91.0: ĐỢT BÙ TẬP TRUNG — đợt chính đã bắn xong 1 lượt. Chờ xác nhận nền (Socket
+    // bắn-nhả) chốt hết để mọi chat bị từ chối gom đủ vào hàng đợi, rồi bù MỘT ĐỢT gọn ngay
+    // tại đây (mỗi kênh còn lại đúng 1 lần/chat) — hết cảnh bù nhỏ giọt lẻ tẻ cả chục phút.
+    if (buBatchQueue.length && !state.stopRequested) {
+      let waited = 0;
+      while (sockFiredPending.size > 0 && !state.stopRequested && waited < 180000) {
+        await sleep(250); waited += 250;
+      }
+    }
+    if (buBatchQueue.length && !state.stopRequested) {
+      const buItems = buBatchQueue.splice(0, buBatchQueue.length);
+      logLine('🧺 Đợt chính xong — BÙ TẬP TRUNG ' + buItems.length + ' chat chưa tới nơi (mỗi kênh còn lại đúng 1 lần)…');
+      let buDoneN = 0, buOkN = 0;
+      await runPool(buItems, async (it) => {
+        if (state.stopRequested) return;
+        const wasDelivered = !!deliveredIds[it.conv.id];
+        await runBuBatchItem(it);
+        buDoneN++;
+        if (!wasDelivered && deliveredIds[it.conv.id]) buOkN++;
+        if (buItems.length > 200 && buDoneN % 1000 === 0) {
+          logLine('🧺 Đang bù tập trung: ' + buDoneN + '/' + buItems.length + '…');
+        }
+      }, 64);
+      logLine('🧺 Đợt bù tập trung xong: cứu thêm ' + buOkN + '/' + buItems.length + ' chat.');
+    } else if (buBatchQueue.length && state.stopRequested) {
+      // Đang dừng: chốt lỗi các chat còn chờ bù để TỔNG HỢP không treo "đang xử lý" mãi
+      buBatchQueue.splice(0, buBatchQueue.length).forEach((it) => {
+        if (window && typeof window.__botfakeTrackStatus__ === 'function') window.__botfakeTrackStatus__(it.conv.id, 'fail');
+      });
+    }
+    buBatchMode = false;
+    Object.keys(buBatchQueuedIds).forEach((k) => { delete buBatchQueuedIds[k]; });
+    state.sending = false;
     if (state.stopRequested && done < totalAll) {
       logLine('⏸ Đã dừng sớm sau ' + done + '/' + totalAll + ' chat.');
     }
