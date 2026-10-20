@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE
 // @namespace    salescript
-// @version      1.85.0
+// @version      1.86.0
 // @description  BOTFAKE — chọn chuỗi chat (Alt+Click 2 đầu) hoặc theo snippet trong Pancake rồi gửi cùng 1 câu (kèm 1 hoặc nhiều ảnh nếu muốn) cho tất cả.
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -2693,7 +2693,10 @@
       }
     };
 
-    const wsWaitMs = 1500;
+    // v1.86.0: làn nền chờ bản đồ thread WebSocket tới 9s (trước 1,5s) — loadThread nạp dần,
+    // nhiều chat có global_id ở giây 3–8; cuộc đua vốn đã bị chặn bởi timeout 10s của Extension
+    // nên chờ thêm KHÔNG tốn thời gian, chỉ tăng tỉ lệ dò trúng. Làn nhanh vẫn 1,5s cho thoáng.
+    const wsWaitMs = (ctx && ctx.fastOnly) ? 1500 : 9000;
     const extWaitMs = 10000;
     const raceTasks = [];
 
@@ -4060,12 +4063,18 @@
           const canApiRescue = !batchSkipApi && seq.indexOf('api') < 0 && !(photo && !photo.fbId);
           if (canApiRescue) seq.push('api');
           logLine('🛟 ' + (conv.name || conv.id)
-            + ' — chưa dò được global_id; chưa kết luận khách khóa nick, sẽ thử Extension theo thread_id'
-            + (canApiRescue ? ' và API theo conversation_id như đường gửi tay' : ''));
+            + ' — chưa dò được global_id; chưa kết luận khách khóa nick, sẽ thử '
+            + (canApiRescue ? 'API theo conversation_id trước, rồi Extension theo thread_id' : 'Extension theo thread_id'));
         }
       }
       const pid = (ctx.full && (ctx.full.page_id || ctx.full.pageId)) || pid0;
       seq = pickBestDirectOrder(conv, pid, ctx, seq);
+      // v1.86.0: cứu hộ chưa có global_id → API đi ĐẦU (không tốn upload ảnh riêng như Extension,
+      // không chết vô nghĩa như Socket thiếu global_id)
+      if (ctx.extThreadOnlyRescue) {
+        const ai = seq.indexOf('api');
+        if (ai > 0) { seq.splice(ai, 1); seq.unshift('api'); }
+      }
     }
 
     const tried = Array.isArray(ctx.triedErrors) ? ctx.triedErrors.slice() : [];
@@ -4637,7 +4646,7 @@
   // thử lại, nhưng kênh CHƯA thử vẫn PHẢI thử tiếp (chuỗi như plan của app: api → extension ⇄ socket).
   // Cả Extension lẫn Socket đều hỗ trợ gửi cả chữ lẫn ảnh (cho chat inbox). Bình luận (comment) chỉ
   // hỗ trợ API/Extension. 'maybe'/đã đến nơi → DỪNG tuyệt đối (chống trùng).
-  function scheduleBuRetry(conv, text, photo, name, why, tried) {
+  function scheduleBuRetry(conv, text, photo, name, why, tried, opts) {
     if (!conv) return;
     if (sockFiredPending.has(conv.id)) {
       // Socket đã bắn và ACK chưa chốt — bù kênh khác lúc này có thể gây TRÙNG câu. Chờ xác nhận nền chốt.
@@ -4660,9 +4669,12 @@
       const seen = {};
       const names = triedCh.concat(done).filter((x) => (seen[x] ? false : (seen[x] = true)));
       if (window && typeof window.__botfakeTrackStatus__ === 'function') window.__botfakeTrackStatus__(conv.id, 'fail');
-      logLine('❌ ' + name + ' — đã thử hết kênh (' + (names.join(', ') || 'không rõ') + ')'
-        + (conv.type === 'comment' ? ' — bình luận chỉ API/Extension gửi được (Socket không hỗ trợ)' : '')
-        + ' — không bù nữa (mỗi kênh đúng 1 lần)');
+      // v1.86.0: nơi gọi đã in dòng ❌ (kèm chi tiết từng kênh) cho chat này rồi → không in trùng lần 2
+      if (!(opts && opts.preLogged)) {
+        logLine('❌ ' + name + ' — đã thử hết kênh (' + (names.join(', ') || 'không rõ') + ')'
+          + (conv.type === 'comment' ? ' — bình luận chỉ API/Extension gửi được (Socket không hỗ trợ)' : '')
+          + ' — không bù nữa (mỗi kênh đúng 1 lần)');
+      }
       return;
     }
     const myRun = runSeq;
@@ -5009,7 +5021,7 @@
           const p2 = c.pageId || String(c.id).split('_')[0];
           scheduleBuRetry(c, gtext, photo
             ? { url: photo.url, id: photo.id, fbId: fbIdByPage[p2] || '', w: photo.w, h: photo.h }
-            : null, c.name || c.id, 'gửi chưa được', r.tried || []);
+            : null, c.name || c.id, 'gửi chưa được', r.tried || [], { preLogged: true });
         } else {
           if (window && typeof window.__botfakeTrackStatus__ === 'function') window.__botfakeTrackStatus__(c.id, 'fail');
         }
