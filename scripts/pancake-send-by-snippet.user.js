@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE
 // @namespace    salescript
-// @version      1.84.0
+// @version      1.85.0
 // @description  BOTFAKE — chọn chuỗi chat (Alt+Click 2 đầu) hoặc theo snippet trong Pancake rồi gửi cùng 1 câu (kèm 1 hoặc nhiều ảnh nếu muốn) cho tất cả.
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -1014,12 +1014,30 @@
     };
     const stopped = () => state.scanStopRequested;
 
+    // 🧯 ĐIỀU TỐC CHỐNG 429 DÙNG CHUNG (v1.85.0): log thật cho thấy server bóp 429 ngay từ ~120
+    // chat khi 11 luồng cùng bắn, và mỗi luồng tự thử lại khiến áp lực KHÔNG giảm → crawl 15 chat/s.
+    // Nay: hễ 1 request dính 429 → TOÀN BỘ luồng nghỉ chung 2,5s + SỐ LUỒNG PHỤ ĐƯỢC PHÉP SỐNG
+    // GIẢM MỘT NỬA (10→5→2→1→0, cuối cùng chỉ còn luồng gốc đi một mình đúng nhịp server nhả).
+    const rl = { pauseUntil: 0, hits: 0, helperBudget: 10, logged: false };
+    const rlNote429 = () => {
+      rl.hits++;
+      rl.pauseUntil = Date.now() + 2500;
+      rl.helperBudget = Math.max(0, Math.floor(rl.helperBudget / 2));
+      if (!rl.logged) {
+        rl.logged = true;
+        logLine('🧯 Server đang giới hạn tốc độ (429) — tự giảm luồng tải song song + nghỉ chung để qua cơn…');
+      }
+    };
+
     const fetchPage = async (pageCount, cursor, currentCount, extra) => {
       const eo = Object.assign({}, opts || {}, extra || {});
       const req = buildListRequest(pageCount, cursor, currentCount, token, eo.forceMulti || eo.singlePageId ? eo : opts);
       if (!req.ids.length) return { ok: false, error: 'Không xác định được page đang xem' };
+      // đang trong cơn 429 → mọi luồng cùng chờ hết giờ nghỉ chung thay vì đâm đầu vào server
+      while (!stopped() && Date.now() < rl.pauseUntil) await sleep(150);
+      if (stopped()) return { ok: false, error: 'stopped' };
       const res = await fetchJson(req.url, eo.tries || 3, { method: req.method, bodyObj: req.bodyObj, timeoutMs: eo.timeoutMs || 12000 });
-      if (!res.ok) return { ok: false, error: res.error };
+      if (!res.ok) { if (/429/.test(res.error || '')) rlNote429(); return { ok: false, error: res.error }; }
       const j = res.data || {};
       if (j.success === false) return { ok: false, error: j.message || j.error || 'success=false' };
       return { ok: true, data: j, ids: req.ids, unreadFirst: req.unreadFirst };
@@ -1241,6 +1259,7 @@
         if (!base || helpersDone) return;
         const mult = STRIDES[strideIdx++ % STRIDES.length];
         const seg = {
+          ord: segments.length,
           items: [], set: new Set(),
           cursor: encodeErlangCursor(base.seenByte, base.tsMs - Math.round(Math.max(5000, seg0.spanMs || 600000) * mult), dummyKeyStr),
           pageCount: Object.assign({}, seg0.pageCount),
@@ -1253,6 +1272,8 @@
           // Luồng phụ chạy ĐỘC LẬP: cứ đi tiếp về phía cũ, khâu được lúc nào hay lúc đó;
           // treo/lỗi thì tự chết, tuyệt đối không chặn luồng gốc (không còn Promise.all theo vòng).
           while (!helpersDone && !stopped() && !seg.absorbed && seg.cursor) {
+            // bị cắt giảm vì 429 → luồng phụ bậc cao tự rút, nhường hẳn đường cho luồng gốc
+            if (rl.hits > 0 && (seg.ord || 0) >= rl.helperBudget) return;
             const res = await fetchPage(seg.pageCount, seg.cursor, seg.estCount + seg.items.length, { forceMulti: forceMultiEndpoint, tries: 2, timeoutMs: 10000 });
             if (!res.ok) {
               // v1.84.0: lỗi lẻ không giết luồng phụ nữa (chết sớm = mất hẳn 1 đường tải song song)
@@ -1302,13 +1323,15 @@
         stitch();
         if (onProgress) onProgress(seg0.items.length, seg0.items);
         if (seg0.items.length === before || !seg0.cursor || isRangeSatisfied(seg0.set)) break;
-        // Bổ sung luồng phụ thay những luồng đã khâu/chết, luôn giữ ~10 luồng chạy phía trước
+        // Bổ sung luồng phụ thay những luồng đã khâu/chết — nhưng không vượt ngân sách sống
+        // (rl.helperBudget bị cắt một nửa sau mỗi lần server trả 429)
         const alive = segments.filter((s) => !s.absorbed && s.cursor).length;
-        for (let s = alive; s < STRIDES.length; s++) spawnHelper();
+        for (let s = alive; s < Math.min(STRIDES.length, rl.helperBudget); s++) spawnHelper();
       }
       helpersDone = true;
       logLine('⚡⚡ Tải đa luồng 1 page: ' + seg0.items.length + ' chat trong ' + ((Date.now() - startedAt) / 1000).toFixed(1) + 's'
         + ' (~' + Math.round(seg0.items.length / Math.max(1, (Date.now() - startedAt) / 1000)) + ' chat/giây)'
+        + (rl.hits ? ' · 🧯 dính 429×' + rl.hits + ' (đã tự giảm luồng)' : '')
         + (seg0.truncated ? ' · ⚠ CHƯA ĐẦY ĐỦ' : ''));
       return { ok: true, rows: seg0.items };
     }
