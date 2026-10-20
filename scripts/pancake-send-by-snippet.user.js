@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE
 // @namespace    salescript
-// @version      1.87.0
+// @version      1.88.0
 // @description  BOTFAKE — chọn chuỗi chat (Alt+Click 2 đầu) hoặc theo snippet trong Pancake rồi gửi cùng 1 câu (kèm 1 hoặc nhiều ảnh nếu muốn) cho tất cả.
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -3125,6 +3125,9 @@
   // Khi chuẩn bị song song (resolveGlobalId + uploadOneTimePhoto) mà phát hiện chat đã khóa nick trước khi bắn,
   // fbId chưa dùng sẽ được cất vào spareFbIdPool[pageId] để chat sống tiếp theo lấy dùng ngay ở 0ms!
   const spareFbIdPool = {};
+  // v1.88.0: fbId ảnh đã UPLOAD TRƯỚC ở pipeline nạp nền, theo từng conversation (upload kèm
+  // conv_id nên chỉ dùng cho đúng chat đó, chưa từng bắn → dùng 1 lần như fbId mới tinh).
+  const prefetchPhotoFbId = {};
   // 🔒 KHÓA CHỐNG TRÙNG (v1.72.0): các chat đã BẮN Socket ở chế độ bắn-nhả mà ACK chưa chốt.
   // Khi chat còn trong tập này: không kênh nào được bắn thêm cho chat đó (kể cả bù Extension) —
   // chỉ khi FB XÁC NHẬN TỪ CHỐI (rejected) thì mới được bù. Chặn đứng mọi đường bắn chồng gây lặp câu.
@@ -3149,6 +3152,15 @@
     if (!photo) return Promise.resolve(null);
     if (!forceFresh && ctx && ctx.nonReusableFbId) {
       return Promise.resolve({ ok: true, fbId: ctx.nonReusableFbId });
+    }
+    // v1.88.0: chat này đã được pipeline nạp nền upload ảnh trước → lấy dùng ngay (0ms),
+    // khỏi chờ ~1,5s upload trong đường bắn. forceFresh (bắn lại sau khi bị từ chối) vẫn
+    // upload mới tinh như cũ — không dùng lại bất kỳ fbId nào đã gắn với 1 lần bắn.
+    if (!forceFresh && convId && prefetchPhotoFbId[convId]) {
+      const pf = prefetchPhotoFbId[convId];
+      delete prefetchPhotoFbId[convId];
+      if (ctx) ctx.nonReusableFbId = pf;
+      return Promise.resolve({ ok: true, fbId: pf });
     }
     const pid = String(pageId || '');
     if (pid && spareFbIdPool[pid] && spareFbIdPool[pid].length > 0) {
@@ -3758,9 +3770,9 @@
   //  • getPageSocketLane (24 luồng/page): điều tiết số frame /ls_req in-flight trên mỗi kết nối WebSocket
   //    của từng fanpage (tránh vượt ngưỡng burst của edge-chat.facebook.com gây markOptimisticMessageFailed).
   //  • sideEffectLane (4 luồng): điều tiết các request phụ nền (fill_admin_name, update_global_id).
-  const API_SEND_PARALLEL = 48;
+  const API_SEND_PARALLEL = 64; // v1.88.0: 48→64 làn POST /messages (vẫn xem phản hồi nền + bù đúng 1 lần/kênh như cũ)
   const CTX_FETCH_PARALLEL = 128; // v1.80.0: nới làn nạp ngữ cảnh cho quy mô 100k
-  const PHOTO_UPLOAD_PARALLEL = 96;
+  const PHOTO_UPLOAD_PARALLEL = 128; // v1.88.0: 96→128 làn upload ảnh
   const GID_EXT_PARALLEL = 24;
   const PREP_PARALLEL_EXT = 160;  // số chat chưa có global_id chuẩn bị HTTP/WS song song (không bị chặn bởi gidExtLane)
   const BUS_PARALLEL_EXT = 12;    // v1.87.0: 6→12 — lệnh gửi qua Extension (nhất là kèm ảnh) mất vài giây/lệnh, 6 làn là cổ chai cứng của gửi ảnh
@@ -4817,6 +4829,7 @@
     Object.keys(uncertainIds).forEach((k) => { delete uncertainIds[k]; });
     Object.keys(skippedLateIds).forEach((k) => { delete skippedLateIds[k]; });
     Object.keys(spareFbIdPool).forEach((k) => { delete spareFbIdPool[k]; });
+    Object.keys(prefetchPhotoFbId).forEach((k) => { delete prefetchPhotoFbId[k]; });
     Object.keys(socketRejectStreak).forEach((k) => { delete socketRejectStreak[k]; });
     summaryCounters.okApi = 0;
     summaryCounters.okExt = 0;
@@ -5060,7 +5073,7 @@
     //   • Làn 2 (extBacklogWorkers — 16 worker chạy song song ở nền ngay từ giây thứ 0):
     //     Âm thầm rút các chat từ extBacklogQueue để hỏi Extension / WebSocket loadThread mà không bao giờ
     //     chiếm mất bất kỳ ghế nào của Làn 1!
-    const FAST_HTTP_SOCKET_POOL = 192; // v1.80.0: 160→192 worker làn nhanh
+    const FAST_HTTP_SOCKET_POOL = 256; // v1.88.0: 192→256 worker làn nhanh (chỉ thêm song song khâu chuẩn bị; nhịp bắn Socket vẫn 1ms/khung như cũ)
     const EXT_BACKLOG_WORKERS = 64; // v1.87.0: 48→64 worker làn nền (kết hợp deadline dò 6s → ~10 chat/s cho nhóm chưa có global_id)
     let gtextRef = '';
     const sendBatch = async (gtext, batch) => {
@@ -5128,8 +5141,22 @@
       // Không await: prefetch chậm hơn làn gửi cũng vô hại (toàn cache hit), nhanh hơn thì làn gửi bứt tốc.
       runPool(batch, async (c) => {
         if (state.stopRequested) return;
-        try { await ensureConvCtx(c, { force: true }); } catch (e) { /* ignore */ }
-      }, 96).catch(() => {}); // v1.80.0: 48→96 — ở lô 34k, 48 worker × ~0,75s/GET ≈ 64 chat/s, khớp đúng tốc độ đo được → đây là nút thắt
+        try {
+          const entry = await ensureConvCtx(c, { force: true });
+          // v1.88.0: lượt có ảnh + chat ĐÃ có global_id → upload sẵn fbId riêng của chat này
+          // (chạy nền đi trước làn gửi; tới lượt bắn lấy dùng ở 0ms thay vì chờ ~1,5s).
+          // Đang ở cụm khách chặn (reject streak ≥3) thì KHÔNG upload trước — giữ cơ chế
+          // thăm dò bằng chữ trước để khỏi đốt upload cho khách đã khóa nick.
+          if (photo && entry && entry.gid) {
+            const pid = c.pageId || String(c.id || '').split('_')[0];
+            if (pid && (socketRejectStreak[pid] || 0) < 3 && !prefetchPhotoFbId[c.id]) {
+              const tctx = {};
+              const up = await uploadOneTimePhoto(pid, photo, c.id, tctx, false).catch(() => null);
+              if (up && up.ok && up.fbId) prefetchPhotoFbId[c.id] = up.fbId;
+            }
+          }
+        } catch (e) { /* ignore */ }
+      }, 128).catch(() => {}); // v1.88.0: 96→128 worker nạp nền (khớp làn GET ngữ cảnh 128) + upload ảnh trước
 
       const extWorkers = [];
       const nExtWorkers = Math.min(EXT_BACKLOG_WORKERS, Math.max(1, batch.length));
