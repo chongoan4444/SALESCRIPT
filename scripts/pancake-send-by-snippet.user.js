@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE
 // @namespace    salescript
-// @version      1.101.0
+// @version      1.102.0
 // @description  BOTFAKE — chọn chuỗi chat (Alt+Click 2 đầu) hoặc theo snippet trong Pancake rồi gửi cùng 1 câu (kèm 1 hoặc nhiều ảnh nếu muốn) cho tất cả.
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -2986,19 +2986,19 @@
           })).then((v) => {
             if (v && String(v) !== badGid) {
               finishExt(v, false);
-            } else if (ctx && ctx.prepMode) {
-              // v1.94.0: đang CHUẨN BỊ hàng loạt thì KHÔNG đốt MAKE_MESSENGER_LINK ở đây (tới
-              // 5s/chat — hàng chục nghìn chat nhân lên thành cả tiếng). Đường cứu chậm đó để
-              // dành cho ĐỢT BÙ TẬP TRUNG lúc gửi, nơi số chat ít và đáng giá từng ca.
+            } else if ((ctx && ctx.prepMode) || isLargeBatch) {
+              // v1.102.0: quay về ĐÚNG v1.80.0 — chuẩn bị hàng loạt và LÔ LỚN không đốt
+              // MAKE_MESSENGER_LINK ở đây: findGlobalIdForConv trả null = Extension đã xác
+              // nhận không có global_id; gọi thêm ML (tới 5s/lệnh) cho hàng nghìn chat chết
+              // làm nghẽn làn dò mã của cả lô (v1.90 bật ML ở mọi quy mô — khác biệt thật
+              // so với v1.80 trên đường dò). ML chỉ còn giữ cho lô nhỏ (<=50) như bản gốc.
               finishExt(null, true);
             } else {
-              // v1.90.0: kể cả lô lớn cũng thử tiếp MAKE_MESSENGER_LINK (đường app dùng để đọc
-              // selected_item_id làm global_id) trước khi kết luận không có global_id — trước đây
-              // lô lớn bỏ qua bước này nên cả một lớp chat lỗi oan cả 3 kênh.
               tryMessengerLink();
             }
           }).catch(() => {
-            if (ctx && ctx.prepMode) finishExt(null, false);
+            // v1.102.0: lô lớn cũng chốt luôn như v1.80.0 — không rẽ sang MAKE_MESSENGER_LINK
+            if ((ctx && ctx.prepMode) || isLargeBatch) finishExt(null, false);
             else tryMessengerLink();
           });
         } else if (ctx && ctx.prepMode) {
@@ -3910,12 +3910,12 @@
   //  • getPageSocketLane (24 luồng/page): điều tiết số frame /ls_req in-flight trên mỗi kết nối WebSocket
   //    của từng fanpage (tránh vượt ngưỡng burst của edge-chat.facebook.com gây markOptimisticMessageFailed).
   //  • sideEffectLane (4 luồng): điều tiết các request phụ nền (fill_admin_name, update_global_id).
-  const API_SEND_PARALLEL = 64; // v1.88.0: 48→64 làn POST /messages (vẫn xem phản hồi nền + bù đúng 1 lần/kênh như cũ)
+  const API_SEND_PARALLEL = 48; // v1.102.0: về đúng số v1.80.0 (bản đo 143 tin/s) — v1.88 nới 64 làm nghẽn ngược
   const CTX_FETCH_PARALLEL = 128; // v1.80.0: nới làn nạp ngữ cảnh cho quy mô 100k
-  const PHOTO_UPLOAD_PARALLEL = 128; // v1.88.0: 96→128 làn upload ảnh
+  const PHOTO_UPLOAD_PARALLEL = 96; // v1.102.0: về đúng số v1.80.0 (v1.88 nới 128)
   const GID_EXT_PARALLEL = 24;
   const PREP_PARALLEL_EXT = 160;  // số chat chưa có global_id chuẩn bị HTTP/WS song song (không bị chặn bởi gidExtLane)
-  const BUS_PARALLEL_EXT = 12;    // v1.87.0: 6→12 — lệnh gửi qua Extension (nhất là kèm ảnh) mất vài giây/lệnh, 6 làn là cổ chai cứng của gửi ảnh
+  const BUS_PARALLEL_EXT = 6;     // v1.102.0: về đúng số v1.80.0 (v1.87 nới 12 — Extension bị dồn lệnh dễ timeout 10s hơn là nhanh hơn)
   const BUS_PARALLEL_SOCKET = 64; // số frame Socket (/ls_req) in-flight trên mỗi kết nối WebSocket (kèm giãn nhịp 2ms chống burst; vẫn giữ retry + socketRejectStreak bảo vệ)
   const SIDE_EFFECT_PARALLEL = 4; // số request nền (fill_admin_name / update_global_id) chạy song song
   function makeLane(parallel) {
@@ -5427,8 +5427,8 @@
     //   • Làn 2 (extBacklogWorkers — 16 worker chạy song song ở nền ngay từ giây thứ 0):
     //     Âm thầm rút các chat từ extBacklogQueue để hỏi Extension / WebSocket loadThread mà không bao giờ
     //     chiếm mất bất kỳ ghế nào của Làn 1!
-    const FAST_HTTP_SOCKET_POOL = 256; // v1.88.0: 192→256 worker làn nhanh (chỉ thêm song song khâu chuẩn bị; nhịp bắn Socket vẫn 1ms/khung như cũ)
-    const EXT_BACKLOG_WORKERS = 64; // v1.87.0: 48→64 worker làn nền (kết hợp deadline dò 6s → ~10 chat/s cho nhóm chưa có global_id)
+    const FAST_HTTP_SOCKET_POOL = 192; // v1.102.0: về đúng số v1.80.0 (v1.88 nới 256)
+    const EXT_BACKLOG_WORKERS = 48; // v1.102.0: về đúng số v1.80.0 (v1.87 nới 64)
     let gtextRef = '';
     const sendBatch = async (gtext, batch) => {
       gtextRef = gtext;
@@ -5514,7 +5514,7 @@
             }
           }
         } catch (e) { /* ignore */ }
-      }, 128).catch(() => {}); // 128 worker nạp nền (khớp làn GET ngữ cảnh 128) + upload ảnh trước
+      }, 96).catch(() => {}); // v1.102.0: 96 worker nạp nền — đúng số v1.80.0
 
       const extWorkers = [];
       const nExtWorkers = Math.min(EXT_BACKLOG_WORKERS, Math.max(1, batch.length));
