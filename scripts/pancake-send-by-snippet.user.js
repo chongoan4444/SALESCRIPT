@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE
 // @namespace    salescript
-// @version      1.104.0
+// @version      1.105.0
 // @description  BOTFAKE — chọn chuỗi chat (Alt+Click 2 đầu) hoặc theo snippet trong Pancake rồi gửi cùng 1 câu (kèm 1 hoặc nhiều ảnh nếu muốn) cho tất cả.
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -45,6 +45,7 @@
 
   const PANEL_ID = 'ssb-root';          // ssb = SaleScript Bulk — không đụng pk-*/adj-*/pancake-* của script khác
   const STYLE_ID = 'ssb-style';
+  const APP_VERSION = '1.105.0'; // khớp @version ở đầu file — hiện lên tiêu đề panel để đối chiếu bản đang chạy
 
   const MAX_NAME_LIST = 12;             // số tên hiển thị khi xác nhận
 
@@ -836,6 +837,22 @@
       }
     }
     return { ok: false, error: lastErr || 'Không tải được' };
+  }
+
+  // fetch CÓ HẠN CHÓT (v1.105.0): fetch trần của trình duyệt KHÔNG tự hết hạn — 1 kết nối bị
+  // server treo (hay gặp khi Pancake nghẽn/429) là worker gửi treo VĨNH VIỄN theo: đợt gửi
+  // không bao giờ khép lại, bấm Dừng cũng không thả được nút Chạy (Dừng chỉ ngăn việc MỚI).
+  // Mọi fetch trên ĐƯỜNG GỬI phải qua đây (hạn 15s như fetchJson của khâu tải).
+  async function fetchWithTimeout(url, opts, ms) {
+    const limit = ms || 15000;
+    if (typeof AbortController !== 'function') return fetch(url, opts || {});
+    const ctl = new AbortController();
+    const t = setTimeout(() => { try { ctl.abort(); } catch (e) { /* ignore */ } }, limit);
+    try {
+      return await fetch(url, Object.assign({}, opts || {}, { signal: ctl.signal }));
+    } finally {
+      clearTimeout(t);
+    }
   }
 
   // Đọc tham số danh sách GIỐNG HỆT app (buildConversationsRequest — module 907775 @1402744 trong _app):
@@ -2207,7 +2224,7 @@
       + '/conversations/' + encodeURIComponent(convId)
       + '/messages?access_token=' + encodeURIComponent(token);
     try {
-      const res = await fetch(url, {
+      const res = await fetchWithTimeout(url, {
         method: 'POST',
         headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
@@ -2380,12 +2397,12 @@
       const makeFetchOpts = (rObj) => (rObj.isJson
         ? { method: 'POST', body: JSON.stringify(rObj.jsonBody), headers: { Accept: 'application/json', 'Content-Type': 'application/json' }, credentials: 'include' }
         : { method: 'POST', body: rObj.fd, headers: { Accept: 'application/json' }, credentials: 'include' });
-      let res = await fetch(req.url, makeFetchOpts(req));
+      let res = await fetchWithTimeout(req.url, makeFetchOpts(req));
       if (res && res.status === 429 && myRun === runSeq && !state.stopRequested) {
         await sleep(600);
         const req2 = buildInboxSend(conv, text, photo);
         if (!req2.error) {
-          res = await fetch(req2.url, makeFetchOpts(req2));
+          res = await fetchWithTimeout(req2.url, makeFetchOpts(req2));
         }
       }
       if (myRun !== runSeq) return;
@@ -2436,12 +2453,12 @@
       const makeFetchOpts = (rObj) => (rObj.isJson
         ? { method: 'POST', body: JSON.stringify(rObj.jsonBody), headers: { Accept: 'application/json', 'Content-Type': 'application/json' }, credentials: 'include' }
         : { method: 'POST', body: rObj.fd, headers: { Accept: 'application/json' }, credentials: 'include' });
-      let res = await fetch(req.url, makeFetchOpts(req));
+      let res = await fetchWithTimeout(req.url, makeFetchOpts(req));
       if (res && res.status === 429 && !state.stopRequested) {
         await sleep(600);
         const req2 = buildInboxSend(conv, text, photo);
         if (!req2.error) {
-          res = await fetch(req2.url, makeFetchOpts(req2));
+          res = await fetchWithTimeout(req2.url, makeFetchOpts(req2));
         }
       }
       let data = {};
@@ -2529,7 +2546,7 @@
     try {
       const token = getToken();
       if (!token) return peekConv(conv);
-      const res = await fetch(apiBase() + '/v1/pages/' + (conv.pageId || conv.id.split('_')[0])
+      const res = await fetchWithTimeout(apiBase() + '/v1/pages/' + (conv.pageId || conv.id.split('_')[0])
         + '/conversations/' + encodeURIComponent(conv.id)
         + '?access_token=' + encodeURIComponent(token),
         { headers: { Accept: 'application/json' }, credentials: 'include' });
@@ -3363,7 +3380,7 @@
           const fId = (full.from && full.from.id) || conv.fromPsid || '';
           if (pageId && fId && !updatedGidConvSet.has(conv.id) && !(ctx && ctx.gidFromServerOrCache)) {
             updatedGidConvSet.add(conv.id);
-            sideEffectLane(() => fetch(apiBase() + '/v1/pages/' + pageId + '/customers/' + encodeURIComponent(fId) + '/update_global_id?', {
+            sideEffectLane(() => fetchWithTimeout(apiBase() + '/v1/pages/' + pageId + '/customers/' + encodeURIComponent(fId) + '/update_global_id?', {
               method: 'POST',
               headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
               credentials: 'include',
@@ -3699,7 +3716,7 @@
             const fId = (full.from && full.from.id) || conv.fromPsid || '';
             if (pId && fId && !updatedGidConvSet.has(conv.id)) {
               updatedGidConvSet.add(conv.id);
-              sideEffectLane(() => fetch(apiBase() + '/v1/pages/' + pId + '/customers/' + encodeURIComponent(fId) + '/update_global_id?', {
+              sideEffectLane(() => fetchWithTimeout(apiBase() + '/v1/pages/' + pId + '/customers/' + encodeURIComponent(fId) + '/update_global_id?', {
                 method: 'POST',
                 headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
                 credentials: 'include',
@@ -3745,7 +3762,7 @@
       const fd = new FormData();
       fd.append('file', file, file.name || 'image.jpg');
       fd.append('name', file.name || ('image_' + Date.now() + '.jpg'));
-      const res = await fetch(apiBase() + '/v1/contents?access_token=' + encodeURIComponent(token), {
+      const res = await fetchWithTimeout(apiBase() + '/v1/contents?access_token=' + encodeURIComponent(token), {
         method: 'POST', body: fd, credentials: 'include', headers: { Accept: 'application/json' },
       });
       const j = await res.json().catch(() => null);
@@ -3780,7 +3797,7 @@
     let lastErr = '';
     for (let attempt = 1; attempt <= 3; attempt++) {
       try {
-        const res = await fetch(url, {
+        const res = await fetchWithTimeout(url, {
           method: 'POST', body: JSON.stringify(body), credentials: 'include',
           headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
         });
@@ -3829,7 +3846,7 @@
       const cid = conv && conv.id;
       if (!pageId) return;
       if (cid && o.perConv !== false) {
-        sideEffectLane(() => fetch(apiBase() + '/v1/pages/' + pageId + '/conversations/' + encodeURIComponent(cid)
+        sideEffectLane(() => fetchWithTimeout(apiBase() + '/v1/pages/' + pageId + '/conversations/' + encodeURIComponent(cid)
           + '/messages/fill_admin_name?', {
           method: 'POST',
           headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
@@ -3838,10 +3855,10 @@
         }).catch(() => null));
       }
       if (o.perPage) {
-        fetch(apiBase() + '/v1/pages/' + pageId + '/check_inbox?', {
+        fetchWithTimeout(apiBase() + '/v1/pages/' + pageId + '/check_inbox?', {
           method: 'POST', headers: { Accept: 'application/json' }, credentials: 'include',
         }).catch(() => null);
-        fetch(apiBase() + '/v1/pages/' + pageId + '/contents/touch?', {
+        fetchWithTimeout(apiBase() + '/v1/pages/' + pageId + '/contents/touch?', {
           method: 'POST',
           headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
           credentials: 'include',
@@ -5796,7 +5813,7 @@
       </style>
       <div class="wrap" id="ssb-wrap">
         <div class="head" id="ssb-head">
-          <span class="title"><svg class="logo" viewBox="0 0 50 52" width="17" height="17" xmlns="http://www.w3.org/2000/svg"><path d="M10 2 L14 11" stroke="#5865F2" stroke-width="5" stroke-linecap="round" fill="none"/><path d="M40 2 L36 11" stroke="#5865F2" stroke-width="5" stroke-linecap="round" fill="none"/><rect x="0" y="12" width="50" height="40" rx="6" fill="#5865F2"/><rect x="12" y="31" width="12" height="4" rx="2" fill="#fff"/><rect x="26" y="31" width="12" height="4" rx="2" fill="#fff"/></svg>BOTFAKE <span style="color:#64748b;font-weight:400;font-size:11px">v1.60.0</span></span>
+          <span class="title"><svg class="logo" viewBox="0 0 50 52" width="17" height="17" xmlns="http://www.w3.org/2000/svg"><path d="M10 2 L14 11" stroke="#5865F2" stroke-width="5" stroke-linecap="round" fill="none"/><path d="M40 2 L36 11" stroke="#5865F2" stroke-width="5" stroke-linecap="round" fill="none"/><rect x="0" y="12" width="50" height="40" rx="6" fill="#5865F2"/><rect x="12" y="31" width="12" height="4" rx="2" fill="#fff"/><rect x="26" y="31" width="12" height="4" rx="2" fill="#fff"/></svg>BOTFAKE <span id="ssb-ver" style="color:#64748b;font-weight:400;font-size:11px">v?</span></span>
           <button class="badge on" id="ssb-toggle" title="Bật/tắt tính năng">BẬT</button>
           <button class="minibtn" id="ssb-close" title="Tắt panel (F5 hoặc Alt+Shift+B để hiện lại)">✕</button>
           <button class="minibtn" id="ssb-min" title="Thu nhỏ">—</button>
@@ -6353,6 +6370,8 @@
 
   function render() {
     if (!shadow) return;
+    const ver = shadow.getElementById('ssb-ver');
+    if (ver) ver.textContent = 'v' + APP_VERSION;
     const tgl = shadow.getElementById('ssb-toggle');
     if (tgl) {
       tgl.textContent = state.enabled ? 'BẬT' : 'TẮT';
@@ -6417,7 +6436,15 @@
     }
     const send = shadow.getElementById('ssb-send');
     const stop = shadow.getElementById('ssb-stop');
-    if (send) send.disabled = state.sending;
+    if (send) {
+      send.disabled = state.sending;
+      // v1.105.0: nói rõ trạng thái ngay trên nút — "Đang dừng…" nghĩa là nút Dừng ĐÃ nhận,
+      // chỉ còn chờ các request đang bay chốt xong (nay mọi fetch đều có hạn chót 15s, lệnh
+      // Extension tối đa 35s) rồi nút tự về "▶ Chạy". Tránh tưởng nút Chạy bị mất/hỏng.
+      send.textContent = state.sending
+        ? (state.stopRequested ? '⏳ Đang dừng…' : '⏳ Đang gửi…')
+        : '▶ Chạy';
+    }
     if (stop) stop.disabled = !state.sending;
 
     const el = shadow.getElementById('ssb-log');
