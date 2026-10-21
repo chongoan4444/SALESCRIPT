@@ -25,8 +25,14 @@ script hoạt động phù hợp với website thực tế.
 
 ## Source hiện có
 
-- `html.txt`: HTML được lưu từ website.
-- `dashboard-fa168c408c705d9e.v6.js`: JavaScript được tải bởi website.
-- `_app-62a04783e7706d46.v6.js`: JavaScript được tải bởi website.
+- `html.txt`, `html2.txt`, `html3.txt`: HTML thật của dashboard / khi mở chat.
+- `_app-9331d46f21a84eb1.v6.js`: bundle chính (`ev`/`ey` xếp thứ tự, `eg`/`eb`
+  upsert hội thoại sau khi gửi).
+- `dashboard-fa168c408c705d9e.v6.js`: bundle phụ.
+- `pancake.vn2.har`: HAR từ Network (đối chiếu `snippet`/`seen`/`unread_count`).
 
-Các file trên là nguồn tham khảo chính để phân tích website.
+Các file trên là nguồn tham khảo chính để phân tích website. (File
+`_app-62a04783e7706d46.v6.js` đã bị xoá khỏi repo — đừng tìm lại.)
+
+Chi tiết vì sao danh sách hội thoại bị xếp lại sau mỗi tin gửi: xem `README.md`
+mục "Vì sao danh sách bị đẩy".
