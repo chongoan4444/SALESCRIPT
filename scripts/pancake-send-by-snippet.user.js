@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE
 // @namespace    salescript
-// @version      1.107.0
+// @version      1.108.0
 // @description  BOTFAKE — chọn chuỗi chat (Alt+Click 2 đầu) hoặc theo snippet trong Pancake rồi gửi cùng 1 câu (kèm 1 hoặc nhiều ảnh nếu muốn) cho tất cả.
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -45,7 +45,7 @@
 
   const PANEL_ID = 'ssb-root';          // ssb = SaleScript Bulk — không đụng pk-*/adj-*/pancake-* của script khác
   const STYLE_ID = 'ssb-style';
-  const APP_VERSION = '1.107.0'; // khớp @version ở đầu file — hiện lên tiêu đề panel để đối chiếu bản đang chạy
+  const APP_VERSION = '1.108.0'; // khớp @version ở đầu file — hiện lên tiêu đề panel để đối chiếu bản đang chạy
 
   const MAX_NAME_LIST = 12;             // số tên hiển thị khi xác nhận
 
@@ -69,6 +69,9 @@
     savedLists: [],         // các list đã lưu [{id,name,items:[{id,pageId,name,snippet,snippetRaw,time,type,platform}]}]
     listSel: new Set(),     // id các list ĐANG TÍCH — gộp thành lựa chọn để gửi (gửi được nhiều list cùng lúc)
     loadedName: null,       // tên hiển thị (1 list hoặc "N list: …") — hiện ở mục 1
+    quickReply: null,       // câu nhanh Pancake đang chọn { shortcut, text, pageId, items:[{id,url,w,h}] } — nguồn chữ+ảnh kiểu gõ "/"
+    qrList: [],             // danh sách câu nhanh đã nạp cho page hiện tại
+    qrPageId: '',           // page đã nạp qrList
   };
   state.savedLists = loadSavedLists();
 
@@ -3258,8 +3261,23 @@
   // Nhưng nếu fbId vừa tạo ra mà CHƯA TỪNG BẮN (nằm trong spareFbIdPool[pageId]), lấy dùng ngay ở 0ms!
   function uploadOneTimePhoto(pageId, photo, convId, ctx, forceFresh) {
     if (!photo) return Promise.resolve(null);
+    // v1.108.0: NHIỀU ẢNH (câu nhanh ≥2 ảnh): bind cả mảng fbIds trong 1 lượt /contents/facebook
+    // (đúng guianh1.har: 2 content_ids → 2 fb_ids trong ~30ms). fbIds của chat này giữ ở
+    // ctx.nonReusableFbIds — tách hẳn fbId đơn của đường 1 ảnh bên dưới.
+    const _items = normalizePhotoItems(photo);
+    if (_items.length > 1) {
+      if (!forceFresh && ctx && Array.isArray(ctx.nonReusableFbIds) && ctx.nonReusableFbIds.length >= _items.length) {
+        return Promise.resolve({ ok: true, fbId: ctx.nonReusableFbIds[0], fbIds: ctx.nonReusableFbIds.slice() });
+      }
+      return photoUploadLane(() => uploadPhotoForPage(pageId, photo, { reusable: false, convId: convId }))
+        .then((up) => {
+          if (up && up.ok && up.fbIds && ctx) ctx.nonReusableFbIds = up.fbIds;
+          return up;
+        })
+        .catch((e) => ({ ok: false, error: String(e && e.message || e) }));
+    }
     if (!forceFresh && ctx && ctx.nonReusableFbId) {
-      return Promise.resolve({ ok: true, fbId: ctx.nonReusableFbId });
+      return Promise.resolve({ ok: true, fbId: ctx.nonReusableFbId, fbIds: [ctx.nonReusableFbId] });
     }
     // v1.88.0: chat này đã được pipeline nạp nền upload ảnh trước → lấy dùng ngay (0ms),
     // khỏi chờ ~1,5s upload trong đường bắn. forceFresh (bắn lại sau khi bị từ chối) vẫn
@@ -3268,14 +3286,14 @@
       const pf = prefetchPhotoFbId[convId];
       delete prefetchPhotoFbId[convId];
       if (ctx) ctx.nonReusableFbId = pf;
-      return Promise.resolve({ ok: true, fbId: pf });
+      return Promise.resolve({ ok: true, fbId: pf, fbIds: [pf] });
     }
     const pid = String(pageId || '');
     if (pid && spareFbIdPool[pid] && spareFbIdPool[pid].length > 0) {
       const pooledFbId = spareFbIdPool[pid].pop();
       if (pooledFbId) {
         if (ctx) ctx.nonReusableFbId = pooledFbId;
-        return Promise.resolve({ ok: true, fbId: pooledFbId });
+        return Promise.resolve({ ok: true, fbId: pooledFbId, fbIds: [pooledFbId] });
       }
     }
     return photoUploadLane(() => uploadPhotoForPage(pageId, photo, { reusable: false, convId: convId }))
@@ -3373,7 +3391,7 @@
       if (!up || !up.ok || !up.fbId) {
         return { ok: false, sent: false, error: 'Không gắn được ảnh cho Socket (' + ((up && up.error) || 'lỗi upload') + ')' };
       }
-      attFbIds = [up.fbId];
+      attFbIds = (up.fbIds && up.fbIds.length) ? up.fbIds.slice() : [up.fbId];
     }
 
     const recordSocketGidSuccess = () => {
@@ -3404,6 +3422,7 @@
       let raw = rawIn;
       // Tiêu thụ xong fbId của lần bắn này: nếu có bắn lại phải lấy fbId mới tinh
       if (photo && !inBlockedCluster) ctx.nonReusableFbId = null;
+      if (photo) ctx.nonReusableFbIds = null;
 
       // Nếu đang ở chế độ thăm dò trong cục khách chặn (inBlockedCluster) mà gói Chữ đi THÀNH CÔNG (gặp khách sống!):
       // Reset ngay socketRejectStreak = 0 và lập tức upload ảnh + bắn bù RIÊNG PHẦN ẢNH (text = '') cho khách này!
@@ -3501,7 +3520,7 @@
             return { ok: false, sent: false, error: 'Socket: server báo gửi thất bại' };
           }
           ctx.nonReusableFbId = null;
-          attFbIds = [freshUp.fbId];
+          attFbIds = (freshUp.fbIds && freshUp.fbIds.length) ? freshUp.fbIds.slice() : [freshUp.fbId];
         }
         raw = await pageLane(() => socketPublishSend(helper, pageId, gid, text, attFbIds));
         if (raw && raw.kind === 'ok') {
@@ -3598,6 +3617,7 @@
       if (photo && hasTextMsg) {
         let photoRaw = await pageLane(() => socketPublishSend(helper, pageId, gid, '', attFbIds));
         ctx.nonReusableFbId = null; // fbId đã tiêu thụ bởi lần bắn ảnh này (dù thành hay bại)
+        ctx.nonReusableFbIds = null;
         if (photoRaw && photoRaw.kind !== 'legacy') {
           if (photoRaw.kind === 'rejected') {
             socketRejectStreak[pageId] = (socketRejectStreak[pageId] || 0) + 1;
@@ -3608,7 +3628,7 @@
               const freshUp = await uploadOneTimePhoto(pageId, photo, conv.id, ctx, true);
               if (freshUp && freshUp.ok && freshUp.fbId) {
                 ctx.nonReusableFbId = null;
-                photoRaw = await pageLane(() => socketPublishSend(helper, pageId, gid, '', [freshUp.fbId]));
+                photoRaw = await pageLane(() => socketPublishSend(helper, pageId, gid, '', (freshUp.fbIds && freshUp.fbIds.length) ? freshUp.fbIds : [freshUp.fbId]));
                 ctx.nonReusableFbId = null;
                 if (photoRaw && photoRaw.kind === 'rejected') socketRejectStreak[pageId] = (socketRejectStreak[pageId] || 0) + 1;
               }
@@ -3777,14 +3797,15 @@
       }
       // Tiêu thụ fbId cho lần bắn Extension này
       ctx.nonReusableFbId = null;
-      files = [up.fbId];
+      ctx.nonReusableFbIds = null;
+      files = (up.fbIds && up.fbIds.length) ? up.fbIds.slice() : [up.fbId];
     }
     const payload = {
       pageId: pageId,
       igPageId: null,
       accessToken: token,
       tryResizeImage: true,
-      contentIds: photo && photo.id ? [photo.id] : [],
+      contentIds: photo ? normalizePhotoItems(photo).map((x) => x.id).filter(Boolean) : [],
       type: 'REPLY_INBOX_PHOTO',
       message: text,
       attachmentType: photo ? 'PHOTO' : 'SEND_TEXT_ONLY',
@@ -3799,7 +3820,7 @@
         const t = Date.parse(String(full.updated_at || full.updatedAt || conv.updatedAt || '') + 'Z');
         return isNaN(t) ? Date.now() : t; // thiếu mốc → dùng giờ — không gửi NaN cho extension
       })(),
-      photoUrls: photo ? [photo.url] : [],
+      photoUrls: photo ? normalizePhotoItems(photo).map((x) => x.url).filter(Boolean) : [],
       isBusiness: false,
     };
     // đúng shape app: chỉ có files/photoUrl khi gửi ảnh (text-only: app để undefined → bỏ key)
@@ -3902,8 +3923,14 @@
     const token = getToken();
     if (!token) return { ok: false, error: 'Không có access token' };
     const body = {};
-    if (photo.id) body.content_ids = JSON.stringify([photo.id]);
-    else body.urls = JSON.stringify([photo.url]);
+    // v1.108.0: bind MỌI ảnh trong photo.items trong 1 lượt (đúng hàm N trong _app @882612:
+    // photos có id → content_ids cả mảng → fb_ids trả về theo đúng thứ tự). Ảnh của câu nhanh
+    // Pancake có sẵn content_id nên bind chỉ ~30ms (đo trong guianh1.har) thay vì ~1,47s khi
+    // bind bằng urls — server phải kéo/xử lý lại file cho từng chat (đo trong guicau.har).
+    const bindItems = normalizePhotoItems(photo);
+    if (!bindItems.length) return { ok: false, error: 'Không có ảnh' };
+    if (bindItems.every((x) => x.id)) body.content_ids = JSON.stringify(bindItems.map((x) => x.id));
+    else body.urls = JSON.stringify(bindItems.map((x) => x.url));
     if (o.convId) body.conv_id = String(o.convId);
     const url = apiBase() + '/v1/pages/' + pageId
       + '/contents/facebook?access_token=' + encodeURIComponent(token)
@@ -3917,7 +3944,7 @@
         });
         const j = await res.json().catch(() => null);
         if (res.ok && j && j.success && Array.isArray(j.fb_ids) && j.fb_ids.length) {
-          return { ok: true, fbId: j.fb_ids[0] };
+          return { ok: true, fbId: String(j.fb_ids[0]), fbIds: j.fb_ids.map((x) => String(x)) };
         }
         lastErr = (j && (j.message || j.error)) || ('HTTP ' + res.status);
         if ((res.status === 429 || res.status >= 500) && attempt < 3) {
@@ -3932,22 +3959,91 @@
     }
     // Fallback sang UPLOAD_INBOX_PHOTO qua Extension Pancake (đúng hàm E tại @883200 trong _app)
     const adapter = window.__ExtensionAdapter__;
-    if (photo && photo.url && adapter && typeof adapter.send === 'function') {
+    if (adapter && typeof adapter.send === 'function') {
       try {
-        const sep = photo.url.indexOf('?') > -1 ? '&' : '?';
-        const extRes = await extSendLane(() => adapter.send({
-          type: 'UPLOAD_INBOX_PHOTO',
-          pageId: pageId,
-          photoUrl: photo.url + sep + 'random=' + Math.random(),
-          name: 'image_' + Date.now() + '.jpg',
-          platform: detectPlatform(pageId) || 'facebook',
-        }, { timeout: 25000 }));
-        if (extRes && extRes.success && extRes.data && extRes.data.fbId) {
-          return { ok: true, fbId: extRes.data.fbId };
+        const extFbIds = [];
+        for (const it of bindItems) {
+          if (!it.url) { extFbIds.length = 0; break; }
+          const sep = it.url.indexOf('?') > -1 ? '&' : '?';
+          const extRes = await extSendLane(() => adapter.send({
+            type: 'UPLOAD_INBOX_PHOTO',
+            pageId: pageId,
+            photoUrl: it.url + sep + 'random=' + Math.random(),
+            name: 'image_' + Date.now() + '.jpg',
+            platform: detectPlatform(pageId) || 'facebook',
+          }, { timeout: 25000 }));
+          if (extRes && extRes.success && extRes.data && extRes.data.fbId) extFbIds.push(String(extRes.data.fbId));
+          else { extFbIds.length = 0; break; }
+        }
+        if (extFbIds.length && extFbIds.length === bindItems.length) {
+          return { ok: true, fbId: extFbIds[0], fbIds: extFbIds };
         }
       } catch (e2) { /* ignore */ }
     }
     return { ok: false, error: lastErr || 'Upload ảnh thất bại' };
+  }
+
+  /* ============================ CÂU NHANH PANCAKE (cơ chế gõ "/" của app) ============================ */
+  // Bằng chứng đã xác minh:
+  //  • _app @341733: app tự nạp câu nhanh bằng GET /v1/pages/{page}/settings?access_token=…
+  //    &load_quick_replies_only=true&client_version={version} — client_version cũ hơn bản cache
+  //    thì server trả đủ quick_replies.data.quick_replies.
+  //  • _app @845300: app gắn window.__quickReplyCacheManager__ với .all(pageId) →
+  //    { success, records } — chính là dữ liệu đứng sau ô gợi ý "/" trong khung chat.
+  //  • _app @1649663 (normalizeQuickReply): 1 câu nhanh = { shortcut, messages:[{ message, photos }] },
+  //    photos là content của Pancake có sẵn id/url/image_data — bind fbId bằng content_ids chỉ
+  //    ~30ms (guianh1.har) thay vì ~1,47s khi bind bằng urls (guicau.har).
+  function normalizeQuickReply(rec, idx) {
+    const m = (rec && Array.isArray(rec.messages) && rec.messages[0]) || rec || {};
+    const rawPhotos = (m && m.photos) || (rec && rec.photos) || [];
+    const items = (Array.isArray(rawPhotos) ? rawPhotos : []).filter(Boolean).map((ph) => ({
+      id: ph.id || '',
+      url: ph.url || '',
+      w: (ph.image_data && ph.image_data.width) || ph.width || ph.w || 0,
+      h: (ph.image_data && ph.image_data.height) || ph.height || ph.h || 0,
+    })).filter((x) => x.id || x.url);
+    const text = (m && m.message != null ? m.message : (rec && rec.message)) || '';
+    const shortcut = (rec && (rec.shortcut || rec.name)) || ('câu ' + ((idx || 0) + 1));
+    return { shortcut: String(shortcut), text: String(text || ''), items: items };
+  }
+
+  async function fetchQuickRepliesForPage(pageId) {
+    const pid = String(pageId || '');
+    if (!pid) return [];
+    // 1) Cache câu nhanh chính chủ của app (dữ liệu app đã tải cho ô gõ "/")
+    try {
+      const mgr = window.__quickReplyCacheManager__;
+      if (mgr && typeof mgr.all === 'function') {
+        const r = await Promise.race([mgr.all(pid), sleep(4000).then(() => null)]);
+        if (r && r.success && Array.isArray(r.records) && r.records.length) return r.records;
+      }
+    } catch (e) { /* xuống cách 2 */ }
+    // 2) Đúng endpoint settings app tự dựng — client_version=0 để server trả đủ dữ liệu
+    try {
+      const token = getToken();
+      if (!token) return [];
+      const res = await fetchWithTimeout(apiBase() + '/v1/pages/' + pid + '/settings?access_token=' + encodeURIComponent(token) + '&load_quick_replies_only=true&client_version=0', {
+        headers: { Accept: 'application/json' }, credentials: 'include',
+      });
+      const j = await res.json().catch(() => null);
+      const list = j && j.quick_replies && j.quick_replies.data && j.quick_replies.data.quick_replies;
+      if (Array.isArray(list) && list.length) return list;
+      // server báo data_up_to_date → dữ liệu nằm trong cache của app, đọc lại cách 1
+      const mgr2 = window.__quickReplyCacheManager__;
+      if (mgr2 && typeof mgr2.all === 'function') {
+        const r2 = await mgr2.all(pid).catch(() => null);
+        if (r2 && r2.success && Array.isArray(r2.records)) return r2.records;
+      }
+    } catch (e) { /* ignore */ }
+    return [];
+  }
+
+  function currentPanelPageId() {
+    const m = String(location.pathname || '').match(/\/(\d{6,})(?:\/|$)/);
+    if (m) return m[1];
+    const first = (state.matches && state.matches[0]) || null;
+    if (first) return first.pageId || String(first.id || '').split('_')[0];
+    return '';
   }
 
   // ---- SAU KHI GỬI THÀNH CÔNG — 3 request app LUÔN gọi (HAR tinnhan1.har + file "post"):
@@ -4081,7 +4177,10 @@
           uploadOneTimePhoto(pageId, photo, conv.id, ctx, false),
         ]);
         ctx.gid = gidRes;
-        if (upRes && upRes.ok && upRes.fbId) ctx.nonReusableFbId = upRes.fbId;
+        if (upRes && upRes.ok) {
+          if (upRes.fbIds && upRes.fbIds.length > 1) ctx.nonReusableFbIds = upRes.fbIds;
+          else if (upRes.fbId) ctx.nonReusableFbId = upRes.fbId;
+        }
         if (ctx.deferredToExt) {
           // Chưa dùng ở Làn 1 → nhường ngay fbId này vào spareFbIdPool[pageId] cho chat sống tiếp theo dùng ở 0ms!
           recycleUnusedFbId(pageId, ctx);
@@ -4104,9 +4203,12 @@
       return ctx;
     }
     const skipNow = !!(ctx.hasTextMsg && (socketRejectStreak[pageId] || 0) >= 3 && ctx.gid && !ctx.gidFromPsid && isPageSocketReady(pageId));
-    if (photo && !ctx.nonReusableFbId && canSend && !skipNow) {
+    if (photo && !ctx.nonReusableFbId && !ctx.nonReusableFbIds && canSend && !skipNow) {
       const up = await uploadOneTimePhoto(pageId, photo, conv.id, ctx, false);
-      if (up && up.ok && up.fbId) ctx.nonReusableFbId = up.fbId;
+      if (up && up.ok) {
+        if (up.fbIds && up.fbIds.length > 1) ctx.nonReusableFbIds = up.fbIds;
+        else if (up.fbId) ctx.nonReusableFbId = up.fbId;
+      }
     }
     return ctx;
   }
@@ -5151,7 +5253,7 @@
     // LƯU Ý: panel nằm trong shadow DOM → phải lấy phần tử qua shadow.getElementById,
     // document.querySelector sẽ không thấy (đây là nguyên nhân lỗi "Hãy nhập nội dung câu cần gửi")
     const msgEl = shadow && shadow.getElementById('ssb-msg');
-    const typedText = (msgEl && msgEl.value || '').trim();
+    const typedText = (msgEl && msgEl.value || '').trim() || ((state.quickReply && state.quickReply.text) || ''); // câu nhanh khôi phục sau F5 mà ô câu trống → dùng chữ của câu nhanh
     const imgState = state.image || null;
     let targets = state.matches.filter((m) => m.checked);
     if (!targets.length) {
@@ -5275,7 +5377,46 @@
     // Chuẩn bị ảnh (nếu có): upload 1 lần → gắn attachment cho từng page
     let photo = null;
     const fbIdByPage = {};
-    if (imgState && imgState.file) {
+    const apiFbIdsByPage = {};
+    const qrPhotoByPage = {};
+    const qrSel = state.quickReply;
+    if (qrSel && Array.isArray(qrSel.items) && qrSel.items.length) {
+      // ===== NGUỒN CÂU NHANH (v1.108.0): đúng cách gửi tay — 1 câu lệnh "/" đã gồm cả chữ lẫn ảnh.
+      // Ảnh câu nhanh có sẵn content_id của Pancake nên bind fbId chỉ ~30ms/chat (guianh1.har)
+      // thay vì ~1,47s/chat khi bind bằng URL (guicau.har). Câu nhanh là dữ liệu của TỪNG page:
+      // page nào trong danh sách cũng phải có đúng shortcut này mới được gửi; page thiếu sẽ
+      // được báo rõ từng chat ở khâu bắn (không gửi chữ trơ thiếu ảnh).
+      logLine('⚡ Dùng câu nhanh "' + qrSel.shortcut + '" (' + qrSel.items.length + ' ảnh) cho lượt này…');
+      const qrPages = [];
+      targets.forEach((c) => {
+        const p = c.pageId || String(c.id || '').split('_')[0];
+        if (p && qrPages.indexOf(p) === -1) qrPages.push(p);
+      });
+      for (const pid of qrPages) {
+        if (state.stopRequested) break;
+        let items = (pid === qrSel.pageId) ? qrSel.items : null;
+        if (!items) {
+          const recs = await fetchQuickRepliesForPage(pid);
+          const m = recs.map(normalizeQuickReply).filter((q) => q.shortcut === qrSel.shortcut)[0];
+          if (m && m.items.length) items = m.items;
+        }
+        if (items && items.length) {
+          const pobj = { items: items, url: items[0].url, id: items[0].id, w: items[0].w || 0, h: items[0].h || 0 };
+          qrPhotoByPage[pid] = pobj;
+          const bind = await uploadPhotoForPage(pid, pobj);
+          if (bind.ok) {
+            apiFbIdsByPage[pid] = bind.fbIds || [bind.fbId];
+            fbIdByPage[pid] = bind.fbId;
+            logLine('⚡ Page ' + pid + ': câu nhanh OK — bind ' + items.length + ' ảnh bằng content_id');
+          } else {
+            logLine('⚠ Page ' + pid + ': bind ảnh câu nhanh lỗi (' + bind.error + ') — kênh Socket/Ext sẽ tự bind lại khi gửi');
+          }
+        } else {
+          logLine('⚠ Page ' + pid + ': KHÔNG có câu nhanh "' + qrSel.shortcut + '" — chat thuộc page này sẽ bị bỏ qua kèm log (không gửi thiếu ảnh)');
+        }
+      }
+      photo = { qr: true, shortcut: qrSel.shortcut, items: qrSel.items, url: qrSel.items[0].url, id: qrSel.items[0].id, w: qrSel.items[0].w || 0, h: qrSel.items[0].h || 0 };
+    } else if (imgState && imgState.file) {
       logLine('☁️ Đang tải ảnh lên Pancake…');
       const up = await uploadContentFile(imgState.file);
       if (!up.ok) {
@@ -5297,6 +5438,7 @@
         const up2 = await uploadPhotoForPage(pageIds[i], photo);
         if (up2.ok) {
           fbIdByPage[pageIds[i]] = up2.fbId;
+          apiFbIdsByPage[pageIds[i]] = up2.fbIds || [up2.fbId];
           logLine('☁️ Page ' + pageIds[i] + ': gắn ảnh OK');
         } else {
           logLine('⚠ Page ' + pageIds[i] + ': không gắn được ảnh (' + up2.error + ') — chat page này sẽ báo lỗi');
@@ -5312,7 +5454,7 @@
     const WAVE_GAP = isNaN(gapRaw) ? 0 : Math.max(0, Math.min(60000, gapRaw));
     // gửi theo từng nhóm nội dung (câu khác câu → chữ khác chữ)
     sendGroups = buildSendGroups(targets, state.savedLists, typedText);
-    if (!imgState) {
+    if (!imgState && !photo) {
       const emptyGs = sendGroups.filter((g) => !g.text.trim());
       if (emptyGs.length) {
         const nEmpty = emptyGs.reduce((n2, g) => n2 + g.list.length, 0);
@@ -5387,7 +5529,19 @@
       let r;
       if (photo) {
         const p = c.pageId || String(c.id).split('_')[0];
-        const fbId = fbIdByPage[p] || '';
+        const photoArg = photo.qr
+          ? (qrPhotoByPage[p] ? { items: qrPhotoByPage[p].items, url: qrPhotoByPage[p].url, id: qrPhotoByPage[p].id, fbId: fbIdByPage[p] || '', fbIds: apiFbIdsByPage[p] || [], w: qrPhotoByPage[p].w || 0, h: qrPhotoByPage[p].h || 0 } : null)
+          : { url: photo.url, id: photo.id, fbId: fbIdByPage[p] || '', w: photo.w, h: photo.h };
+        if (!photoArg) {
+          // page này không có câu nhanh đang chọn → KHÔNG gửi chữ trơ (thiếu ảnh), báo rõ từng ca
+          done++;
+          fail++;
+          if (window && typeof window.__botfakeTrackStatus__ === 'function') window.__botfakeTrackStatus__(c.id, 'fail');
+          logLine('❌ [' + done + '/' + totalAll + '] ' + (c.name || c.id) + ' — page này chưa có câu nhanh "' + photo.shortcut + '" nên không gửi (tránh thiếu ảnh)');
+          setProgress(done, totalAll);
+          return { ok: false, sent: false, error: 'Page chưa có câu nhanh đã chọn' };
+        }
+        const fbId = photoArg.fbId || '';
         if (!fbId && c.type === 'comment') {
           done++;
           fail++;
@@ -5396,7 +5550,7 @@
           setProgress(done, totalAll);
           return { ok: false, sent: false, error: 'Không có attachment ảnh' };
         }
-        r = await sendOne(c, gtext, { url: photo.url, id: photo.id, fbId, w: photo.w, h: photo.h }, sendOpts);
+        r = await sendOne(c, gtext, photoArg, sendOpts);
       } else {
         r = await sendOne(c, gtext, null, sendOpts);
       }
@@ -5432,9 +5586,11 @@
         // không cần khớp mẫu lỗi "đáng bù" như trước (vì đợt chính không còn tự đi tiếp kênh)
         if (!r.uncertain && !r.recipientUnavailable && (r.firstShotFailed || isRetryableLoss(r.error))) {
           const p2 = c.pageId || String(c.id).split('_')[0];
-          scheduleBuRetry(c, gtext, photo
-            ? { url: photo.url, id: photo.id, fbId: fbIdByPage[p2] || '', w: photo.w, h: photo.h }
-            : null, c.name || c.id, 'gửi chưa được', r.tried || [], { preLogged: true });
+          scheduleBuRetry(c, gtext, !photo ? null
+            : (photo.qr
+              ? (qrPhotoByPage[p2] ? { items: qrPhotoByPage[p2].items, url: qrPhotoByPage[p2].url, id: qrPhotoByPage[p2].id, fbId: fbIdByPage[p2] || '', fbIds: apiFbIdsByPage[p2] || [], w: qrPhotoByPage[p2].w || 0, h: qrPhotoByPage[p2].h || 0 } : null)
+              : { url: photo.url, id: photo.id, fbId: fbIdByPage[p2] || '', w: photo.w, h: photo.h }),
+            c.name || c.id, 'gửi chưa được', r.tried || [], { preLogged: true });
         } else {
           if (window && typeof window.__botfakeTrackStatus__ === 'function') window.__botfakeTrackStatus__(c.id, 'fail');
         }
@@ -5957,6 +6113,14 @@
               <button class="b b-gray" id="ssb-img-clear" style="display:none">✕ Bỏ ảnh</button>
             </div>
             <div class="row" style="align-items:center">
+              <button class="b b-gray" id="ssb-qr-load" title="Nạp danh sách câu nhanh Pancake của page này (đúng cơ chế gõ / trong khung chat)">⚡ Nạp câu nhanh</button>
+              <select id="ssb-qr" style="flex:1;min-width:140px" title="Chọn 1 câu nhanh — chữ và ảnh của câu sẽ dùng cho cả lượt gửi">
+                <option value="">— câu nhanh (chữ + ảnh) —</option>
+              </select>
+              <button class="b b-gray" id="ssb-qr-clear" style="display:none" title="Bỏ chọn câu nhanh">✕</button>
+            </div>
+            <span class="hint" id="ssb-qr-info">Câu nhanh: chưa chọn — gõ tay như cũ</span>
+            <div class="row" style="align-items:center">
               <span class="hint">Mỗi lượt:</span>
               <input type="number" id="ssb-wave" value="30000" min="1" max="100000" step="500" style="width:72px" title="Số tin mỗi lượt (tối đa 100.000)">
               <span class="hint">tin — nghỉ</span>
@@ -6051,6 +6215,17 @@
     const imgInfo = root.getElementById('ssb-img-info');
     const imgClearBtn = root.getElementById('ssb-img-clear');
     const setImg = (file) => {
+      if (file && state.quickReply) {
+        // chọn ảnh tay → bỏ câu nhanh (tránh lẫn 2 nguồn ảnh)
+        state.quickReply = null;
+        try { localStorage.removeItem('ssb_qr_v1'); } catch (e) { /* ignore */ }
+        const qi = root.getElementById('ssb-qr-info');
+        if (qi) qi.textContent = 'Câu nhanh: đã bỏ — đang dùng ảnh chọn tay';
+        const qs = root.getElementById('ssb-qr');
+        if (qs) qs.value = '';
+        const qc = root.getElementById('ssb-qr-clear');
+        if (qc) qc.style.display = 'none';
+      }
       if (state.image && state.image.url) { try { URL.revokeObjectURL(state.image.url); } catch (e) { /* ignore */ } }
       state.image = file ? { file, name: file.name || 'ảnh', url: URL.createObjectURL(file), w: 0, h: 0 } : null;
       // đọc kích thước ảnh — request thật của app gửi kèm width/height
@@ -6073,6 +6248,59 @@
         setImg((imgInput.files && imgInput.files[0]) || null);
       });
     }
+    // ===== CÂU NHANH PANCAKE: chọn 1 câu "/" → chữ điền vào ô câu, ảnh (content_id) gắn cho lượt gửi =====
+    const qrSelEl = root.getElementById('ssb-qr');
+    const qrInfo = root.getElementById('ssb-qr-info');
+    const qrClearBtn = root.getElementById('ssb-qr-clear');
+    const QR_STORE_KEY = 'ssb_qr_v1';
+    const applyQr = (qr) => {
+      state.quickReply = qr || null;
+      try {
+        if (qr) localStorage.setItem(QR_STORE_KEY, JSON.stringify(qr));
+        else localStorage.removeItem(QR_STORE_KEY);
+      } catch (e) { /* ignore */ }
+      if (qrInfo) qrInfo.textContent = qr
+        ? '⚡ Câu nhanh "' + qr.shortcut + '" — ' + qr.items.length + ' ảnh (bind bằng content_id, nhanh như gửi tay)'
+        : 'Câu nhanh: chưa chọn — gõ tay như cũ';
+      if (qrClearBtn) qrClearBtn.style.display = qr ? '' : 'none';
+    };
+    on('ssb-qr-load', 'click', async () => {
+      const pid = currentPanelPageId();
+      if (!pid) { logLine('⚠ Chưa xác định được page — hãy mở 1 đoạn chat hoặc tải danh sách trước.'); return; }
+      logLine('⚡ Đang nạp câu nhanh của page ' + pid + '…');
+      const recs = await fetchQuickRepliesForPage(pid);
+      const list = recs.map(normalizeQuickReply).filter((q) => q.text || q.items.length);
+      state.qrList = list;
+      state.qrPageId = pid;
+      if (qrSelEl) {
+        qrSelEl.innerHTML = '<option value="">— chọn câu nhanh —</option>' + list.map((q, i) =>
+          '<option value="' + i + '">' + esc(q.shortcut) + ' · ' + esc(clip(q.text, 42)) + (q.items.length ? ' · 🖼' + q.items.length : '') + '</option>').join('');
+      }
+      logLine(list.length
+        ? '⚡ Nạp được ' + list.length + ' câu nhanh — chọn 1 câu ở ô bên cạnh rồi bấm Chạy'
+        : '⚠ Page này chưa có câu nhanh nào (hoặc app chưa tải dữ liệu câu nhanh — mở khung chat gõ "/" 1 lần rồi nạp lại)');
+    });
+    if (qrSelEl) {
+      qrSelEl.addEventListener('change', () => {
+        const q = state.qrList[parseInt(qrSelEl.value, 10)];
+        if (!q) return;
+        setImg(null); // bỏ ảnh chọn tay — dùng ảnh của câu nhanh
+        applyQr({ shortcut: q.shortcut, text: q.text, pageId: state.qrPageId || '', items: q.items });
+        const msgEl = root.getElementById('ssb-msg');
+        if (msgEl) msgEl.value = q.text;
+        logLine('⚡ Đã chọn câu nhanh "' + q.shortcut + '" (' + q.items.length + ' ảnh) — bấm Chạy để gửi cho danh sách đã chọn');
+      });
+    }
+    on('ssb-qr-clear', 'click', () => { applyQr(null); if (qrSelEl) qrSelEl.value = ''; });
+    // khôi phục câu nhanh đã chọn từ lần trước (dữ liệu người dùng phải sống qua F5)
+    try {
+      const savedQr = JSON.parse(localStorage.getItem(QR_STORE_KEY) || 'null');
+      if (savedQr && savedQr.shortcut && Array.isArray(savedQr.items) && savedQr.items.length) {
+        state.quickReply = savedQr;
+        if (qrInfo) qrInfo.textContent = '⚡ Câu nhanh "' + savedQr.shortcut + '" (' + savedQr.items.length + ' ảnh) — đã lưu từ trước, bấm Chạy là dùng';
+        if (qrClearBtn) qrClearBtn.style.display = '';
+      }
+    } catch (e) { /* ignore */ }
     on('ssb-img-clear', 'click', () => {
       if (imgInput) imgInput.value = '';
       setImg(null);
