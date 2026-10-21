@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE
 // @namespace    salescript
-// @version      1.109.0
+// @version      1.110.0
 // @description  BOTFAKE — chọn chuỗi chat (Alt+Click 2 đầu) hoặc theo snippet trong Pancake rồi gửi cùng 1 câu (kèm 1 hoặc nhiều ảnh nếu muốn) cho tất cả.
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -45,7 +45,7 @@
 
   const PANEL_ID = 'ssb-root';          // ssb = SaleScript Bulk — không đụng pk-*/adj-*/pancake-* của script khác
   const STYLE_ID = 'ssb-style';
-  const APP_VERSION = '1.109.0'; // khớp @version ở đầu file — hiện lên tiêu đề panel để đối chiếu bản đang chạy
+  const APP_VERSION = '1.110.0'; // khớp @version ở đầu file — hiện lên tiêu đề panel để đối chiếu bản đang chạy
 
   const MAX_NAME_LIST = 12;             // số tên hiển thị khi xác nhận
 
@@ -3995,17 +3995,28 @@
   //    photos là content của Pancake có sẵn id/url/image_data — bind fbId bằng content_ids chỉ
   //    ~30ms (guianh1.har) thay vì ~1,47s khi bind bằng urls (guicau.har).
   function normalizeQuickReply(rec, idx) {
-    const m = (rec && Array.isArray(rec.messages) && rec.messages[0]) || rec || {};
-    const rawPhotos = (m && m.photos) || (rec && rec.photos) || [];
-    const items = (Array.isArray(rawPhotos) ? rawPhotos : []).filter(Boolean).map((ph) => ({
+    // v1.110.0: câu nhanh có thể gồm NHIỀU ĐOẠN theo thứ tự (rec.messages[] — vd: đoạn 1 là
+    // ảnh, đoạn 2 là 1 câu, đoạn 3 là 1 câu khác). Giữ NGUYÊN từng đoạn trong `parts` để gửi
+    // lần lượt đúng thứ tự như gửi tay; `text`/`items` là bản gộp (hiển thị + tương thích
+    // ngược). Trước v1.110 script chỉ lấy messages[0] nên câu nhiều đoạn bị mất đoạn sau.
+    const toItems = (photos) => (Array.isArray(photos) ? photos : []).filter(Boolean).map((ph) => ({
       id: ph.id || '',
       url: ph.url || '',
       w: (ph.image_data && ph.image_data.width) || ph.width || ph.w || 0,
       h: (ph.image_data && ph.image_data.height) || ph.height || ph.h || 0,
     })).filter((x) => x.id || x.url);
-    const text = (m && m.message != null ? m.message : (rec && rec.message)) || '';
+    const rawMsgs = (rec && Array.isArray(rec.messages) && rec.messages.length) ? rec.messages : [rec || {}];
+    const parts = rawMsgs.map((m) => ({
+      text: String((m && (m.message != null ? m.message : m.text)) || ''),
+      items: toItems(m && m.photos),
+    })).filter((pt) => pt.text || pt.items.length);
     const shortcut = (rec && (rec.shortcut || rec.name)) || ('câu ' + ((idx || 0) + 1));
-    return { shortcut: String(shortcut), text: String(text || ''), items: items };
+    return {
+      shortcut: String(shortcut),
+      text: parts.map((pt) => pt.text).filter(Boolean).join('\n'),
+      items: parts.reduce((a, pt) => a.concat(pt.items), []),
+      parts: parts.length ? parts : [{ text: '', items: [] }],
+    };
   }
 
   async function fetchQuickRepliesForPage(pageId) {
@@ -5395,28 +5406,39 @@
       });
       for (const pid of qrPages) {
         if (state.stopRequested) break;
-        let items = (pid === qrSel.pageId) ? qrSel.items : null;
-        if (!items) {
+        // Đối chiếu ĐOẠN theo page: page nguồn lấy thẳng parts đã chọn; page khác nạp lại
+        // câu nhanh của chính page đó rồi khớp theo shortcut (dữ liệu từng page riêng).
+        let parts = null;
+        if (pid === qrSel.pageId && Array.isArray(qrSel.parts) && qrSel.parts.length) parts = qrSel.parts;
+        if (!parts) {
           const recs = await fetchQuickRepliesForPage(pid);
           const m = recs.map(normalizeQuickReply).filter((q) => q.shortcut === qrSel.shortcut)[0];
-          if (m && m.items.length) items = m.items;
+          if (m && m.parts && m.parts.length) parts = m.parts;
         }
-        if (items && items.length) {
-          const pobj = { items: items, url: items[0].url, id: items[0].id, w: items[0].w || 0, h: items[0].h || 0 };
-          qrPhotoByPage[pid] = pobj;
-          const bind = await uploadPhotoForPage(pid, pobj);
-          if (bind.ok) {
-            apiFbIdsByPage[pid] = bind.fbIds || [bind.fbId];
-            fbIdByPage[pid] = bind.fbId;
-            logLine('⚡ Page ' + pid + ': câu nhanh OK — bind ' + items.length + ' ảnh bằng content_id');
-          } else {
-            logLine('⚠ Page ' + pid + ': bind ảnh câu nhanh lỗi (' + bind.error + ') — kênh Socket/Ext sẽ tự bind lại khi gửi');
+        const flatItems = parts ? parts.reduce((a, pt) => a.concat(pt.items || []), []) : [];
+        if (parts && parts.length && flatItems.length) {
+          // Bind trước fbId (reusable) cho TỪNG đoạn có ảnh để kênh API dùng ngay;
+          // Socket/Ext vẫn tự bind bản non-reusable riêng khi gửi như cũ.
+          const resolvedParts = [];
+          for (const pt of parts) {
+            const rp = { text: pt.text || '', items: pt.items || [], apiFbIds: [] };
+            if (rp.items.length) {
+              const bind = await uploadPhotoForPage(pid, { items: rp.items });
+              if (bind.ok) rp.apiFbIds = bind.fbIds || [bind.fbId];
+            }
+            resolvedParts.push(rp);
           }
+          const firstIt = flatItems[0];
+          qrPhotoByPage[pid] = { items: flatItems, url: firstIt.url, id: firstIt.id, w: firstIt.w || 0, h: firstIt.h || 0, parts: resolvedParts };
+          const allFb = resolvedParts.reduce((a, rp) => a.concat(rp.apiFbIds), []);
+          apiFbIdsByPage[pid] = allFb;
+          fbIdByPage[pid] = allFb[0] || '';
+          logLine('⚡ Page ' + pid + ': câu nhanh OK — ' + resolvedParts.length + ' đoạn, ' + flatItems.length + ' ảnh (content_id)');
         } else {
           logLine('⚠ Page ' + pid + ': KHÔNG có câu nhanh "' + qrSel.shortcut + '" — chat thuộc page này sẽ bị bỏ qua kèm log (không gửi thiếu ảnh)');
         }
       }
-      photo = { qr: true, shortcut: qrSel.shortcut, items: qrSel.items, url: qrSel.items[0].url, id: qrSel.items[0].id, w: qrSel.items[0].w || 0, h: qrSel.items[0].h || 0 };
+      photo = { qr: true, shortcut: qrSel.shortcut, items: qrSel.items, parts: (Array.isArray(qrSel.parts) && qrSel.parts.length) ? qrSel.parts : [{ text: qrSel.text || '', items: qrSel.items }], url: qrSel.items[0].url, id: qrSel.items[0].id, w: qrSel.items[0].w || 0, h: qrSel.items[0].h || 0 };
     } else if (imgState && imgState.file) {
       logLine('☁️ Đang tải ảnh lên Pancake…');
       const up = await uploadContentFile(imgState.file);
@@ -5478,6 +5500,41 @@
     const quickEl0 = shadow && shadow.getElementById('ssb-quick');
     const quickOn = !!(quickEl0 && quickEl0.checked);
 
+    // CÂU NHANH NHIỀU ĐOẠN (v1.110.0): gửi từng đoạn theo đúng thứ tự như gửi tay — mỗi đoạn
+    // qua sendOne như 1 tin thường (đoạn có ảnh+chữ thì trong đoạn đó vẫn ảnh trước → chữ sau).
+    // Chưa đoạn nào đến nơi mà lỗi → trả nguyên kết quả để xử lý kênh/bù như 1 tin thường;
+    // đã có đoạn đến nơi rồi mới lỗi → chốt ⚠ (uncertain) để TUYỆT ĐỐI không bắn lại từ đầu
+    // gây trùng các đoạn đã đi.
+    const sendQrParts = async (c, parts, sendOpts) => {
+      let sentCount = 0;
+      let anyFired = false;
+      let lastOk = null;
+      for (let i = 0; i < parts.length; i++) {
+        if (state.stopRequested) {
+          return sentCount
+            ? { ok: false, uncertain: true, partialSent: true, error: 'Đã dừng giữa câu nhanh (' + sentCount + '/' + parts.length + ' đoạn đã gửi)' }
+            : { ok: false, sent: false, error: 'Đã hủy gửi' };
+        }
+        const pt = parts[i];
+        const pArg = (pt.items && pt.items.length)
+          ? { items: pt.items, url: pt.items[0].url, id: pt.items[0].id, fbId: (pt.apiFbIds && pt.apiFbIds[0]) || '', fbIds: pt.apiFbIds || [], w: pt.items[0].w || 0, h: pt.items[0].h || 0 }
+          : null;
+        const rr = await sendOne(c, pt.text || '', pArg, sendOpts);
+        if (rr && rr.ok) {
+          sentCount++;
+          if (rr.fired) anyFired = true;
+          lastOk = rr;
+          continue;
+        }
+        if (!sentCount) return rr; // lỗi ngay đoạn đầu (hoặc cần hoãn Ext) — chưa gì đến nơi, xử lý như tin thường
+        return {
+          ok: false, uncertain: true, partialSent: true,
+          error: 'Câu nhanh gửi dở ' + sentCount + '/' + parts.length + ' đoạn — đoạn ' + (i + 1) + ' lỗi (' + ((rr && rr.error) || 'không rõ') + '), không gửi lại từ đầu để tránh trùng',
+        };
+      }
+      return { ok: true, sendBy: (lastOk && lastOk.sendBy) || 'socket', sent: true, fired: anyFired, partsSent: sentCount };
+    };
+
     const sendOneAndLog = async (c, gtext, itemOpts) => {
       const isDeferredPass = !!(itemOpts && itemOpts.deferredCtx);
       const prepCtx = (itemOpts && itemOpts.prepCtx) || null; // v1.91.0: ctx đã chuẩn bị xong ở giai đoạn CHUẨN BỊ
@@ -5530,10 +5587,8 @@
       let r;
       if (photo) {
         const p = c.pageId || String(c.id).split('_')[0];
-        const photoArg = photo.qr
-          ? (qrPhotoByPage[p] ? { items: qrPhotoByPage[p].items, url: qrPhotoByPage[p].url, id: qrPhotoByPage[p].id, fbId: fbIdByPage[p] || '', fbIds: apiFbIdsByPage[p] || [], w: qrPhotoByPage[p].w || 0, h: qrPhotoByPage[p].h || 0 } : null)
-          : { url: photo.url, id: photo.id, fbId: fbIdByPage[p] || '', w: photo.w, h: photo.h };
-        if (!photoArg) {
+        const qrPage = photo.qr ? qrPhotoByPage[p] : null;
+        if (photo.qr && !qrPage) {
           // page này không có câu nhanh đang chọn → KHÔNG gửi chữ trơ (thiếu ảnh), báo rõ từng ca
           done++;
           fail++;
@@ -5542,16 +5597,25 @@
           setProgress(done, totalAll);
           return { ok: false, sent: false, error: 'Page chưa có câu nhanh đã chọn' };
         }
-        const fbId = photoArg.fbId || '';
-        if (!fbId && c.type === 'comment') {
-          done++;
-          fail++;
-          if (window && typeof window.__botfakeTrackStatus__ === 'function') window.__botfakeTrackStatus__(c.id, 'fail');
-          logLine('❌ [' + done + '/' + totalAll + '] ' + (c.name || c.id) + ' — không có attachment ảnh cho page này');
-          setProgress(done, totalAll);
-          return { ok: false, sent: false, error: 'Không có attachment ảnh' };
+        const multiParts = (qrPage && Array.isArray(qrPage.parts) && qrPage.parts.length > 1) ? qrPage.parts : null;
+        if (multiParts) {
+          // Câu nhanh NHIỀU ĐOẠN → gửi từng đoạn lần lượt theo đúng thứ tự của câu lệnh
+          r = await sendQrParts(c, multiParts, sendOpts);
+        } else {
+          const photoArg = photo.qr
+            ? { items: qrPage.items, url: qrPage.url, id: qrPage.id, fbId: fbIdByPage[p] || '', fbIds: apiFbIdsByPage[p] || [], w: qrPage.w || 0, h: qrPage.h || 0 }
+            : { url: photo.url, id: photo.id, fbId: fbIdByPage[p] || '', w: photo.w, h: photo.h };
+          const fbId = photoArg.fbId || '';
+          if (!fbId && c.type === 'comment') {
+            done++;
+            fail++;
+            if (window && typeof window.__botfakeTrackStatus__ === 'function') window.__botfakeTrackStatus__(c.id, 'fail');
+            logLine('❌ [' + done + '/' + totalAll + '] ' + (c.name || c.id) + ' — không có attachment ảnh cho page này');
+            setProgress(done, totalAll);
+            return { ok: false, sent: false, error: 'Không có attachment ảnh' };
+          }
+          r = await sendOne(c, gtext, photoArg, sendOpts);
         }
-        r = await sendOne(c, gtext, photoArg, sendOpts);
       } else {
         r = await sendOne(c, gtext, null, sendOpts);
       }
@@ -6342,7 +6406,7 @@
         }
         if (qrSelEl) {
           qrSelEl.innerHTML = '<option value="">— chọn câu nhanh —</option>' + list.map((q2, i) =>
-            '<option value="' + i + '">' + esc(q2.shortcut) + ' · ' + esc(clip(q2.text, 42)) + (q2.items.length ? ' · 🖼' + q2.items.length : '') + '</option>').join('');
+            '<option value="' + i + '">' + esc(q2.shortcut) + ' · ' + esc(clip(q2.text, 42)) + (q2.items.length ? ' · 🖼' + q2.items.length : '') + (q2.parts && q2.parts.length > 1 ? ' · ' + q2.parts.length + ' đoạn' : '') + '</option>').join('');
           const ix = q ? list.indexOf(q) : -1;
           if (ix > -1) qrSelEl.value = String(ix);
         }
@@ -6351,7 +6415,7 @@
           return;
         }
         setImg(null); // bỏ ảnh chọn tay — dùng ảnh của câu vừa bắt
-        applyQr({ shortcut: q.shortcut, text: q.text, pageId: pid, items: q.items });
+        applyQr({ shortcut: q.shortcut, text: q.text, pageId: pid, items: q.items, parts: q.parts });
         const msgEl = root.getElementById('ssb-msg');
         if (msgEl) msgEl.value = q.text;
         // dọn đúng ký tự lệnh còn sót trong composer (chỉ khi composer đang chứa đúng "/" hoặc đúng shortcut)
@@ -6363,7 +6427,7 @@
             comp.dispatchEvent(new Event('input', { bubbles: true }));
           }
         } catch (e2) { /* composer giữ nguyên cũng không sao — chưa hề gửi */ }
-        logLine('🎯 ĐÃ BẮT câu "' + q.shortcut + '" (' + q.items.length + ' ảnh, ' + q.text.length + ' ký tự chữ) — bấm ▶ Chạy để gửi cho danh sách đã chọn');
+        logLine('🎯 ĐÃ BẮT câu "' + q.shortcut + '" (' + q.items.length + ' ảnh, ' + q.text.length + ' ký tự chữ' + (q.parts && q.parts.length > 1 ? ', ' + q.parts.length + ' đoạn — sẽ gửi lần lượt theo thứ tự' : '') + ') — bấm ▶ Chạy để gửi cho danh sách đã chọn');
       })().catch((err) => logLine('⚠ Bắt câu lỗi: ' + (err && err.message || err)));
     };
     document.addEventListener('click', onQrCaptureClick, true);
@@ -6378,7 +6442,7 @@
       state.qrPageId = pid;
       if (qrSelEl) {
         qrSelEl.innerHTML = '<option value="">— chọn câu nhanh —</option>' + list.map((q, i) =>
-          '<option value="' + i + '">' + esc(q.shortcut) + ' · ' + esc(clip(q.text, 42)) + (q.items.length ? ' · 🖼' + q.items.length : '') + '</option>').join('');
+          '<option value="' + i + '">' + esc(q.shortcut) + ' · ' + esc(clip(q.text, 42)) + (q.items.length ? ' · 🖼' + q.items.length : '') + (q.parts && q.parts.length > 1 ? ' · ' + q.parts.length + ' đoạn' : '') + '</option>').join('');
       }
       logLine(list.length
         ? '⚡ Nạp được ' + list.length + ' câu nhanh — chọn 1 câu ở ô bên cạnh rồi bấm Chạy'
@@ -6389,10 +6453,10 @@
         const q = state.qrList[parseInt(qrSelEl.value, 10)];
         if (!q) return;
         setImg(null); // bỏ ảnh chọn tay — dùng ảnh của câu nhanh
-        applyQr({ shortcut: q.shortcut, text: q.text, pageId: state.qrPageId || '', items: q.items });
+        applyQr({ shortcut: q.shortcut, text: q.text, pageId: state.qrPageId || '', items: q.items, parts: q.parts });
         const msgEl = root.getElementById('ssb-msg');
         if (msgEl) msgEl.value = q.text;
-        logLine('⚡ Đã chọn câu nhanh "' + q.shortcut + '" (' + q.items.length + ' ảnh) — bấm Chạy để gửi cho danh sách đã chọn');
+        logLine('⚡ Đã chọn câu nhanh "' + q.shortcut + '" (' + q.items.length + ' ảnh' + (q.parts && q.parts.length > 1 ? ', ' + q.parts.length + ' đoạn — sẽ gửi lần lượt theo thứ tự' : '') + ') — bấm Chạy để gửi cho danh sách đã chọn');
       });
     }
     on('ssb-qr-clear', 'click', () => { applyQr(null); if (qrSelEl) qrSelEl.value = ''; });
