@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE
 // @namespace    salescript
-// @version      1.106.0
+// @version      1.107.0
 // @description  BOTFAKE — chọn chuỗi chat (Alt+Click 2 đầu) hoặc theo snippet trong Pancake rồi gửi cùng 1 câu (kèm 1 hoặc nhiều ảnh nếu muốn) cho tất cả.
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -45,7 +45,7 @@
 
   const PANEL_ID = 'ssb-root';          // ssb = SaleScript Bulk — không đụng pk-*/adj-*/pancake-* của script khác
   const STYLE_ID = 'ssb-style';
-  const APP_VERSION = '1.106.0'; // khớp @version ở đầu file — hiện lên tiêu đề panel để đối chiếu bản đang chạy
+  const APP_VERSION = '1.107.0'; // khớp @version ở đầu file — hiện lên tiêu đề panel để đối chiếu bản đang chạy
 
   const MAX_NAME_LIST = 12;             // số tên hiển thị khi xác nhận
 
@@ -3361,7 +3361,12 @@
     //        - Nếu gặp khách còn sống nằm lẫn trong cục: gói Chữ đi thành công (ok) → reset streak = 0 và lập tức
     //          upload ảnh bắn tiếp phần Ảnh ngay lập tức (khách sống vẫn nhận đủ 100% cả chữ lẫn ảnh)!
     const hasTextMsg = !!(text && String(text).trim().length > 0);
-    const inBlockedCluster = !!(photo && hasTextMsg && !ctx.nonReusableFbId && (socketRejectStreak[pageId] || 0) >= 3);
+    // v1.107.0: BỎ cơ chế thăm dò bằng chữ trước (inBlockedCluster) cho tin ảnh+chữ. Cơ chế cũ
+    // bắn gói CHỮ trước để dò khách sống trong vùng khách chết, ảnh theo sau — đúng thứ tự
+    // người dùng phàn nàn ("gửi chữ trước rồi gửi ảnh sau"). Từ nay tin ảnh+chữ luôn đi theo
+    // thứ tự ẢNH TRƯỚC → CHỮ SAU (nhánh riêng ngay dưới đây); khách chết bị FB từ chối ngay
+    // ở gói ảnh đầu tiên nên không còn chữ mồ côi. Biến giữ = false để các guard cũ vô hại.
+    const inBlockedCluster = false;
     let attFbIds = null;
     if (photo && !inBlockedCluster) {
       const up = await uploadOneTimePhoto(pageId, photo, conv.id, ctx, false);
@@ -3560,6 +3565,109 @@
       }
       return { ok: false, sent: 'maybe', error: 'Socket không rõ kết quả' + (reason ? ' (' + reason + ')' : '') };
       };
+      // ===== v1.107.0: TIN ẢNH+CHỮ ĐI THEO THỨ TỰ "ẢNH TRƯỚC → CHỮ SAU" =====
+      // Khung gộp cũ [task ảnh + task chữ] (và cơ chế thăm dò chữ-trước) đều làm khách thấy
+      // CHỮ trước, ẢNH tới sau rất lâu: FB xử lý task chữ tức thì còn task ảnh phải qua khâu
+      // xử lý file đính kèm, tải lớn là trễ cả chục phút; ảnh lỗi thì chữ thành tin mồ côi rồi
+      // mới cứu ảnh ở nền. Nay: bắn RIÊNG gói ẢNH trước và CHỜ FB xác nhận ảnh đã vào thread,
+      // mới bắn gói CHỮ ngay sau đó (chênh nhau ~1 vòng ACK) → khách luôn thấy ảnh trước,
+      // chữ sát ngay sau. Ảnh bị từ chối → CHƯA bắn chữ chút nào: thử lại 1 lần bằng fbId mới
+      // (fbId lỗi thời, khách còn sống), vẫn thua mới kết luận như ca từ chối cũ và để
+      // sendOne thử kênh khác bằng NGUYÊN gói (không mồ côi, không trùng).
+      const settleTextAfterPhoto = async (rawIn) => {
+        let raw = rawIn;
+        if (raw && raw.kind === 'rejected') {
+          socketRejectStreak[pageId] = (socketRejectStreak[pageId] || 0) + 1;
+          // Chữ bị từ chối chớp nhoáng (burst) sau khi ảnh đã vào: bắn lại CHỈ CHỮ 1 lần
+          if ((!ctx || !ctx.gidFromPsid) && !(ctx && ctx.socketTextRetriedOnce) && (socketRejectStreak[pageId] || 0) <= 4) {
+            if (deliveredIds[conv.id]) return { ok: true, id: gid, sendBy: 'socket', sent: true };
+            if (ctx) ctx.socketTextRetriedOnce = true;
+            await sleep(100);
+            raw = await pageLane(() => socketPublishSend(helper, pageId, gid, text, null));
+            if (raw && raw.kind === 'ok') socketRejectStreak[pageId] = 0;
+          }
+        }
+        if (raw && raw.kind === 'ok') return { ok: true, id: gid, sendBy: 'socket', sent: true };
+        // Ảnh ĐÃ vào thread, chỉ còn chữ chưa đi: bù CHỈ PHẦN CHỮ bằng Extension (không gửi
+        // lại ảnh → không trùng ảnh). Bù không được thì chốt 'maybe' (dừng, báo ⚠) — tuyệt
+        // đối không trả sent:false để sendOne khỏi bắn lại cả gói gây trùng ảnh.
+        const extText = await sendViaExtension(conv, text, null, ctx);
+        if (extText && extText.ok) return { ok: true, id: gid, sendBy: 'socket', sent: true };
+        return { ok: false, sent: 'maybe', error: 'Socket: ảnh đã gửi nhưng phần chữ chưa đi được — không gửi lại cả gói để tránh trùng ảnh' };
+      };
+      if (photo && hasTextMsg) {
+        let photoRaw = await pageLane(() => socketPublishSend(helper, pageId, gid, '', attFbIds));
+        ctx.nonReusableFbId = null; // fbId đã tiêu thụ bởi lần bắn ảnh này (dù thành hay bại)
+        if (photoRaw && photoRaw.kind !== 'legacy') {
+          if (photoRaw.kind === 'rejected') {
+            socketRejectStreak[pageId] = (socketRejectStreak[pageId] || 0) + 1;
+            // Chưa ở sâu trong vùng khách chết: thử lại 1 lần bằng fbId MỚI TINH (phân biệt
+            // fbId lỗi với khách chết thật — 2 fbId khác nhau cùng bị từ chối mới là khách chết)
+            if ((!ctx || !ctx.gidFromPsid) && (socketRejectStreak[pageId] || 0) < 3) {
+              await sleep(100);
+              const freshUp = await uploadOneTimePhoto(pageId, photo, conv.id, ctx, true);
+              if (freshUp && freshUp.ok && freshUp.fbId) {
+                ctx.nonReusableFbId = null;
+                photoRaw = await pageLane(() => socketPublishSend(helper, pageId, gid, '', [freshUp.fbId]));
+                ctx.nonReusableFbId = null;
+                if (photoRaw && photoRaw.kind === 'rejected') socketRejectStreak[pageId] = (socketRejectStreak[pageId] || 0) + 1;
+              }
+            }
+          }
+          if (photoRaw.kind === 'ok') {
+            socketRejectStreak[pageId] = 0;
+            recordSocketGidSuccess();
+            // Ảnh đã được FB xác nhận vào thread → bắn CHỮ ngay sau (lô lớn: bắn-nhả như cũ,
+            // kết quả chữ chốt ở nền; lô nhỏ: chờ ACK chữ luôn)
+            if (ctx.sockFired) {
+              if (sockFiredPending.has(conv.id)) return { ok: true, id: gid, sendBy: 'socket', sent: true, fired: true };
+              sockFiredPending.add(conv.id);
+              const myRun2 = runSeq;
+              const finalizeTextBg = (res) => {
+                sockFiredPending.delete(conv.id);
+                if (myRun2 !== runSeq) return;
+                const nm = conv.name || conv.id;
+                if (res && res.ok) { markDelivered(conv.id, 'socket'); postSendSideEffects(conv); return; }
+                if (window && typeof window.__botfakeTrackStatus__ === 'function') window.__botfakeTrackStatus__(conv.id, 'uncertain');
+                logLine('⚠ ' + nm + ' — ' + ((res && res.error) || 'phần chữ không rõ kết quả') + ' (xác nhận nền — ảnh đã gửi, không gửi thêm để tránh trùng)');
+              };
+              const settleTextBg = (rawKind) => {
+                if (myRun2 !== runSeq) return;
+                settleTextAfterPhoto(rawKind)
+                  .then((res) => { if (myRun2 === runSeq) finalizeTextBg(res); })
+                  .catch(() => { sockFiredPending.delete(conv.id); });
+              };
+              pageLane(() => socketPublishSend(helper, pageId, gid, text, null, settleTextBg))
+                .then((imm) => {
+                  if (!imm || imm.kind === 'fired') return;
+                  settleTextBg(imm.kind ? imm : { kind: 'noack' });
+                })
+                .catch(() => settleTextBg({ kind: 'noack' }));
+              return { ok: true, id: gid, sendBy: 'socket', sent: true, fired: true };
+            }
+            const textRaw = await pageLane(() => socketPublishSend(helper, pageId, gid, text, null));
+            return settleTextAfterPhoto(textRaw);
+          }
+          if (photoRaw.kind === 'rejected') {
+            // Chữ chưa hề được bắn → an toàn để kết luận/thử kênh khác bằng nguyên gói
+            const isConfirmedUnavailable = ((!ctx || !ctx.gidFromPsid) && batchStats && batchStats.total > 50)
+              || !!(ctx && ctx.socketRetriedOnce);
+            return {
+              ok: false,
+              sent: false,
+              recipientUnavailable: !!isConfirmedUnavailable,
+              error: isConfirmedUnavailable
+                ? 'Socket: FB từ chối nhận tin (khách hiện không có mặt / đã khóa nick)'
+                : 'Socket: server báo gửi thất bại',
+            };
+          }
+          if (photoRaw.kind === 'dead') return { ok: false, sent: false, error: 'Socket không kết nối' };
+          // noack sau khi đã bắn ảnh: ảnh CÓ THỂ đã vào → không bắn chữ (tránh lệch thứ tự),
+          // không thử kênh khác (tránh trùng ảnh) — chốt 'maybe' theo đúng luật chống trùng
+          return { ok: false, sent: 'maybe', error: 'Socket: đã bắn ảnh nhưng FB không xác nhận — dừng để tránh trùng/lệch thứ tự' };
+        }
+        // helper cũ không có publish ('legacy'): rơi xuống khung gộp cũ bên dưới như trước
+      }
       // 🔥 NẤC 2 (v1.71.0): bắn-nhả cho lô lớn — publish xong trả kết quả ngay cho worker đi bắn tiếp;
       // ACK thật của FB về sau sẽ chạy settleSocketResult ở nền: thành công → markDelivered (im lặng,
       // tổng hợp tự cập nhật), bị từ chối → bù kênh khác đúng 1 lần qua scheduleBuRetry, không rõ → ⚠.
