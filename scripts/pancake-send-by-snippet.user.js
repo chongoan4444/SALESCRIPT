@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE
 // @namespace    salescript
-// @version      1.99.0
+// @version      1.100.0
 // @description  BOTFAKE — chọn chuỗi chat (Alt+Click 2 đầu) hoặc theo snippet trong Pancake rồi gửi cùng 1 câu (kèm 1 hoặc nhiều ảnh nếu muốn) cho tất cả.
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -4989,6 +4989,15 @@
     const myRun = runSeq;
     try {
       if (!conv || deliveredIds[conv.id]) return;
+      // v1.100.0: chat này còn đang chờ ACK Socket bắn-nhả → chờ ĐÚNG chat này chốt (tối đa
+      // 90s) rồi mới bù — thay cho cổng chờ toàn cục 180s cũ chặn cả đợt bù. Đã đến nơi thì thôi.
+      {
+        let waitedPend = 0;
+        while (sockFiredPending.has(conv.id) && !deliveredIds[conv.id] && !state.stopRequested && myRun === runSeq && waitedPend < 90000) {
+          await sleep(250); waitedPend += 250;
+        }
+        if (deliveredIds[conv.id]) return;
+      }
       const done = buRetryDone[conv.id] || (buRetryDone[conv.id] = []);
       let triedCh = (item.tried || []).slice();
       const hadDirectFail = triedCh.indexOf('ext') > -1 || triedCh.indexOf('socket') > -1 || done.length > 0;
@@ -5150,8 +5159,11 @@
     // bù của lượt trước đang chờ sẽ tự hủy (runSeq) — không gửi lẫn vào lượt mới
     runSeq++;
     buRetrySeq = 0;
-    // v1.91.0: lượt này gom toàn bộ bù vào ĐỢT BÙ TẬP TRUNG sau đợt chính
+    // v1.91.0 + v1.100.0: lượt này gom bù vào hàng đợi tập trung, nhưng worker bù chạy XEN
+    // ngay trong lúc đợt chính đang bắn (không còn pha bù nối tiếp sau đợt chính)
     buBatchMode = true;
+    let buMainDone = false, buSeenLive = 0, buSavedLive = 0;
+    let buDrainPromise = Promise.resolve();
     buBatchQueue.length = 0;
     Object.keys(buBatchQueuedIds).forEach((k) => { delete buBatchQueuedIds[k]; });
     Object.keys(buRetryDone).forEach((k) => { delete buRetryDone[k]; });
@@ -5501,11 +5513,45 @@
           prepLastLog = Date.now();
           logLine('🧰 Chuẩn bị nền: ' + prepDone + '/' + batch.length + ' (có mã sẵn: ' + prepHit + ' · tra thêm: ' + prepFound + ')…');
         }
-      }, 256).then(() => {
+      }, 128).then(() => {
         if (batch.length > 50 && !state.stopRequested && prepRun === runSeq && prepDone > 0) {
           logLine('🧰 Chuẩn bị nền xong ' + prepDone + '/' + batch.length + ' chat (có mã sẵn: ' + prepHit + ' · tra thêm: ' + prepFound + ' · chưa có mã: ' + (prepDone - prepHit - prepFound) + ').');
         }
       }).catch(() => {});
+
+      // 🧺 v1.100.0: BÙ XEN — 32 worker bù túc trực rút hàng đợi bù NGAY trong lúc đợt chính
+      // đang bắn. Thay cho pha bù NỐI TIẾP của v1.91–v1.99 (đợt chính → chờ xác nhận Socket
+      // tối đa 180s → đợt bù chạy nối tiếp qua làn Extension 12 luồng): tổng thời gian bị
+      // cộng dồn, chậm hơn cả bản v1.89 vốn cho bù chạy nền chồng lấn với đợt chính. Nay ca
+      // nào thua hẳn mới vào hàng đợi và được rút đi bù ngay; mỗi kênh vẫn đúng 1 lần (sổ
+      // buRetryDone), chống trùng nguyên vẹn. Đợt chính xong chỉ chờ hàng đợi rút cạn nên
+      // tổng thời gian quay về ≈ max(đợt chính, bù) thay vì cộng cả hai.
+      buPhaseActive = true; // TỔNG HỢP không chốt trước khi bù rút cạn (giữ fix v1.95.0)
+      buDrainPromise = (async () => {
+        const buWorkers = [];
+        for (let w = 0; w < 32; w++) {
+          buWorkers.push((async () => {
+            for (;;) {
+              if (state.stopRequested) return;
+              const it = buBatchQueue.shift();
+              if (!it) {
+                if (buMainDone) return;
+                await sleep(300);
+                continue;
+              }
+              delete buBatchQueuedIds[it.conv.id];
+              const wasDelivered = !!deliveredIds[it.conv.id];
+              await runBuBatchItem(it);
+              buSeenLive++;
+              if (!wasDelivered && deliveredIds[it.conv.id]) buSavedLive++;
+              if (buSeenLive > 200 && buSeenLive % 1000 === 0) {
+                logLine('🧺 Bù xen: đã xử lý ' + buSeenLive + ' ca (cứu được ' + buSavedLive + '), hàng đợi còn ' + buBatchQueue.length + '…');
+              }
+            }
+          })());
+        }
+        await Promise.all(buWorkers);
+      })();
 
       const extWorkers = [];
       const nExtWorkers = Math.min(EXT_BACKLOG_WORKERS, Math.max(1, batch.length));
@@ -5571,32 +5617,17 @@
     }
 
     batchStats.loopFinished = true;
-    // 🧺 v1.91.0: ĐỢT BÙ TẬP TRUNG — đợt chính đã bắn xong 1 lượt. Chờ xác nhận nền (Socket
-    // bắn-nhả) chốt hết để mọi chat bị từ chối gom đủ vào hàng đợi, rồi bù MỘT ĐỢT gọn ngay
-    // tại đây (mỗi kênh còn lại đúng 1 lần/chat) — hết cảnh bù nhỏ giọt lẻ tẻ cả chục phút.
-    buPhaseActive = true; // v1.95.0: từ đây tới hết đợt bù, TỔNG HỢP chưa được chốt (tránh chốt trước dòng bù tạo ra số đó)
-    if (buBatchQueue.length && !state.stopRequested) {
-      let waited = 0;
-      while (sockFiredPending.size > 0 && !state.stopRequested && waited < 180000) {
-        await sleep(250); waited += 250;
-      }
+    // 🧺 v1.100.0: bù xen đã chạy suốt đợt chính — giờ chỉ chờ hàng đợi rút cạn, KHÔNG còn
+    // pha bù nối tiếp riêng và KHÔNG còn cổng chờ xác nhận Socket toàn cục 180s.
+    buMainDone = true;
+    if (buSeenLive > 0 || buBatchQueue.length) {
+      logLine('🧺 Đợt chính xong — chờ bù tập trung rút cạn (đã xử lý ' + buSeenLive + ' ca, hàng đợi còn ' + buBatchQueue.length + ')…');
     }
-    if (buBatchQueue.length && !state.stopRequested) {
-      const buItems = buBatchQueue.splice(0, buBatchQueue.length);
-      logLine('🧺 Đợt chính xong — BÙ TẬP TRUNG ' + buItems.length + ' chat chưa tới nơi (mỗi kênh còn lại đúng 1 lần)…');
-      let buDoneN = 0, buOkN = 0;
-      await runPool(buItems, async (it) => {
-        if (state.stopRequested) return;
-        const wasDelivered = !!deliveredIds[it.conv.id];
-        await runBuBatchItem(it);
-        buDoneN++;
-        if (!wasDelivered && deliveredIds[it.conv.id]) buOkN++;
-        if (buItems.length > 200 && buDoneN % 1000 === 0) {
-          logLine('🧺 Đang bù tập trung: ' + buDoneN + '/' + buItems.length + '…');
-        }
-      }, 64);
-      logLine('🧺 Đợt bù tập trung xong: cứu thêm ' + buOkN + '/' + buItems.length + ' chat.');
-    } else if (buBatchQueue.length && state.stopRequested) {
+    await buDrainPromise;
+    if (buSeenLive > 0) {
+      logLine('🧺 Bù tập trung xong: cứu thêm ' + buSavedLive + '/' + buSeenLive + ' chat.');
+    }
+    if (buBatchQueue.length) {
       // Đang dừng: chốt lỗi các chat còn chờ bù để TỔNG HỢP không treo "đang xử lý" mãi
       buBatchQueue.splice(0, buBatchQueue.length).forEach((it) => {
         if (window && typeof window.__botfakeTrackStatus__ === 'function') window.__botfakeTrackStatus__(it.conv.id, 'fail');
