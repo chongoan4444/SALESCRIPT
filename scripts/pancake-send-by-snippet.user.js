@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE
 // @namespace    salescript
-// @version      1.100.0
+// @version      1.101.0
 // @description  BOTFAKE — chọn chuỗi chat (Alt+Click 2 đầu) hoặc theo snippet trong Pancake rồi gửi cùng 1 câu (kèm 1 hoặc nhiều ảnh nếu muốn) cho tất cả.
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -5159,11 +5159,11 @@
     // bù của lượt trước đang chờ sẽ tự hủy (runSeq) — không gửi lẫn vào lượt mới
     runSeq++;
     buRetrySeq = 0;
-    // v1.91.0 + v1.100.0: lượt này gom bù vào hàng đợi tập trung, nhưng worker bù chạy XEN
-    // ngay trong lúc đợt chính đang bắn (không còn pha bù nối tiếp sau đợt chính)
-    buBatchMode = true;
-    let buMainDone = false, buSeenLive = 0, buSavedLive = 0;
-    let buDrainPromise = Promise.resolve();
+    // v1.101.0: KHÔNG bật buBatchMode nữa — quay về cơ chế của bản nhanh v1.80/v1.89:
+    // sendOne tự đi tiếp kênh ngay khi kênh đầu thua hẳn (không dừng chờ đợt bù), và
+    // scheduleBuRetry bù NỀN ngay khi thua (chạy chồng lên đợt chính). Các lớp gom bù
+    // tập trung (v1.91/v1.98/v1.100) cộng dồn thời gian — đo thực tế chậm hơn bản cũ.
+    buBatchMode = false;
     buBatchQueue.length = 0;
     Object.keys(buBatchQueuedIds).forEach((k) => { delete buBatchQueuedIds[k]; });
     Object.keys(buRetryDone).forEach((k) => { delete buRetryDone[k]; });
@@ -5489,69 +5489,32 @@
         }
       };
 
-      // 🚀 v1.96.0: GỬI NGAY KIỂU LAI (theo lựa chọn của người dùng) — BỎ rào chắn "chuẩn bị
-      // xong mới bắn" của v1.91: bấm gửi là tin bay ngay bằng kho mã đã chuẩn bị từ lúc tải
-      // danh sách (v1.92); khâu chuẩn bị quay lại dạng PIPELINE CHẠY TRƯỚC Ở NỀN (như bản
-      // nhanh v1.70/v1.80 đã đo 143 tin/s): chạy song song cùng thứ tự với làn bắn — bắn tới
-      // chat nào thì ngữ cảnh chat đó thường đã tra sẵn trong prepCtxById (chỉ gán vào bảng
-      // SAU khi chuẩn bị xong hẳn, nên làn bắn hoặc thấy trọn vẹn, hoặc không thấy và tự xử
-      // như bản nhanh — không bao giờ đụng phải ngữ cảnh đang làm dở, không đứng chờ).
-      // Đợt bù tập trung cuối lượt (v1.91) giữ nguyên — đó mới là thứ trị tin lẻ tẻ.
-      const prepCtxById = {};
-      const prepRun = runSeq; // lượt gửi mới bắt đầu → pipeline của lượt cũ tự dừng
-      let prepDone = 0, prepHit = 0, prepFound = 0, prepLastLog = 0;
-      if (batch.length > 50) {
-        logLine('🚀 Bắn ngay ' + batch.length + ' chat (không chờ chuẩn bị) — chuẩn bị chạy trước ở nền, bổ sung mã cho các chat phía sau…');
-      }
+      // ⚡ GID PREFETCH (v1.70.0 — khôi phục ở v1.101.0): pipeline chạy nền SONG SONG với
+      // làn gửi, đi trước để nạp sẵn ngữ cảnh + global_id (GET /messages, có dedupe inflight
+      // trong ensureConvCtx) cho các chat phía sau — tới lượt worker gửi thì gid đã có sẵn
+      // trong cache (0ms), không phải đứng chờ HTTP. Không await: prefetch chậm hơn làn gửi
+      // cũng vô hại (toàn cache hit), nhanh hơn thì làn gửi bứt tốc. Đây là đúng cơ chế của
+      // bản v1.80 (đo 143 tin/s) và v1.89 (đo ~101 tin/s). Pipeline prepConvForSend của
+      // v1.94–v1.100 làm làn gửi dùng ngữ cảnh "đã chuẩn bị" nửa vời (có cờ __prepped nên
+      // không dò lại) rồi dồn việc dò sâu vào đợt bù — tổng thể chậm hơn nên gỡ bỏ.
       runPool(batch, async (c) => {
-        if (state.stopRequested || prepRun !== runSeq) return;
-        const pctx = await prepConvForSend(c, photo, { light: true }); // v1.97.0: dò nhẹ, không tranh làn Ext
-        prepCtxById[c.id] = pctx;
-        prepDone++;
-        if (pctx.gid && !pctx.gidFromPsid) { if (pctx.gidFromServerOrCache) prepHit++; else prepFound++; }
-        if (batch.length > 200 && (prepDone % 5000 === 0 || Date.now() - prepLastLog >= 30000)) {
-          prepLastLog = Date.now();
-          logLine('🧰 Chuẩn bị nền: ' + prepDone + '/' + batch.length + ' (có mã sẵn: ' + prepHit + ' · tra thêm: ' + prepFound + ')…');
-        }
-      }, 128).then(() => {
-        if (batch.length > 50 && !state.stopRequested && prepRun === runSeq && prepDone > 0) {
-          logLine('🧰 Chuẩn bị nền xong ' + prepDone + '/' + batch.length + ' chat (có mã sẵn: ' + prepHit + ' · tra thêm: ' + prepFound + ' · chưa có mã: ' + (prepDone - prepHit - prepFound) + ').');
-        }
-      }).catch(() => {});
-
-      // 🧺 v1.100.0: BÙ XEN — 32 worker bù túc trực rút hàng đợi bù NGAY trong lúc đợt chính
-      // đang bắn. Thay cho pha bù NỐI TIẾP của v1.91–v1.99 (đợt chính → chờ xác nhận Socket
-      // tối đa 180s → đợt bù chạy nối tiếp qua làn Extension 12 luồng): tổng thời gian bị
-      // cộng dồn, chậm hơn cả bản v1.89 vốn cho bù chạy nền chồng lấn với đợt chính. Nay ca
-      // nào thua hẳn mới vào hàng đợi và được rút đi bù ngay; mỗi kênh vẫn đúng 1 lần (sổ
-      // buRetryDone), chống trùng nguyên vẹn. Đợt chính xong chỉ chờ hàng đợi rút cạn nên
-      // tổng thời gian quay về ≈ max(đợt chính, bù) thay vì cộng cả hai.
-      buPhaseActive = true; // TỔNG HỢP không chốt trước khi bù rút cạn (giữ fix v1.95.0)
-      buDrainPromise = (async () => {
-        const buWorkers = [];
-        for (let w = 0; w < 32; w++) {
-          buWorkers.push((async () => {
-            for (;;) {
-              if (state.stopRequested) return;
-              const it = buBatchQueue.shift();
-              if (!it) {
-                if (buMainDone) return;
-                await sleep(300);
-                continue;
-              }
-              delete buBatchQueuedIds[it.conv.id];
-              const wasDelivered = !!deliveredIds[it.conv.id];
-              await runBuBatchItem(it);
-              buSeenLive++;
-              if (!wasDelivered && deliveredIds[it.conv.id]) buSavedLive++;
-              if (buSeenLive > 200 && buSeenLive % 1000 === 0) {
-                logLine('🧺 Bù xen: đã xử lý ' + buSeenLive + ' ca (cứu được ' + buSavedLive + '), hàng đợi còn ' + buBatchQueue.length + '…');
-              }
+        if (state.stopRequested) return;
+        try {
+          const entry = await ensureConvCtx(c, { force: true });
+          // v1.88.0: lượt có ảnh + chat ĐÃ có global_id → upload sẵn fbId riêng của chat này
+          // (chạy nền đi trước làn gửi; tới lượt bắn lấy dùng ở 0ms thay vì chờ ~1,5s).
+          // Đang ở cụm khách chặn (reject streak ≥3) thì KHÔNG upload trước — giữ cơ chế
+          // thăm dò bằng chữ trước để khỏi đốt upload cho khách đã khóa nick.
+          if (photo && entry && entry.gid) {
+            const pid = c.pageId || String(c.id || '').split('_')[0];
+            if (pid && (socketRejectStreak[pid] || 0) < 3 && !prefetchPhotoFbId[c.id]) {
+              const tctx = {};
+              const up = await uploadOneTimePhoto(pid, photo, c.id, tctx, false).catch(() => null);
+              if (up && up.ok && up.fbId) prefetchPhotoFbId[c.id] = up.fbId;
             }
-          })());
-        }
-        await Promise.all(buWorkers);
-      })();
+          }
+        } catch (e) { /* ignore */ }
+      }, 128).catch(() => {}); // 128 worker nạp nền (khớp làn GET ngữ cảnh 128) + upload ảnh trước
 
       const extWorkers = [];
       const nExtWorkers = Math.min(EXT_BACKLOG_WORKERS, Math.max(1, batch.length));
@@ -5561,7 +5524,7 @@
 
       const runFastItem = async (c) => {
         if (state.stopRequested) return null;
-        const r = await sendOneAndLog(c, gtextRef, { fastOnly: true, prepCtx: prepCtxById[c.id] || null });
+        const r = await sendOneAndLog(c, gtextRef, { fastOnly: true });
         if (r && r.deferredToExt) {
           pushToExtBacklog({ c, deferredCtx: r.deferredCtx || null });
           return r;
@@ -5617,22 +5580,8 @@
     }
 
     batchStats.loopFinished = true;
-    // 🧺 v1.100.0: bù xen đã chạy suốt đợt chính — giờ chỉ chờ hàng đợi rút cạn, KHÔNG còn
-    // pha bù nối tiếp riêng và KHÔNG còn cổng chờ xác nhận Socket toàn cục 180s.
-    buMainDone = true;
-    if (buSeenLive > 0 || buBatchQueue.length) {
-      logLine('🧺 Đợt chính xong — chờ bù tập trung rút cạn (đã xử lý ' + buSeenLive + ' ca, hàng đợi còn ' + buBatchQueue.length + ')…');
-    }
-    await buDrainPromise;
-    if (buSeenLive > 0) {
-      logLine('🧺 Bù tập trung xong: cứu thêm ' + buSavedLive + '/' + buSeenLive + ' chat.');
-    }
-    if (buBatchQueue.length) {
-      // Đang dừng: chốt lỗi các chat còn chờ bù để TỔNG HỢP không treo "đang xử lý" mãi
-      buBatchQueue.splice(0, buBatchQueue.length).forEach((it) => {
-        if (window && typeof window.__botfakeTrackStatus__ === 'function') window.__botfakeTrackStatus__(it.conv.id, 'fail');
-      });
-    }
+    // v1.101.0: bù nền (scheduleBuRetry) đã chạy chồng lên đợt chính như bản v1.80/v1.89 —
+    // không còn pha bù riêng ở cuối lượt; TỔNG HỢP tự chốt khi mọi xác nhận nền settle xong.
     buPhaseActive = false;
     buBatchMode = false;
     Object.keys(buBatchQueuedIds).forEach((k) => { delete buBatchQueuedIds[k]; });
