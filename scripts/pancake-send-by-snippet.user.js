@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE
 // @namespace    salescript
-// @version      1.103.0
+// @version      1.104.0
 // @description  BOTFAKE — chọn chuỗi chat (Alt+Click 2 đầu) hoặc theo snippet trong Pancake rồi gửi cùng 1 câu (kèm 1 hoặc nhiều ảnh nếu muốn) cho tất cả.
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -1649,53 +1649,10 @@
   }
 
   // Danh sách là virtual list (rc-virtual-list): chỉ render các dòng đang thấy.
-  // 🧰 v1.92.0: CHUẨN BỊ NGAY KHI TẢI DANH SÁCH (theo yêu cầu người dùng): vừa tải xong là
-  // tự chạy khâu chuẩn bị cho toàn bộ danh sách — nạp ngữ cảnh + tra global_id bằng mọi đường
-  // (WebSocket / Extension / MAKE_MESSENGER_LINK) và LƯU VÀO KHO BỀN (localStorage + IndexedDB
-  // qua saveCache sẵn có) → tới lúc bấm gửi, giai đoạn chuẩn bị trong sendBatch gần như chỉ
-  // chạm cache (0ms) và vào thẳng đợt bắn 1 lượt. Chạy nền 96 luồng, không chặn giao diện;
-  // người dùng vẫn chọn câu/soạn nội dung trong lúc chuẩn bị. Tải lại danh sách → phiên cũ
-  // tự hủy (loadPrepSeq); đang gửi hoặc đang tải lại → nhường ngay (khâu chuẩn bị lúc gửi lo).
-  let loadPrepSeq = 0;
-  const loadPreppedIds = new Set(); // convId đã chuẩn bị ở khâu tải trong phiên trang này
-  function startPrepAfterLoad() {
-    try {
-      if (!state.allRows || !state.allRows.size) return;
-      const mySeq = ++loadPrepSeq;
-      const rows = Array.from(state.allRows.values());
-      (async () => {
-        try { warmUpSockets(rows); } catch (e) { /* ignore */ }
-        let doneN = 0, gidN = 0, foundN = 0, skipN = 0;
-        logLine('🧰 Tải xong — TỰ CHUẨN BỊ NGAY ' + rows.length + ' chat (tra global_id trước, để lúc bấm gửi là bắn luôn)…');
-        // v1.94.0: chuẩn bị chia tầng qua prepConvForSend — có mã sẵn qua 0ms, thiếu mới tra;
-        // bỏ hẳn bão GET /messages từng chat (nghẽn cũ) → nhanh hơn nhiều lần ở quy mô 100k.
-        await runPool(rows, async (c) => {
-          if (mySeq !== loadPrepSeq) return; // đã tải lại danh sách mới → phiên chuẩn bị cũ dừng
-          if (state.scanning || state.sending) return; // đang tải lại / đang gửi → nhường
-          if (!c || !c.id || loadPreppedIds.has(c.id)) { skipN++; return; }
-          loadPreppedIds.add(c.id);
-          const pctx = await prepConvForSend(c, null);
-          if (pctx.gid && !pctx.gidFromPsid) { gidN++; if (!pctx.gidFromServerOrCache) foundN++; }
-          doneN++;
-          if (rows.length > 200 && doneN % 2000 === 0) {
-            logLine('🧰 Chuẩn bị sau tải: ' + doneN + '/' + rows.length + ' chat (có global_id: ' + gidN + ', tra mới: ' + foundN + ')…');
-          }
-        }, 256); // v1.95.0: 128→256 luồng chuẩn bị
-        if (mySeq === loadPrepSeq) {
-          // v1.95.0: báo ĐÚNG trạng thái — bị ngắt giữa chừng (bấm gửi / tải lại) thì nói tạm
-          // dừng ở đâu, không báo "XONG" sai như trước (log 20:27 báo XONG ở 1.462/28.555).
-          if (doneN + skipN >= rows.length) {
-            logLine('🧰 Chuẩn bị sau tải XONG: ' + doneN + ' chat (có global_id thật: ' + gidN
-              + ', tra mới: ' + foundN + (skipN ? ', đã sẵn từ trước: ' + skipN : '')
-              + ') — giờ bấm gửi là vào thẳng đợt bắn 1 lượt.');
-          } else {
-            logLine('⏸ Chuẩn bị sau tải tạm dừng ở ' + (doneN + skipN) + '/' + rows.length
-              + ' chat (đang gửi hoặc tải lại) — phần còn lại sẽ được chuẩn bị tiếp ở lượt gửi.');
-          }
-        }
-      })().catch(() => {});
-    } catch (e) { /* ignore */ }
-  }
+  // v1.104.0: ĐÃ GỠ khâu "chuẩn bị ngay khi tải danh sách" (startPrepAfterLoad của
+  // v1.92–v1.95) theo đánh giá của người dùng là vô dụng: nó đốt hàng trăm luồng dò mã
+  // sau mỗi lần tải mà lúc bấm gửi, làn bắn vẫn tự nạp được như thường. Mã tra được lúc
+  // gửi vẫn lưu vào kho bền qua saveCache sẵn có — lượt sau vẫn có sẵn ở 0ms.
 
   // Khi người dùng bấm "⚡ Tải danh sách": PHẢI XÓA SẠCH DANH SÁCH CŨ (state.allRows = null)
   // rồi tải lại danh sách mới hoàn toàn từ đầu. Nếu đang tải dở mà bấm lần 2 → dừng ngay & dùng số chat đã tải!
@@ -1880,8 +1837,6 @@
     } finally {
       state.scanning = false;
       state.scanStopRequested = false;
-      // v1.92.0: tải xong (kể cả dừng giữa chừng dùng số đã tải) → CHUẨN BỊ LUÔN tại chỗ
-      startPrepAfterLoad();
       if (btn && state.allRows) {
         setBtn('⚡ Tải danh sách (' + state.allRows.size + ' chat)');
       } else if (btn) {
@@ -3967,46 +3922,6 @@
       const sk = h && h.SOCKETS && h.SOCKETS[pageId];
       return isSocketAlive(sk);
     } catch (e) { return false; }
-  }
-
-  // Chuẩn bị chung ngữ cảnh (full, threadId, globalId, nonReusableFbId) TRƯỚC KHI chọn kênh bắn:
-  //   • Ở Làn 1 (ctx.fastOnly): chạy SONG SONG (Promise.all) cả resolveGlobalId (GET /messages ~150ms)
-  //     và uploadOneTimePhoto (POST /contents/facebook ~350ms) để cắt giảm 30% thời gian chờ HTTP!
-  //     Nếu chat chưa có globalId trên Server Pancake (deferredToExt), fbId vừa tạo được cất ngay vào
-  //     spareFbIdPool[pageId] để chat sống kế tiếp dùng ở 0ms (tuyệt đối không lãng phí!).
-  //   • Ở Làn 2 (!ctx.fastOnly): giải quyết globalId trước, chỉ upload ảnh khi chat có thể gửi được.
-  // v1.94.0: chuẩn bị 1 chat để gửi — ĐƯỜNG NHANH TRƯỚC: đã có sẵn global_id trong RAM/kho
-  // thì điền thẳng 0ms (đúng fast-path của sendOne — không gọi server câu nào); chỉ chat thật
-  // sự thiếu mới dò bằng prepareDirectCtx ở chế độ prepMode (không bão GET /messages như trước,
-  // không đốt MAKE_MESSENGER_LINK — xem resolveGlobalId). Dùng chung cho chuẩn-bị-sau-tải và
-  // chuẩn-bị-trước-khi-bắn; pctx trả về cho làn bắn dùng lại, lúc tải thì bỏ qua (chỉ lấy tác
-  // dụng phụ: làm ấm mọi kho cache + lưu bền global_id vừa tra được).
-  async function prepConvForSend(c, photo, opts) {
-    const pctx = { __prepped: true, prepMode: true };
-    if (opts && opts.light) pctx.prepLight = true; // v1.97.0: pipeline nền lúc đang bắn — dò nhẹ, không tranh làn Ext với tin đang gửi
-    try {
-      if (!c || c.type === 'comment') return pctx;
-      const peeked = peekConv(c) || c;
-      const pid = (peeked && (peeked.page_id || peeked.pageId)) || c.pageId || String(c.id || '').split('_')[0];
-      const fastGid = peekFastGlobalId(c, peeked, '');
-      const tid = (peeked && (peeked.thread_id || peeked.threadId)) || c.threadId || '';
-      if (fastGid && (tid || isPageSocketReady(pid))) {
-        pctx.full = peeked;
-        pctx.fullLoaded = true;
-        if (tid) { pctx.threadId = String(tid); pctx.threadResolved = true; }
-        pctx.gid = String(fastGid);
-        pctx.gidResolved = true;
-        pctx.gidFromPsid = false;
-        pctx.gidFromServerOrCache = true; // dấu "có mã sẵn" — log đếm phân biệt với tra mới
-        if (photo) {
-          const up = await uploadOneTimePhoto(pid, photo, c.id, pctx, false).catch(() => null);
-          if (up && up.ok && up.fbId) pctx.nonReusableFbId = up.fbId;
-        }
-        return pctx;
-      }
-      await prepareDirectCtx(c, photo, pctx);
-      return pctx;
-    } catch (e) { return pctx; }
   }
 
   async function prepareDirectCtx(conv, photo, ctx) {
