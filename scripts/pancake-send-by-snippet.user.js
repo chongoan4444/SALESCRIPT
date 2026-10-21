@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE
 // @namespace    salescript
-// @version      1.105.0
+// @version      1.106.0
 // @description  BOTFAKE — chọn chuỗi chat (Alt+Click 2 đầu) hoặc theo snippet trong Pancake rồi gửi cùng 1 câu (kèm 1 hoặc nhiều ảnh nếu muốn) cho tất cả.
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -45,7 +45,7 @@
 
   const PANEL_ID = 'ssb-root';          // ssb = SaleScript Bulk — không đụng pk-*/adj-*/pancake-* của script khác
   const STYLE_ID = 'ssb-style';
-  const APP_VERSION = '1.105.0'; // khớp @version ở đầu file — hiện lên tiêu đề panel để đối chiếu bản đang chạy
+  const APP_VERSION = '1.106.0'; // khớp @version ở đầu file — hiện lên tiêu đề panel để đối chiếu bản đang chạy
 
   const MAX_NAME_LIST = 12;             // số tên hiển thị khi xác nhận
 
@@ -3466,7 +3466,13 @@
       } else if (raw && raw.kind === 'ok') {
         socketRejectStreak[pageId] = 0;
       }
-      if (raw && raw.kind === 'rejected' && (!ctx || !ctx.gidFromPsid) && !ctx.socketRetriedOnce && (socketRejectStreak[pageId] || 0) <= 4) {
+      // v1.106.0: khung CÓ ẢNH bị từ chối hẳn mà đang ở vùng khách chết (reject streak >= 3 —
+      // cùng ngưỡng với cơ chế thăm dò inBlockedCluster): KHÔNG đốt thêm 1 upload mới (~1,5s)
+      // để bắn lại Socket nữa. Hàng nghìn ca chết bắn lại làm nghẽn làn upload của khách
+      // sống (đo từ guicau.har: upload trung bình 1,47s/lượt). Kết luận giữ nguyên như khi
+      // bắn lại rồi vẫn thua (isConfirmedUnavailable bên dưới không đổi); vùng khách sống
+      // (streak < 3) và tin chữ vẫn bắn lại chống burst-reject như cũ.
+      if (raw && raw.kind === 'rejected' && (!ctx || !ctx.gidFromPsid) && !ctx.socketRetriedOnce && (socketRejectStreak[pageId] || 0) <= 4 && !(photo && (socketRejectStreak[pageId] || 0) >= 3)) {
         // Chat đã được kênh khác xác nhận đến nơi trong lúc chờ ACK → dừng, không bắn lại (chống trùng)
         if (deliveredIds[conv.id]) return { ok: true, id: gid, sendBy: 'socket', sent: true };
         ctx.socketRetriedOnce = true;
@@ -3880,7 +3886,7 @@
   //  • sideEffectLane (4 luồng): điều tiết các request phụ nền (fill_admin_name, update_global_id).
   const API_SEND_PARALLEL = 48; // v1.102.0: về đúng số v1.80.0 (bản đo 143 tin/s) — v1.88 nới 64 làm nghẽn ngược
   const CTX_FETCH_PARALLEL = 128; // v1.80.0: nới làn nạp ngữ cảnh cho quy mô 100k
-  const PHOTO_UPLOAD_PARALLEL = 96; // v1.102.0: về đúng số v1.80.0 (v1.88 nới 128)
+  const PHOTO_UPLOAD_PARALLEL = 128; // v1.106.0: 96→128 — đo từ guicau.har: upload ảnh trung bình 1,47s/lượt nên làn upload là trần cứng của gửi ảnh (27,8k chat ≈ 40.800 giây-làn); uploadPhotoForPage đã có retry khi 429
   const GID_EXT_PARALLEL = 24;
   const PREP_PARALLEL_EXT = 160;  // số chat chưa có global_id chuẩn bị HTTP/WS song song (không bị chặn bởi gidExtLane)
   const BUS_PARALLEL_EXT = 6;     // v1.102.0: về đúng số v1.80.0 (v1.87 nới 12 — Extension bị dồn lệnh dễ timeout 10s hơn là nhanh hơn)
@@ -5429,19 +5435,15 @@
       runPool(batch, async (c) => {
         if (state.stopRequested) return;
         try {
-          const entry = await ensureConvCtx(c, { force: true });
-          // v1.88.0: lượt có ảnh + chat ĐÃ có global_id → upload sẵn fbId riêng của chat này
-          // (chạy nền đi trước làn gửi; tới lượt bắn lấy dùng ở 0ms thay vì chờ ~1,5s).
-          // Đang ở cụm khách chặn (reject streak ≥3) thì KHÔNG upload trước — giữ cơ chế
-          // thăm dò bằng chữ trước để khỏi đốt upload cho khách đã khóa nick.
-          if (photo && entry && entry.gid) {
-            const pid = c.pageId || String(c.id || '').split('_')[0];
-            if (pid && (socketRejectStreak[pid] || 0) < 3 && !prefetchPhotoFbId[c.id]) {
-              const tctx = {};
-              const up = await uploadOneTimePhoto(pid, photo, c.id, tctx, false).catch(() => null);
-              if (up && up.ok && up.fbId) prefetchPhotoFbId[c.id] = up.fbId;
-            }
-          }
+          await ensureConvCtx(c, { force: true });
+          // v1.106.0: KHÔNG upload ảnh trước ở pipeline nạp nền nữa. Pipeline này chạy trước
+          // làn bắn rất xa — trong lượt lớn, fbId (is_reusable=false) tạo xong nằm chờ nhiều
+          // phút mới tới lượt bắn thì bị FB từ chối riêng PHẦN ẢNH trong khung (phần chữ vẫn
+          // đi) → phải cứu lại bằng upload mới + bắn riêng ảnh, mà khâu cứu chỉ chạy khi ACK
+          // nền về (về muộn khi tải lớn) → ảnh tới sau chữ cả chục phút; đúng mẫu "ban đầu
+          // ok, về sau mới bị". Upload để ĐÚNG LÚC BẮN: prepareDirectCtx vốn đã upload song
+          // song với dò global_id ngay trước khi publish — fbId luôn tươi, tổng số upload
+          // không đổi, chỉ bỏ phần tạo sớm vô ích. (prefetchPhotoFbId không còn ai nạp.)
         } catch (e) { /* ignore */ }
       }, 96).catch(() => {}); // v1.102.0: 96 worker nạp nền — đúng số v1.80.0
 
