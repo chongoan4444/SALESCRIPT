@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE
 // @namespace    salescript
-// @version      1.102.0
+// @version      1.103.0
 // @description  BOTFAKE — chọn chuỗi chat (Alt+Click 2 đầu) hoặc theo snippet trong Pancake rồi gửi cùng 1 câu (kèm 1 hoặc nhiều ảnh nếu muốn) cho tất cả.
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -2442,24 +2442,20 @@
       const nm = conv.name || conv.id;
       const certainFail = (res.status >= 400 && res.status < 500) || (res.ok && data && data.success === false);
       if (certainFail) {
-        // v1.99.0: "(#10)…ngoài khoảng thời gian…"/"(#551) Người này hiện không có mặt" → theo yêu cầu
-        // người dùng: BỎ QUA THẲNG (đối chiếu guikhachcu.har — lớp khách cũ này global_id trống ngay
-        // trong dữ liệu Pancake; Facebook xác nhận không gửi được lúc này). Không bù kênh khác.
-        // (Thay cho cơ chế cũ "API #551/#10 → bù Extension/Socket".)
+        // "(#10)…ngoài khoảng thời gian…"/"(#551)" KHÔNG phải "mọi kênh đều thua": app vẫn fallback
+        // Extension/Socket và gửi ĐƯỢC (log 07:36 — Thanh Binh bù THÀNH CÔNG qua Extension ngay sau
+        // "(#10)"). → PHẢI bù qua kênh chưa thử. (v1.103.0: khôi phục đúng v1.80 theo yêu cầu
+        // người dùng — gỡ cơ chế "bỏ qua thẳng" của v1.99 vì có ca #551 gửi lại vẫn được.)
         const win = isWindowClosedError(msg);
-        if (win) {
-          windowBlocked++;
-          if (window && typeof window.__botfakeTrackStatus__ === 'function') window.__botfakeTrackStatus__(conv.id, 'skip');
-          logLine('⏭ ' + nm + ' — ' + windowSig(msg) + ' — Facebook báo không gửi được lúc này — BỎ QUA THẲNG (không thử kênh khác)');
-          return;
-        }
+        if (win) windowBlocked++;
         if (isThreadControlError(msg) && !batchSkipApi) {
           batchSkipApi = true; // học nhanh: API bị chặn cấp page (#10 app khác giữ thread, #613…) → chat còn lại trong lô đi thẳng Socket/Ext
           logLine('⛔ API bị chặn (' + msg + ') — các chat còn lại trong lô sẽ đi thẳng Socket/Ext');
         }
         // BÁO RÕ KẾT QUẢ THẬT — không bao giờ "báo gửi" xong im lặng khi request đã bị từ chối.
         // Bù ĐÚNG 1 lần/kênh qua kênh CHƯA thử (Ext → Socket — đúng plan của app).
-        logLine('⚠ ' + nm + ' — API từ chối (' + clip(msg, 90) + ')');
+        logLine('⚠ ' + nm + ' — API từ chối (' + clip(msg, 90) + ')'
+          + (win ? ' — ngoài cửa sổ 24h, bù kênh khác' : ''));
         scheduleBuRetry(conv, text, photo, nm, 'API từ chối (' + clip(msg, 90) + ')', ['api']);
       } else {
         if (window && typeof window.__botfakeTrackStatus__ === 'function') window.__botfakeTrackStatus__(conv.id, 'uncertain');
@@ -4162,20 +4158,37 @@
             if (window && typeof window.__botfakeTrackStatus__ === 'function') window.__botfakeTrackStatus__(conv.id, 'uncertain');
             logLine('⚠ ' + nm2 + ' — ' + r.error + ' (không rõ — không gửi thêm)');
           } else {
-            if (r.windowClosed || r.windowSkipped) windowBlocked++;
+            if (r.windowClosed) windowBlocked++;
             logLine('❌ ' + nm2 + ' — ' + r.error);
           }
-          // v1.99.0: (#551)/(#10) → BỎ QUA THẲNG (windowSkipped, tính 🧹 Bỏ qua); khách khóa nick (recipientUnavailable) hoặc hết kênh → tự bỏ
-          if (r.windowSkipped) {
-            if (window && typeof window.__botfakeTrackStatus__ === 'function') window.__botfakeTrackStatus__(conv.id, 'skip');
-            logLine('⏭ ' + nm2 + ' — ' + windowSig(r.error) + ' — Facebook báo không gửi được lúc này — BỎ QUA THẲNG (không thử kênh khác)');
-          } else if (!r.ok && !r.uncertain && !r.recipientUnavailable && isRetryableLoss(r.error)) {
+          // cửa sổ 24h VẪN bù kênh khác (Thanh Binh); khách khóa nick (recipientUnavailable) hoặc hết kênh → tự bỏ
+          if (!r.ok && !r.uncertain && !r.recipientUnavailable && isRetryableLoss(r.error)) {
             scheduleBuRetry(conv, text, photo, nm2, 'gửi thẳng chưa được', r.tried || []);
           } else if (!r.ok && !r.uncertain) {
             if (window && typeof window.__botfakeTrackStatus__ === 'function') window.__botfakeTrackStatus__(conv.id, 'fail');
           }
         });
         return { ok: true, id: '', sendBy: 'direct', sent: true, fired: true };
+      }
+      // v1.103.0: TỐC ĐỘ TUYỆT ĐỐI — chat TRONG cửa sổ 24h nhưng ĐÃ CÓ global_id thật trong
+      // cache + WebSocket của page đang sống: bắn SOCKET TRƯỚC thay vì API. Socket publish
+      // thẳng qua Facebook (bắn-nhả, không chờ ACK, nhịp 1ms/khung) nên trần tốc độ cao hơn
+      // hẳn làn HTTP API (48 luồng POST qua server Pancake). Socket thua hẳn thì vẫn đi tiếp
+      // Extension → API theo plan (đủ kênh — KHÔNG bỏ sót ai); chat chưa có mã thật vẫn đi
+      // API như cũ (API không cần mã). Đây là đòn bẩy tốc độ chính còn lại sau khi đường gửi
+      // đã về đúng thông số v1.80: chuyển bớt tải từ làn HTTP chậm sang đường Socket nhanh.
+      if (opts.awaitDirect && !batchSkipApi) {
+        const fullQ = peekConv(conv) || conv;
+        const pidQ = (fullQ && (fullQ.page_id || fullQ.pageId)) || conv.pageId || String(conv.id || '').split('_')[0];
+        if (pidQ && isPageSocketReady(pidQ) && peekFastGlobalId(conv, fullQ, '')) {
+          return sendOne(conv, text, photo, {
+            plan: ['socket', 'ext', 'api'],
+            dynamicDirect: true,
+            fastOnly: !!opts.fastOnly,
+            deferredCtx: opts.deferredCtx || null,
+            sockFired: !!opts.sockFired,
+          });
+        }
       }
       return fireApiAndWatch(conv, text, photo);
     }
@@ -4310,15 +4323,6 @@
       if (r.recipientUnavailable || /\(#100\)|Không tìm thấy người dùng phù hợp/i.test(r.error || '')) {
         recycleUnusedFbId(pid0, ctx);
         return { ok: false, sent: false, recipientUnavailable: true, tried: triedCh.slice(), error: tried.join(' | ') };
-      }
-      // v1.99.0: API trả "(#551) Người này hiện không có mặt" / "(#10)…ngoài khoảng thời gian cho
-      // phép…" (isWindowClosedError) → theo yêu cầu người dùng: BỎ QUA THẲNG — Facebook đã xác
-      // nhận không gửi được lúc này (guikhachcu.har: lớp khách cũ này global_id trống ngay trong
-      // dữ liệu Pancake). Dừng ngay: không đi tiếp kênh khác, không vào đợt bù. Cờ windowSkipped
-      // để nơi gọi tính vào nhóm 🧹 Bỏ qua trong tổng hợp (không phải lỗi kênh, không fail++).
-      if (ch === 'api' && isWindowClosedError(r.error)) {
-        recycleUnusedFbId(pid0, ctx);
-        return { ok: false, sent: false, recipientUnavailable: true, windowSkipped: true, tried: triedCh.slice(), error: tried.join(' | ') };
       }
       // Nếu vừa dùng from_psid phỏng đoán (ctx.gidFromPsid === true) hoặc lỗi thiếu globalId/thread_id:
       // bắt buộc mở khóa ctx.gidResolved = false để kênh kế tiếp dò lại global_id thật (nhỡ WebSocket
@@ -4743,7 +4747,7 @@
   // Bộ đếm O(1) chống O(N²) khi chạy 20.000–30.000 tin (không gọi Object.keys() 60.000 lần)
   const summaryCounters = { okApi: 0, okExt: 0, okSocket: 0, fail: 0, unsure: 0, skipLate: 0 };
   let summaryUiTimer = null;
-  let windowBlocked = 0; // số ca API bị Facebook từ chối "(#10)/(#551)" trong lượt (từ v1.99.0: bỏ qua thẳng, không bù kênh khác)
+  let windowBlocked = 0; // số lần API từ chối "(#10)/(#551)… ngoài cửa sổ 24h" trong lượt (đều được bù kênh khác)
   const SUMMARY_LS_KEY = 'ssb_last_summary_v1';
   const SUMMARY_TAB_KEY = SUMMARY_LS_KEY + '__' + TAB_ID; // v1.93.0: bảng TỔNG HỢP riêng từng tab
   const batchStats = {
@@ -5373,19 +5377,12 @@
         if (window && typeof window.__botfakeTrackStatus__ === 'function') window.__botfakeTrackStatus__(c.id, 'uncertain');
         logLine('⚠ [' + done + '/' + totalAll + '] ' + (c.name || c.id) + ' — ' + r.error
           + ' — không rõ tin đã đi chưa (không gửi thêm để tránh trùng)');
-      } else if (r.windowSkipped) {
-        // v1.99.0: (#551)/(#10) — BỎ QUA THẲNG: đã dừng ngay trong sendOne, không thử kênh khác,
-        // không vào đợt bù; tính vào nhóm 🧹 Bỏ qua của tổng hợp (không tính là lỗi ❌).
-        windowBlocked++;
-        if (window && typeof window.__botfakeTrackStatus__ === 'function') window.__botfakeTrackStatus__(c.id, 'skip');
-        logLine('⏭ [' + done + '/' + totalAll + '] ' + (c.name || c.id) + ' — ' + windowSig(r.error)
-          + ' — Facebook báo không gửi được lúc này — BỎ QUA THẲNG (không thử kênh khác)');
       } else {
         fail++;
-        if (r.windowClosed || r.windowSkipped) windowBlocked++;
+        if (r.windowClosed) windowBlocked++;
         logLine('❌ [' + done + '/' + totalAll + '] ' + (c.name || c.id) + ' — ' + r.error);
-        // v1.99.0: (#551)/(#10) đã bị chặn ở nhánh windowSkipped phía trên (bỏ qua thẳng);
-        // các thua khác: v1.98.0 thua ở kênh chốt lượt đầu (firstShotFailed) → vào thẳng đợt bù tập trung,
+        // cửa sổ 24h VẪN bù kênh khác như v1.80 (Thanh Binh — có ca (#551) gửi lại vẫn được);
+        // kênh đã thử hết → scheduleBuRetry tự bỏ
         // không cần khớp mẫu lỗi "đáng bù" như trước (vì đợt chính không còn tự đi tiếp kênh)
         if (!r.uncertain && !r.recipientUnavailable && (r.firstShotFailed || isRetryableLoss(r.error))) {
           const p2 = c.pageId || String(c.id).split('_')[0];
@@ -5603,7 +5600,7 @@
         + (sumNow.pending > 0 ? ' (còn ' + sumNow.pending + ' tin đang xác nhận/bù nền — bảng TỔNG HỢP sẽ tự chốt khi xong hết)' : '')
         + ', ' + sumNow.failTotal + ' lỗi.'
         + (sumNow.unsureTotal ? ' ' + sumNow.unsureTotal + ' tin không rõ kết quả (không gửi thêm).' : '')
-        + (windowBlocked ? ' 🚫 ' + windowBlocked + ' ca Facebook báo không có mặt/ngoài giờ (#551)/(#10) — đã bỏ qua thẳng (không thử kênh khác).' : '')
+        + (windowBlocked ? ' 🚫 ' + windowBlocked + ' lần API bị chặn ngoài cửa sổ 24h (đã bù kênh khác).' : '')
         + (sumNow.pending > 0
           ? ' ⏱ Đã phát lệnh xong trong ' + (((Date.now() - batchStats.startedAt) / 1000).toFixed(0)) + 's — tốc độ chốt xem ở dòng TỔNG HỢP cuối cùng.'
           : ' ⏱ Tổng thời gian: ' + (((Date.now() - batchStats.startedAt) / 60000).toFixed(1)) + ' phút'
