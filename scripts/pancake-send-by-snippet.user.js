@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE
 // @namespace    salescript
-// @version      1.108.0
+// @version      1.109.0
 // @description  BOTFAKE — chọn chuỗi chat (Alt+Click 2 đầu) hoặc theo snippet trong Pancake rồi gửi cùng 1 câu (kèm 1 hoặc nhiều ảnh nếu muốn) cho tất cả.
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -45,7 +45,7 @@
 
   const PANEL_ID = 'ssb-root';          // ssb = SaleScript Bulk — không đụng pk-*/adj-*/pancake-* của script khác
   const STYLE_ID = 'ssb-style';
-  const APP_VERSION = '1.108.0'; // khớp @version ở đầu file — hiện lên tiêu đề panel để đối chiếu bản đang chạy
+  const APP_VERSION = '1.109.0'; // khớp @version ở đầu file — hiện lên tiêu đề panel để đối chiếu bản đang chạy
 
   const MAX_NAME_LIST = 12;             // số tên hiển thị khi xác nhận
 
@@ -72,6 +72,7 @@
     quickReply: null,       // câu nhanh Pancake đang chọn { shortcut, text, pageId, items:[{id,url,w,h}] } — nguồn chữ+ảnh kiểu gõ "/"
     qrList: [],             // danh sách câu nhanh đã nạp cho page hiện tại
     qrPageId: '',           // page đã nạp qrList
+    qrCapture: false,       // đang bật chế độ BẮT CÂU bằng Alt+Q (chờ click vào popup "/" của app)
   };
   state.savedLists = loadSavedLists();
 
@@ -6114,6 +6115,7 @@
             </div>
             <div class="row" style="align-items:center">
               <button class="b b-gray" id="ssb-qr-load" title="Nạp danh sách câu nhanh Pancake của page này (đúng cơ chế gõ / trong khung chat)">⚡ Nạp câu nhanh</button>
+              <button class="b b-gray" id="ssb-qr-capture" title="Bắt câu như gửi tay: bấm nút này (hoặc Alt+Q) rồi gõ / trong khung chat Pancake, click vào 1 câu — BOTFAKE bắt câu đó (cả ảnh) làm câu gửi, KHÔNG gửi vào chat đang mở">🎯 Bắt câu (Alt+Q)</button>
               <select id="ssb-qr" style="flex:1;min-width:140px" title="Chọn 1 câu nhanh — chữ và ảnh của câu sẽ dùng cho cả lượt gửi">
                 <option value="">— câu nhanh (chữ + ảnh) —</option>
               </select>
@@ -6264,6 +6266,108 @@
         : 'Câu nhanh: chưa chọn — gõ tay như cũ';
       if (qrClearBtn) qrClearBtn.style.display = qr ? '' : 'none';
     };
+    // ===== BẮT CÂU NHANH NHƯ GỬI TAY (Alt+Q): gõ "/" trong khung chat app → click 1 câu trong popup =====
+    // Popup câu nhanh của app đã xác minh từ script đang chạy thật của người dùng: danh sách
+    // #qr_autocomplete, mỗi câu là .suggestion-element, mã câu nằm ở .shortcut-tag. Khi chế độ
+    // bắt đang bật, BOTFAKE chặn click Ở PHA BẮT (capture) trước khi app kịp chèn câu vào
+    // composer → câu KHÔNG bị gửi/chèn vào chat đang mở; BOTFAKE đối chiếu shortcut với dữ
+    // liệu câu nhanh của đúng page đó (fetchQuickRepliesForPage) để lấy đủ CHỮ + ẢNH
+    // (content_id) rồi đặt làm câu gửi cho lượt hàng loạt — y như chọn bằng lệnh "/".
+    const QR_CAPTURE_BADGE_ID = 'ssb-qr-capture-badge';
+    let qrCaptureTimer = null;
+    const setQrCaptureBadge = (on2) => {
+      let b = document.getElementById(QR_CAPTURE_BADGE_ID);
+      if (on2) {
+        if (!b) {
+          b = document.createElement('div');
+          b.id = QR_CAPTURE_BADGE_ID;
+          b.textContent = '🎯 BOTFAKE ĐANG BẮT CÂU: gõ / trong khung chat rồi CLICK vào 1 câu cần dùng (Alt+Q hoặc Esc để hủy — câu bị bắt sẽ KHÔNG gửi vào chat đang mở)';
+          Object.assign(b.style, {
+            position: 'fixed', top: '10px', left: '50%', transform: 'translateX(-50%)',
+            zIndex: 2147483647, background: '#5865F2', color: '#fff', padding: '8px 14px',
+            borderRadius: '8px', font: '600 13px system-ui, sans-serif',
+            boxShadow: '0 4px 18px rgba(0,0,0,.35)', pointerEvents: 'none', maxWidth: '92vw', textAlign: 'center',
+          });
+          document.body.appendChild(b);
+        }
+      } else if (b) b.remove();
+    };
+    const setQrCapture = (on2, silent) => {
+      state.qrCapture = !!on2;
+      if (qrCaptureTimer) { clearTimeout(qrCaptureTimer); qrCaptureTimer = null; }
+      setQrCaptureBadge(state.qrCapture);
+      const btn = root.getElementById('ssb-qr-capture');
+      if (btn) {
+        btn.textContent = state.qrCapture ? '🎯 Đang bắt câu… (Alt+Q hủy)' : '🎯 Bắt câu (Alt+Q)';
+        btn.style.background = state.qrCapture ? '#5865F2' : '';
+        btn.style.color = state.qrCapture ? '#fff' : '';
+      }
+      if (state.qrCapture) {
+        qrCaptureTimer = setTimeout(() => {
+          if (state.qrCapture) {
+            setQrCapture(false, true);
+            logLine('🎯 Đã tự tắt chế độ bắt câu (quá 2 phút chưa chọn câu nào)');
+          }
+        }, 120000);
+        if (!silent) logLine('🎯 BẬT bắt câu: gõ / trong khung chat Pancake → click vào câu cần dùng. BOTFAKE bắt câu đó (cả ảnh) làm câu gửi — KHÔNG gửi vào chat đang mở.');
+      }
+    };
+    window.__botfakeQrCapture__ = (on2) => setQrCapture(on2 == null ? !state.qrCapture : on2);
+    const onQrCaptureClick = (e) => {
+      if (!state.qrCapture) return;
+      const t = e.target;
+      const item = (t && t.closest) ? t.closest('#qr_autocomplete .suggestion-element') : null;
+      if (!item) return; // click ngoài popup câu nhanh → giữ nguyên chế độ chờ
+      // Chặn TRƯỚC app: câu không được chèn/gửi vào chat đang mở
+      e.preventDefault();
+      e.stopPropagation();
+      if (e.stopImmediatePropagation) e.stopImmediatePropagation();
+      const shortcut = String(((item.querySelector('.shortcut-tag') || {}).textContent) || '').trim();
+      const visibleText = String(item.textContent || '').replace(/\s+/g, ' ').trim();
+      setQrCapture(false, true);
+      (async () => {
+        const pid = currentPanelPageId();
+        const recs = await fetchQuickRepliesForPage(pid);
+        const list = recs.map(normalizeQuickReply).filter((q) => q.text || q.items.length);
+        state.qrList = list;
+        state.qrPageId = pid;
+        let q = null;
+        if (shortcut) q = list.filter((x) => x.shortcut === shortcut)[0] || null;
+        if (!q && visibleText) {
+          const norm = (v) => String(v || '').replace(/\s+/g, ' ').trim().toLowerCase();
+          const vt = norm(visibleText);
+          q = list.filter((x) => x.text && vt.indexOf(norm(x.text).slice(0, 40)) > -1)[0]
+            || list.filter((x) => x.shortcut && vt.indexOf(norm(x.shortcut)) > -1)[0]
+            || null;
+        }
+        if (qrSelEl) {
+          qrSelEl.innerHTML = '<option value="">— chọn câu nhanh —</option>' + list.map((q2, i) =>
+            '<option value="' + i + '">' + esc(q2.shortcut) + ' · ' + esc(clip(q2.text, 42)) + (q2.items.length ? ' · 🖼' + q2.items.length : '') + '</option>').join('');
+          const ix = q ? list.indexOf(q) : -1;
+          if (ix > -1) qrSelEl.value = String(ix);
+        }
+        if (!q) {
+          logLine('⚠ Đã bắt được click nhưng không khớp được câu trong dữ liệu của page (shortcut: ' + (shortcut || '?') + ') — bấm 🎯 Bắt câu rồi click lại, hoặc dùng ⚡ Nạp câu nhanh.');
+          return;
+        }
+        setImg(null); // bỏ ảnh chọn tay — dùng ảnh của câu vừa bắt
+        applyQr({ shortcut: q.shortcut, text: q.text, pageId: pid, items: q.items });
+        const msgEl = root.getElementById('ssb-msg');
+        if (msgEl) msgEl.value = q.text;
+        // dọn đúng ký tự lệnh còn sót trong composer (chỉ khi composer đang chứa đúng "/" hoặc đúng shortcut)
+        try {
+          const comp = document.getElementById('replyBoxComposer');
+          if (comp && (comp.value.trim() === '/' || (shortcut && comp.value.trim() === shortcut))) {
+            const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value');
+            if (setter && setter.set) setter.set.call(comp, ''); else comp.value = '';
+            comp.dispatchEvent(new Event('input', { bubbles: true }));
+          }
+        } catch (e2) { /* composer giữ nguyên cũng không sao — chưa hề gửi */ }
+        logLine('🎯 ĐÃ BẮT câu "' + q.shortcut + '" (' + q.items.length + ' ảnh, ' + q.text.length + ' ký tự chữ) — bấm ▶ Chạy để gửi cho danh sách đã chọn');
+      })().catch((err) => logLine('⚠ Bắt câu lỗi: ' + (err && err.message || err)));
+    };
+    document.addEventListener('click', onQrCaptureClick, true);
+    on('ssb-qr-capture', 'click', () => setQrCapture(!state.qrCapture));
     on('ssb-qr-load', 'click', async () => {
       const pid = currentPanelPageId();
       if (!pid) { logLine('⚠ Chưa xác định được page — hãy mở 1 đoạn chat hoặc tải danh sách trước.'); return; }
@@ -6816,6 +6920,17 @@
   }
 
   function onKeydown(e) {
+    // Alt+Q: bật/tắt chế độ BẮT CÂU NHANH (chờ click vào popup "/" của app)
+    if (e.altKey && !e.ctrlKey && !e.metaKey && (e.key === 'q' || e.key === 'Q')) {
+      e.preventDefault();
+      if (typeof window.__botfakeQrCapture__ === 'function') window.__botfakeQrCapture__();
+      return;
+    }
+    if (e.key === 'Escape' && state.qrCapture) {
+      if (typeof window.__botfakeQrCapture__ === 'function') window.__botfakeQrCapture__(false);
+      logLine('🎯 Đã hủy chế độ bắt câu');
+      return;
+    }
     if (e.key === 'Escape' && (state.pickMode || (state.rangeStart && !state.rangeEnd))) {
       state.pickMode = false;
       if (state.rangeStart && !state.rangeEnd) {
