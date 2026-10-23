@@ -76,6 +76,11 @@
     qrCapture: false,       // đang bật chế độ BẮT CÂU bằng Alt+Q (chờ click vào popup "/" của app)
   };
   state.savedLists = loadSavedLists();
+  // Khôi phục danh sách chat đã gửi (sentIds) từ localStorage — F5 không mất tiến độ gửi
+  try {
+    const _ids = JSON.parse(localStorage.getItem('SSB_SENT_IDS') || 'null');
+    if (Array.isArray(_ids)) _ids.forEach((id) => state.sentIds.add(id));
+  } catch (e) { /* ignore */ }
 
   let capturedToken = null; // token lấy từ request thật của trang (fetch/XHR hook)
 
@@ -85,6 +90,10 @@
   const $$ = (sel, root) => Array.from((root || document).querySelectorAll(sel));
   const norm = (s) => (s || '').normalize('NFC').replace(/\s+/g, ' ').trim();
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+  function saveSentIds() {
+    try { localStorage.setItem('SSB_SENT_IDS', JSON.stringify(Array.from(state.sentIds))); } catch (e) { /* ignore */ }
+  }
 
   // Chạy song song tối đa `limit` task cùng lúc (limit = items.length ⇒ "1 phát" tất cả)
   async function runPool(items, worker, limit) {
@@ -5011,6 +5020,7 @@
     if (uncertainIds[convId]) { delete uncertainIds[convId]; summaryCounters.unsure = Math.max(0, summaryCounters.unsure - 1); }
     deliveredIds[convId] = ch;
     if (convId) state.sentIds.add(convId);
+    saveSentIds();
     if (ch === 'ext') summaryCounters.okExt++;
     else if (ch === 'socket') summaryCounters.okSocket++;
     else summaryCounters.okApi++;
@@ -6815,6 +6825,7 @@
       // Không gửi → nếu có tiến độ đã dừng thì reset hẳn về chế độ ban đầu
       if (state.sentIds && state.sentIds.size > 0) {
         state.sentIds.clear();
+        localStorage.removeItem('SSB_SENT_IDS');
         state.stopRequested = false;
         logLine('⏹ Đã reset — sẵn sàng chạy lại từ đầu');
       } else {
