@@ -6798,35 +6798,30 @@
       const pagesArr = (st0 && st0.pages && st0.pages.activated) || [];
       warmUpSockets(pagesArr.map((x) => ({ pageId: x && x.id })));
     } catch (e) { /* ignore */ }
-    on('ssb-send', 'click', () => {
+        on('ssb-send', 'click', () => {
       if (state.sentIds && state.sentIds.size > 0) {
         logLine('⏩ Có ' + state.sentIds.size + ' chat đã gửi ở lượt trước — sẽ bỏ qua, chỉ gửi phần còn lại.');
       }
       sendToAll();
     });
     on('ssb-stop', 'click', () => {
-      if (!state.sending) {
-        // Đang rảnh → bấm Dừng = reset hoàn toàn, chuẩn bị chạy lại từ đầu
-        state.sentIds.clear();
-        state.stopRequested = false;
-        logLine('⏹ Đã dừng hẳn — có thể chạy lại từ đầu');
+      if (state.sending) {
+        // Đang gửi → yêu cầu dừng/tạm dừng (các vòng sẽ dứt sau tâche hiện tại)
+        state.stopRequested = true;
+        logLine('⏸ Đang dừng — các vòng lặp sẽ dứt ngay sau tâche hiện tại; nút ▶ sẽ trở về sau khi chốt xong lệnh đang bay');
         render();
         return;
       }
-      if (state.stopRequested) {
-        // Đang chốt lệnh dừng, bấm lại = reset ngay, bỏ tiến độ lượt này
-        state.stopRequested = false;
+      // Không gửi → nếu có tiến độ đã dừng thì reset hẳn về chế độ ban đầu
+      if (state.sentIds && state.sentIds.size > 0) {
         state.sentIds.clear();
-        logLine('⏹ Đã dừng hẳn — tiến độ lượt này đã bỏ, chạy lại từ đầu được');
-        render();
-        return;
+        state.stopRequested = false;
+        logLine('⏹ Đã reset — sẵn sàng chạy lại từ đầu');
+      } else {
+        state.stopRequested = false;
       }
-      // Đang gửi → yêu cầu dừng/tạm dừng (các vòng sẽ dứt sau tâche hiện tại)
-      state.stopRequested = true;
-      logLine('⏸ Đang dừng — các vòng lặp sẽ dứt ngay sau tâche hiện tại; nút ▶ sẽ trở về sau khi chốt xong lệnh đang bay');
       render();
     });
-
     // kéo thả panel (header) VÀ bong bóng logo — di chuyển >4px mới tính là KÉO
     // (để bấm vào bóng vẫn mở panel, kéo bóng chỉ dời chỗ)
     const head = root.getElementById('ssb-head');
@@ -6977,14 +6972,25 @@
     const stop = shadow.getElementById('ssb-stop');
     if (send) {
       send.disabled = state.sending;
-      // v1.105.0: nói rõ trạng thái ngay trên nút — "Đang dừng…" nghĩa là nút Dừng ĐÃ nhận,
-      // chỉ còn chờ các request đang bay chốt xong (nay mọi fetch đều có hạn chót 15s, lệnh
-      // Extension tối đa 35s) rồi nút tự về "▶ Chạy". Tránh tưởng nút Chạy bị mất/hỏng.
-      send.textContent = state.sending
-        ? (state.stopRequested ? '⏳ Đang dừng…' : '⏳ Đang gửi…')
-        : (state.sentIds && state.sentIds.size > 0 ? '▶ Chạy tiếp' : '▶ Chạy');
+      if (state.sending) {
+        send.textContent = state.stopRequested ? '⏳ Đang dừng…' : '⏳ Đang gửi…';
+      } else {
+        send.textContent = (state.sentIds && state.sentIds.size > 0 ? '▶ Charging tiếp' : '▶ Charging');
+      }
     }
-    if (stop) stop.disabled = !state.sending;
+    if (stop) {
+      if (state.sending) {
+        stop.disabled = false;
+        stop.textContent = '⏹ Dừng';
+      } else if (state.sentIds && state.sentIds.size > 0) {
+        stop.disabled = false;
+        stop.textContent = '↺ Reset';
+      } else {
+        stop.disabled = true;
+        stop.textContent = '⏹ Dừng';
+      }
+    }
+
 
     const el = shadow.getElementById('ssb-log');
     if (el) {
