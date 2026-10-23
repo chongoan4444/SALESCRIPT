@@ -64,6 +64,7 @@
     listKey: '',            // key dựng panel list — tránh build lại HTML khi không đổi
     sending: false,
     stopRequested: false,
+    sentIds: new Set(),          // id chat đã gửi thành công — giữ qua lượt để "▶ Charging tiếp" không gửi lại
     pickMode: false,
     log: [],
     savedLists: [],         // các list đã lưu [{id,name,items:[{id,pageId,name,snippet,snippetRaw,time,type,platform}]}]
@@ -5009,6 +5010,7 @@
     if (finalFailedIds[convId]) { delete finalFailedIds[convId]; summaryCounters.fail = Math.max(0, summaryCounters.fail - 1); }
     if (uncertainIds[convId]) { delete uncertainIds[convId]; summaryCounters.unsure = Math.max(0, summaryCounters.unsure - 1); }
     deliveredIds[convId] = ch;
+    if (convId) state.sentIds.add(convId);
     if (ch === 'ext') summaryCounters.okExt++;
     else if (ch === 'socket') summaryCounters.okSocket++;
     else summaryCounters.okApi++;
@@ -5283,6 +5285,14 @@
         logLine('⚠ Loại ' + (targets.length - uniq.length) + ' dòng trùng lặp trong danh sách gửi');
       }
       targets = uniq;
+    }
+    // Bỏ qua chat đã gửi ở lượt trước (khi bấm "▶ Charging tiếp")
+    if (state.sentIds && state.sentIds.size > 0) {
+      const before = targets.length;
+      targets = targets.filter((m) => !state.sentIds.has(m.id));
+      if (targets.length < before) {
+        logLine('⏩ Bỏ qua ' + (before - targets.length) + ' chat đã gửi — chỉ gửi phần còn lại.');
+      }
     }
     // nội dung sẽ gửi: câu đã tích → chữ của TỪNG CÂU; chat lẻ → ô đang gõ
     let sendGroups = buildSendGroups(targets, state.savedLists, typedText);
@@ -6788,10 +6798,33 @@
       const pagesArr = (st0 && st0.pages && st0.pages.activated) || [];
       warmUpSockets(pagesArr.map((x) => ({ pageId: x && x.id })));
     } catch (e) { /* ignore */ }
-    on('ssb-send', 'click', () => { sendToAll(); });
+    on('ssb-send', 'click', () => {
+      if (state.sentIds && state.sentIds.size > 0) {
+        logLine('⏩ Có ' + state.sentIds.size + ' chat đã gửi ở lượt trước — sẽ bỏ qua, chỉ gửi phần còn lại.');
+      }
+      sendToAll();
+    });
     on('ssb-stop', 'click', () => {
+      if (!state.sending) {
+        // Đang rảnh → bấm Dừng = reset hoàn toàn, chuẩn bị chạy lại từ đầu
+        state.sentIds.clear();
+        state.stopRequested = false;
+        logLine('⏹ Đã dừng hẳn — có thể chạy lại từ đầu');
+        render();
+        return;
+      }
+      if (state.stopRequested) {
+        // Đang chốt lệnh dừng, bấm lại = reset ngay, bỏ tiến độ lượt này
+        state.stopRequested = false;
+        state.sentIds.clear();
+        logLine('⏹ Đã dừng hẳn — tiến độ lượt này đã bỏ, chạy lại từ đầu được');
+        render();
+        return;
+      }
+      // Đang gửi → yêu cầu dừng/tạm dừng (các vòng sẽ dứt sau tâche hiện tại)
       state.stopRequested = true;
-      logLine('⏸ Yêu cầu dừng…');
+      logLine('⏸ Đang dừng — các vòng lặp sẽ dứt ngay sau tâche hiện tại; nút ▶ sẽ trở về sau khi chốt xong lệnh đang bay');
+      render();
     });
 
     // kéo thả panel (header) VÀ bong bóng logo — di chuyển >4px mới tính là KÉO
@@ -6949,7 +6982,7 @@
       // Extension tối đa 35s) rồi nút tự về "▶ Chạy". Tránh tưởng nút Chạy bị mất/hỏng.
       send.textContent = state.sending
         ? (state.stopRequested ? '⏳ Đang dừng…' : '⏳ Đang gửi…')
-        : '▶ Chạy';
+        : (state.sentIds && state.sentIds.size > 0 ? '▶ Chạy tiếp' : '▶ Chạy');
     }
     if (stop) stop.disabled = !state.sending;
 
