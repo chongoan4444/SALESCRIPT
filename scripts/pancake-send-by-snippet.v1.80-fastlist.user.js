@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE
 // @namespace    salescript
-// @version      1.80.3
+// @version      1.80.4
 // @description  BOTFAKE — chọn chuỗi chat (Alt+Click 2 đầu) hoặc theo snippet trong Pancake rồi gửi cùng 1 câu (kèm 1 hoặc nhiều ảnh nếu muốn) cho tất cả.
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -69,6 +69,7 @@
     listSel: new Set(),     // id các list ĐANG TÍCH — gộp thành lựa chọn để gửi (gửi được nhiều list cùng lúc)
     loadedName: null,       // tên hiển thị (1 list hoặc "N list: …") — hiện ở mục 1
     imgPick: false,         // đang bật chế độ CHỌN ẢNH TRÊN TRANG (chờ click vào 1 ảnh trên giao diện)
+    listIncomplete: false,  // danh sách tải CHƯA đầy đủ → CHẶN GỬI (tải sai là gửi sai)
     quickReply: null,       // câu nhanh Pancake bắt bằng Alt+Q { shortcut, text, pageId, items:[{id,url,w,h}], parts:[{text,items}] }
     qrCapture: false,       // đang bật chế độ BẮT CÂU bằng Alt+Q (chờ click vào popup "/" của app)
   };
@@ -740,7 +741,7 @@
       try {
         // fetch trần KHÔNG tự hết hạn — kết nối treo là await treo theo → chặn toàn bộ lượt gửi
         const ctl = (typeof AbortController === 'function') ? new AbortController() : null;
-        if (ctl) abortTimer = setTimeout(() => ctl.abort(), 15000);
+        if (ctl) abortTimer = setTimeout(() => ctl.abort(), (reqOpts && reqOpts.timeoutMs) || 15000);
         const r = await fetch(url, {
           method: isPost ? 'POST' : 'GET',
           body: (isPost && reqOpts.bodyObj) ? buildFormDataFromObj(reqOpts.bodyObj) : undefined,
@@ -1068,7 +1069,7 @@
         const res = await fetchPage(seg.pageCount, seg.cursor, seg.items.length, { forceMulti });
         if (!res.ok) {
           if (guard === 1 && !forceMulti) { forceMulti = true; guard--; continue; }
-          return guard === 1 ? { ok: false, error: 'API danh sách lỗi trang 1: ' + res.error } : { ok: true, rows: seg.items };
+          return guard === 1 ? { ok: false, error: 'API danh sách lỗi trang 1: ' + res.error } : { ok: true, rows: seg.items, incomplete: true };
         }
         const j = res.data || {};
         const convs = j.conversations || [];
@@ -1078,7 +1079,8 @@
         if (onProgress) onProgress(seg.items.length, seg.items);
         if (!seg.cursor || !convs.length || !added || (opts && opts.maxPages && guard >= opts.maxPages)) break;
       }
-      return { ok: true, rows: seg.items };
+      // hết vòng lặp mà cursor vẫn còn = còn dữ liệu chưa tải → CHƯA đầy đủ (trừ khi user tự dừng / giới hạn trang có chủ đích)
+      return { ok: true, rows: seg.items, incomplete: !!(seg.cursor && !stopped() && !(opts && opts.maxPages)) };
     };
 
     if (!plainMode) return loadSequential();
@@ -1096,6 +1098,7 @@
     if (probeIds.length >= 2) {
       const perPage = new Map(); // pageId -> rows[]
       const allSet = new Set();
+      const incompletePages = new Set(); // page tải lỗi/thiếu → không được im lặng bỏ qua
       let total = 0;
       let firstPageErrors = 0;
       let midErrors = 0;
@@ -1107,7 +1110,7 @@
         let guard = 0;
         while (guard++ < 1500 && !stopAll && !stopped()) {
           const res = await fetchPage({}, seg.cursor, seg.items.length, { singlePageId: pid, tries: seg.started ? 2 : 3, timeoutMs: 12000 });
-          if (!res.ok) { if (!seg.started) firstPageErrors++; else midErrors++; return; }
+          if (!res.ok) { if (!seg.started) firstPageErrors++; else midErrors++; incompletePages.add(pid); return; }
           seg.started = true;
           const j = res.data || {};
           const convs = j.conversations || [];
@@ -1122,9 +1125,15 @@
           total += seg.items.length - before;
           seg.cursor = (convs.length && j.next_cursor) ? j.next_cursor : null;
           if (onProgress) onProgress(total, null);
-          if (!seg.cursor || !convs.length || seg.items.length === before) return;
+          if (!seg.cursor || !convs.length) return;
+          if (seg.items.length === before) {
+            // trang trả về mà không thêm được chat mới (trùng dữ liệu) — đi tiếp tối đa 5 trang,
+            // vẫn không thêm được thì page này CHƯA đầy đủ, không được coi như đã hết
+            if ((seg.noAddStreak = (seg.noAddStreak || 0) + 1) >= 5) { incompletePages.add(pid); return; }
+          } else seg.noAddStreak = 0;
           if (isRangeSatisfied(allSet)) { stopAll = true; return; }
         }
+        if (seg.cursor && !stopAll && !stopped()) incompletePages.add(pid); // hết vòng lặp mà chưa hết dữ liệu
       };
       const POOL = Math.min(10, queue.length);
       const workers = [];
@@ -1132,9 +1141,10 @@
         workers.push((async () => { while (queue.length && !stopAll && !stopped()) { const pid = queue.shift(); await chain(pid); } })());
       }
       await Promise.all(workers);
-      // Page nào lỗi trang đầu (endpoint lẻ không được) → bù bằng đường chung tuần tự nếu mất quá nhiều
-      if (!total || firstPageErrors >= Math.ceil(probeIds.length / 2) || midErrors > 0) {
-        logLine('⚠ Tải song song theo page không khả thi — chuyển về tải đa luồng chung…');
+      // CHỈ CẦN 1 page tải lỗi/thiếu là danh sách KHÔNG còn đầy đủ → tải lại toàn bộ bằng
+      // đường đa luồng chung (tuyệt đối không dùng danh sách mất nguyên 1 page để gửi)
+      if (!stopAll && !stopped() && (incompletePages.size || !total || firstPageErrors >= Math.ceil(probeIds.length / 2) || midErrors > 0)) {
+        logLine('⚠ ' + (incompletePages.size ? incompletePages.size + ' page tải chưa hết (' + Array.from(incompletePages).slice(0, 5).join(', ') + (incompletePages.size > 5 ? '…' : '') + ')' : 'Tải song song theo page không khả thi') + ' — tải lại toàn bộ bằng đường đa luồng chung để đảm bảo đủ danh sách…');
         return loadSequentialOrStitch();
       }
       const rows = [];
@@ -1176,24 +1186,27 @@
       };
       pushConvs(seg0, (p1.data && p1.data.conversations) || []);
       if (onProgress) onProgress(seg0.items.length, seg0.items);
-      if (!seg0.cursor || stopped() || isRangeSatisfied(seg0.set)) return { ok: true, rows: seg0.items };
+      if (!seg0.cursor || stopped() || isRangeSatisfied(seg0.set)) return { ok: true, rows: seg0.items, stopped: stopped() };
 
       const parsed0 = parseErlangCursor(seg0.cursor);
       if (!parsed0) {
         // Cursor lạ → tuần tự từ trang 2
         let guard = 1;
-        while (guard++ < 1500 && !stopped()) {
+        while (guard++ < 1500 && seg0.cursor && !stopped()) {
           const before = seg0.items.length;
           const res = await fetchPage(seg0.pageCount, seg0.cursor, seg0.items.length, { forceMulti: forceMultiEndpoint });
-          if (!res.ok) break;
+          if (!res.ok) { seg0.truncated = true; break; }
           const j = res.data || {};
           pushConvs(seg0, j.conversations || []);
           if (j.pages_with_current_count) seg0.pageCount = Object.assign({}, seg0.pageCount, j.pages_with_current_count);
           seg0.cursor = (j.conversations && j.conversations.length && j.next_cursor) ? j.next_cursor : null;
           if (onProgress) onProgress(seg0.items.length, seg0.items);
-          if (!seg0.cursor || seg0.items.length === before || isRangeSatisfied(seg0.set)) break;
+          if (!seg0.cursor || isRangeSatisfied(seg0.set)) break;
+          if (seg0.items.length === before && (seg0.noAddStreak = (seg0.noAddStreak || 0) + 1) >= 10) { seg0.truncated = true; break; }
+          if (seg0.items.length !== before) seg0.noAddStreak = 0;
         }
-        return { ok: true, rows: seg0.items };
+        if (seg0.cursor && !stopped() && !isRangeSatisfied(seg0.set)) seg0.truncated = true;
+        return { ok: true, rows: seg0.items, incomplete: !!seg0.truncated && !stopped(), stopped: stopped() };
       }
 
       const STRIDES = [1.1, 2.2, 3.3, 4.4, 5.5, 6.6, 7.7, 8.8, 9.9, 11];
@@ -1325,18 +1338,29 @@
         seg0.cursor = (convs.length && j.next_cursor) ? j.next_cursor : null;
         stitch();
         if (onProgress) onProgress(seg0.items.length, seg0.items);
-        if (seg0.items.length === before || !seg0.cursor || isRangeSatisfied(seg0.set)) break;
+        if (!seg0.cursor || isRangeSatisfied(seg0.set)) break;
+        if (seg0.items.length === before) {
+          // 1 trang không thêm được chat mới (dữ liệu trùng/chồng lấn) chưa phải là hết danh
+          // sách — cursor đã tiến thì cứ đi tiếp; 10 trang liên tiếp như vậy mới coi là kẹt
+          if ((seg0.noAddStreak = (seg0.noAddStreak || 0) + 1) >= 10) {
+            seg0.truncated = true;
+            logLine('⚠ Tải kẹt: 10 trang liên tiếp không thêm được chat mới ở ' + seg0.items.length + ' chat — danh sách CHƯA đầy đủ.');
+            break;
+          }
+        } else seg0.noAddStreak = 0;
         // Bổ sung luồng phụ thay những luồng đã khâu/chết — nhưng không vượt ngân sách sống
         // (rl.helperBudget bị cắt một nửa sau mỗi lần server trả 429)
         const alive = segments.filter((s) => !s.absorbed && s.cursor).length;
         for (let s = alive; s < Math.min(STRIDES.length, rl.helperBudget); s++) spawnHelper();
       }
       helpersDone = true;
+      // hết vòng lặp mà cursor vẫn còn (chưa đi tới cuối) = CHƯA đầy đủ
+      if (seg0.cursor && !stopped() && !isRangeSatisfied(seg0.set)) seg0.truncated = true;
       logLine('⚡⚡ Tải đa luồng 1 page: ' + seg0.items.length + ' chat trong ' + ((Date.now() - startedAt) / 1000).toFixed(1) + 's'
         + ' (~' + Math.round(seg0.items.length / Math.max(1, (Date.now() - startedAt) / 1000)) + ' chat/giây)'
         + (rl.hits ? ' · 🧯 dính 429×' + rl.hits + ' (đã tự giảm luồng)' : '')
         + (seg0.truncated ? ' · ⚠ CHƯA ĐẦY ĐỦ' : ''));
-      return { ok: true, rows: seg0.items };
+      return { ok: true, rows: seg0.items, incomplete: !!seg0.truncated && !stopped(), stopped: stopped() };
     }
   }
 
@@ -1607,6 +1631,7 @@
 
     state.scanning = true;
     state.scanStopRequested = false;
+    state.listIncomplete = false;
 
     try {
       // XÓA SẠCH DANH SÁCH CŨ TRƯỚC KHI TẢI LẠI — tránh giữ lại dữ liệu/thứ tự cũ gây lỗi
@@ -1647,10 +1672,26 @@
         if (cntEl) cntEl.textContent = String(state.allRows.size);
       };
 
-      const api = await loadListViaApi((n, rowsArr) => {
+      const apiProgress = (n, rowsArr) => {
         setBtn('⏹ Dừng tải (' + n + ' chat)');
         syncLiveRows(rowsArr);
-      });
+      };
+      let api = await loadListViaApi(apiProgress);
+      if (api && api.ok && api.incomplete && !api.stopped) {
+        // Tải thiếu mà dùng để gửi là gửi sai — tự tải lại từ đầu 1 lần nữa
+        logLine('⚠ Danh sách tải lần 1 CHƯA đầy đủ (' + api.rows.length + ' chat) — đang tải lại từ đầu…');
+        lastSyncedLen = 0;
+        state.allRows = null;
+        const api2 = await loadListViaApi(apiProgress);
+        if (api2 && api2.ok) api = api2;
+      }
+      if (api && api.ok && api.incomplete && !api.stopped) {
+        state.listIncomplete = true;
+        state.allRows = null;
+        logLine('⛔ Tải 2 lần vẫn CHƯA đầy đủ (' + api.rows.length + ' chat) — KHÔNG dùng danh sách thiếu để gửi (gửi sẽ sai). Kiểm tra mạng rồi bấm ⚡ Tải danh sách lại.');
+        setBtn('⚠ Tải chưa đủ — bấm tải lại');
+        return;
+      }
       if (api && api.ok && api.rows.length) {
         // kiểm tra khớp với các dòng đang thấy trên màn hình:
         //  - thiếu dòng nào → API khác màn hình → quét giao diện
@@ -1682,8 +1723,9 @@
           let ord = 0;
           found.forEach((v) => { v.order = ord++; });
           state.allRows = found;
+          state.listIncomplete = false;
           setBtn('⚡ Tải danh sách (' + found.size + ' chat)');
-          logLine('⚡ Tải qua API: ' + found.size + ' chat — không cần cuộn');
+          logLine('⚡ Tải qua API: ' + found.size + ' chat — ĐẦY ĐỦ, không cần cuộn');
           computeMatches();
           render();
           return;
@@ -1772,7 +1814,9 @@
     } finally {
       state.scanning = false;
       state.scanStopRequested = false;
-      if (btn && state.allRows) {
+      if (btn && state.listIncomplete) {
+        setBtn('⚠ Tải chưa đủ — bấm tải lại');
+      } else if (btn && state.allRows) {
         setBtn('⚡ Tải danh sách (' + state.allRows.size + ' chat)');
       } else if (btn) {
         setBtn('⚡ Tải danh sách');
@@ -4850,6 +4894,12 @@
 
   async function sendToAll() {
     if (state.sending) return; // chặn bấm đúp / gọi đúp → gửi TRÙNG
+    if (state.listIncomplete) {
+      // Danh sách tải chưa đầy đủ lần gần nhất → gửi lúc này chắc chắn sai (thiếu chat)
+      alert('Danh sách tải CHƯA ĐẦY ĐỦ nên chưa thể gửi.\nHãy bấm “⚡ Tải danh sách” để tải lại cho đủ rồi mới gửi.');
+      logLine('⛔ Chặn gửi: danh sách tải chưa đầy đủ — bấm ⚡ Tải danh sách để tải lại.');
+      return;
+    }
     // LƯU Ý: panel nằm trong shadow DOM → phải lấy phần tử qua shadow.getElementById,
     // document.querySelector sẽ không thấy (đây là nguyên nhân lỗi "Hãy nhập nội dung câu cần gửi")
     const msgEl = shadow && shadow.getElementById('ssb-msg');
