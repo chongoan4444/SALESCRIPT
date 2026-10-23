@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE
 // @namespace    salescript
-// @version      1.80.1
+// @version      1.80.2
 // @description  BOTFAKE — chọn chuỗi chat (Alt+Click 2 đầu) hoặc theo snippet trong Pancake rồi gửi cùng 1 câu (kèm 1 hoặc nhiều ảnh nếu muốn) cho tất cả.
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -5729,6 +5729,7 @@
               <span class="hint" id="ssb-qr-info">Câu nhanh: chưa chọn — gõ tay như cũ</span>
               <button class="b b-gray" id="ssb-qr-clear" style="display:none" title="Bỏ chọn câu nhanh">✕</button>
             </div>
+            <div id="ssb-qr-photos" style="display:none;margin:2px 0 4px;gap:6px;flex-wrap:wrap;align-items:center" title="Ảnh của câu nhanh đang chọn — bấm vào ảnh để mở lớn"></div>
             <div class="row" style="align-items:center">
               <span class="hint">Mỗi lượt:</span>
               <input type="number" id="ssb-wave" value="30000" min="1" max="100000" step="500" style="width:72px" title="Số tin mỗi lượt (tối đa 100.000)">
@@ -5832,6 +5833,8 @@
         if (qi) qi.textContent = 'Câu nhanh: chưa chọn — gõ tay như cũ';
         const qc = root.getElementById('ssb-qr-clear');
         if (qc) qc.style.display = 'none';
+        const qp = root.getElementById('ssb-qr-photos');
+        if (qp) { qp.style.display = 'none'; qp.innerHTML = ''; }
       }
       if (state.image && state.image.url) { try { URL.revokeObjectURL(state.image.url); } catch (e) { /* ignore */ } }
       state.image = file ? { file, name: file.name || 'ảnh', url: URL.createObjectURL(file), w: 0, h: 0 } : null;
@@ -5852,7 +5855,19 @@
     // ===== CÂU NHANH: chọn/bỏ chọn + khôi phục sau F5 =====
     const qrInfo = root.getElementById('ssb-qr-info');
     const qrClearBtn = root.getElementById('ssb-qr-clear');
+    const qrPhotosEl = root.getElementById('ssb-qr-photos');
     const QR_STORE_KEY = 'ssb_qr_v1';
+    // Hiển thị ẢNH của câu đang chọn ngay trên panel — nhìn là biết đã bắt ĐÚNG câu chưa
+    // (các câu sale thường mở đầu giống hệt nhau, chỉ khác ảnh/giá phía sau).
+    const renderQrPhotos = (qr) => {
+      if (!qrPhotosEl) return;
+      const items = (qr && Array.isArray(qr.items)) ? qr.items.filter((x) => x && x.url) : [];
+      if (!items.length) { qrPhotosEl.style.display = 'none'; qrPhotosEl.innerHTML = ''; return; }
+      qrPhotosEl.innerHTML = '<span class="hint">🖼 ' + items.length + ' ảnh:</span>' + items.map((x) =>
+        '<a href="' + esc(x.url) + '" target="_blank" rel="noopener"><img src="' + esc(x.url) + '" '
+        + 'style="width:44px;height:44px;object-fit:cover;border-radius:6px;border:1px solid #475569;display:block"></a>').join('');
+      qrPhotosEl.style.display = 'flex';
+    };
     const applyQr = (qr) => {
       state.quickReply = qr || null;
       try {
@@ -5863,10 +5878,12 @@
         ? '⚡ Câu nhanh "' + qr.shortcut + '" — ' + qr.items.length + ' ảnh (bind bằng content_id, nhanh như gửi tay)'
         : 'Câu nhanh: chưa chọn — gõ tay như cũ';
       if (qrClearBtn) qrClearBtn.style.display = qr ? '' : 'none';
+      renderQrPhotos(qr);
     };
     // ===== BẮT CÂU NHANH NHƯ GỬI TAY (Alt+Q): gõ "/" trong khung chat app → click 1 câu trong popup =====
-    // Popup câu nhanh của app đã xác minh từ script đang chạy thật của người dùng: danh sách
-    // #qr_autocomplete, mỗi câu là .suggestion-element, mã câu nằm ở .shortcut-tag. Khi chế độ
+    // Popup câu nhanh của app (HTML thật người dùng gửi): danh sách #qr_autocomplete, mỗi câu
+    // là .suggestion-element, chữ nằm ở .suggestion-text, ảnh ở .suggestion-photos img — KHÔNG
+    // có .shortcut-tag nên không đối chiếu theo mã câu được. Khi chế độ
     // bắt đang bật, BOTFAKE chặn click Ở PHA BẮT (capture) trước khi app kịp chèn câu vào
     // composer → câu KHÔNG bị gửi/chèn vào chat đang mở; BOTFAKE đối chiếu shortcut với dữ
     // liệu câu nhanh của đúng page đó (fetchQuickRepliesForPage) để lấy đủ CHỮ + ẢNH
@@ -5920,24 +5937,77 @@
       e.preventDefault();
       e.stopPropagation();
       if (e.stopImmediatePropagation) e.stopImmediatePropagation();
+      // HTML THẬT người dùng gửi cho thấy: dòng suggestion KHÔNG có .shortcut-tag, và nhiều
+      // câu MỞ ĐẦU GIỐNG HỆT NHAU (chỉ khác giá/ảnh phía sau) → bản cũ đối chiếu 40 ký tự
+      // đầu nên bấm dòng nào cũng trúng câu đầu tiên. Nay đối chiếu bằng: TOÀN VĂN của
+      // đúng dòng đã click (lấy từ .suggestion-text, đã gột bỏ icon/<style>/<svg>) +
+      // ẢNH thumbnail trong dòng + VỊ TRÍ dòng trong popup — chấm điểm từng câu, lấy
+      // câu điểm cao nhất, không còn "khớp trước thắng".
       const shortcut = String(((item.querySelector('.shortcut-tag') || {}).textContent) || '').trim();
-      const visibleText = String(item.textContent || '').replace(/\s+/g, ' ').trim();
+      const allItems = Array.from(document.querySelectorAll('#qr_autocomplete .suggestion-element'));
+      const clickIdx = allItems.indexOf(item);
+      const cleanTextOf = (el) => {
+        const src = (el.querySelector && el.querySelector('.suggestion-text')) || el;
+        const clone = src.cloneNode(true);
+        clone.querySelectorAll('.suggestion-header-section, style, script, svg').forEach((n) => n.remove());
+        return String(clone.textContent || '').replace(/\s+/g, ' ').trim();
+      };
+      const photoKey = (u) => String(u || '').split('?')[0].replace(/_thumb(\.[a-z0-9]+)$/i, '$1').split('/').pop().toLowerCase();
+      const clickedText = cleanTextOf(item);
+      const clickedPhotos = Array.from(item.querySelectorAll('.suggestion-photos img'))
+        .map((im) => im.getAttribute('src') || '').filter(Boolean);
       setQrCapture(false, true);
       (async () => {
         const pid = currentPanelPageId();
         const recs = await fetchQuickRepliesForPage(pid);
         const list = recs.map(normalizeQuickReply).filter((q) => q.text || q.items.length);
+        const normT = (v) => String(v || '').normalize('NFC').replace(/\s+/g, ' ').trim().toLowerCase();
+        const ct = normT(clickedText);
+        const cKeys = clickedPhotos.map(photoKey).filter(Boolean);
+        const scoreOf = (x) => {
+          let sc = 0;
+          if (shortcut && x.shortcut === shortcut) sc += 10000;
+          const xt = normT(x.text);
+          if (ct && xt) {
+            if (ct === xt) sc += 5000;
+            else {
+              let i = 0;
+              const m = Math.min(ct.length, xt.length);
+              while (i < m && ct.charCodeAt(i) === xt.charCodeAt(i)) i++;
+              sc += i; // tiền tố chung càng dài càng đúng câu (phân biệt các câu mở đầu giống nhau)
+              if (ct.indexOf(xt) > -1 || xt.indexOf(ct) > -1) sc += Math.min(ct.length, xt.length);
+            }
+          }
+          if (cKeys.length && x.items && x.items.length) {
+            const xKeys = x.items.map((it) => photoKey(it.url));
+            cKeys.forEach((k) => { if (xKeys.indexOf(k) > -1) sc += 3000; });
+          }
+          return sc;
+        };
         let q = null;
-        if (shortcut) q = list.filter((x) => x.shortcut === shortcut)[0] || null;
-        if (!q && visibleText) {
-          const norm2 = (v) => String(v || '').replace(/\s+/g, ' ').trim().toLowerCase();
-          const vt = norm2(visibleText);
-          q = list.filter((x) => x.text && vt.indexOf(norm2(x.text).slice(0, 40)) > -1)[0]
-            || list.filter((x) => x.shortcut && vt.indexOf(norm2(x.shortcut)) > -1)[0]
-            || null;
+        let bestScore = -1;
+        list.forEach((x) => { const sc = scoreOf(x); if (sc > bestScore) { bestScore = sc; q = x; } });
+        // điểm suýt soát nhau (câu gần như giống hệt) → tin VỊ TRÍ dòng đã click trong popup
+        if (clickIdx > -1 && list[clickIdx] && q !== list[clickIdx] && scoreOf(list[clickIdx]) >= bestScore - 30) {
+          q = list[clickIdx];
+          bestScore = scoreOf(q);
+        }
+        if (!q || bestScore < 10) {
+          // Không khớp được dữ liệu app → vẫn dùng ĐÚNG dòng đã click (chữ + ảnh lấy từ popup,
+          // ảnh gỡ hậu tố _thumb về ảnh gốc) còn hơn là gửi nhầm câu khác.
+          if (clickedText || clickedPhotos.length) {
+            q = {
+              shortcut: shortcut || ('câu dòng ' + (clickIdx + 1)),
+              text: clickedText,
+              items: clickedPhotos.map((u) => ({ id: '', url: u.split('?')[0].replace(/_thumb(\.[a-z0-9]+)$/i, '$1'), w: 0, h: 0 })),
+              parts: null,
+            };
+            q.parts = [{ text: q.text, items: q.items }];
+            logLine('🎯 Không khớp được dữ liệu câu nhanh của app — dùng thẳng nội dung dòng ' + (clickIdx + 1) + ' vừa click (' + q.items.length + ' ảnh từ popup).');
+          }
         }
         if (!q) {
-          logLine('⚠ Đã bắt được click nhưng không khớp được câu trong dữ liệu của page (shortcut: ' + (shortcut || '?') + ') — bấm 🎯 Bắt câu rồi click lại.');
+          logLine('⚠ Đã bắt được click nhưng không đọc được nội dung dòng đã chọn — bấm 🎯 Bắt câu rồi click lại.');
           return;
         }
         setImg(null); // bỏ ảnh chọn tay — dùng ảnh của câu vừa bắt
@@ -5966,6 +6036,7 @@
         state.quickReply = savedQr;
         if (qrInfo) qrInfo.textContent = '⚡ Câu nhanh "' + savedQr.shortcut + '" (' + savedQr.items.length + ' ảnh) — đã lưu từ trước, bấm Chạy là dùng';
         if (qrClearBtn) qrClearBtn.style.display = '';
+        renderQrPhotos(savedQr);
       }
     } catch (e) { /* ignore */ }
     on('ssb-img-pick', 'click', () => { if (imgInput) imgInput.click(); });
