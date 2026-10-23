@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE
 // @namespace    salescript
-// @version      1.80.2
+// @version      1.80.3
 // @description  BOTFAKE — chọn chuỗi chat (Alt+Click 2 đầu) hoặc theo snippet trong Pancake rồi gửi cùng 1 câu (kèm 1 hoặc nhiều ảnh nếu muốn) cho tất cả.
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -68,6 +68,7 @@
     savedLists: [],         // các list đã lưu [{id,name,items:[{id,pageId,name,snippet,snippetRaw,time,type,platform}]}]
     listSel: new Set(),     // id các list ĐANG TÍCH — gộp thành lựa chọn để gửi (gửi được nhiều list cùng lúc)
     loadedName: null,       // tên hiển thị (1 list hoặc "N list: …") — hiện ở mục 1
+    imgPick: false,         // đang bật chế độ CHỌN ẢNH TRÊN TRANG (chờ click vào 1 ảnh trên giao diện)
     quickReply: null,       // câu nhanh Pancake bắt bằng Alt+Q { shortcut, text, pageId, items:[{id,url,w,h}], parts:[{text,items}] }
     qrCapture: false,       // đang bật chế độ BẮT CÂU bằng Alt+Q (chờ click vào popup "/" của app)
   };
@@ -5011,18 +5012,25 @@
         }
       }
       photo = { qr: true, shortcut: qrSel.shortcut, items: qrSel.items, parts: (Array.isArray(qrSel.parts) && qrSel.parts.length) ? qrSel.parts : [{ text: qrSel.text || '', items: qrSel.items }], url: qrSel.items[0].url, id: qrSel.items[0].id, w: qrSel.items[0].w || 0, h: qrSel.items[0].h || 0 };
-    } else if (imgState && imgState.file) {
-      logLine('☁️ Đang tải ảnh lên Pancake…');
-      const up = await uploadContentFile(imgState.file);
-      if (!up.ok) {
-        logLine('⛔ Không tải được ảnh (' + up.error + ') — HỦY gửi để tránh gửi thiếu ảnh.');
-        state.sending = false;
-        batchStats.active = false;
-        render();
-        return;
+    } else if (imgState && (imgState.file || imgState.url)) {
+      if (imgState.file) {
+        logLine('☁️ Đang tải ảnh lên Pancake…');
+        const up = await uploadContentFile(imgState.file);
+        if (!up.ok) {
+          logLine('⛔ Không tải được ảnh (' + up.error + ') — HỦY gửi để tránh gửi thiếu ảnh.');
+          state.sending = false;
+          batchStats.active = false;
+          render();
+          return;
+        }
+        photo = { url: up.url, id: up.id, fbId: '', w: imgState.w || 0, h: imgState.h || 0 };
+        logLine('☁️ Ảnh đã tải lên — đang gắn attachment cho từng page…');
+      } else {
+        // Ảnh chọn bằng cách click trên giao diện: đã có URL ảnh gốc → gắn attachment
+        // cho từng page bằng URL như cũ (không qua bước tải file lên nữa).
+        photo = { url: imgState.url, id: '', fbId: '', w: imgState.w || 0, h: imgState.h || 0 };
+        logLine('🖼 Dùng ảnh đã chọn trên giao diện — đang gắn attachment cho từng page…');
       }
-      photo = { url: up.url, id: up.id, fbId: '', w: imgState.w || 0, h: imgState.h || 0 };
-      logLine('☁️ Ảnh đã tải lên — đang gắn attachment cho từng page…');
       const pageIds = [];
       targets.forEach((c) => {
         const p = c.pageId || String(c.id || '').split('_')[0];
@@ -5719,11 +5727,11 @@
             <div class="label">2) Câu cần gửi</div>
             <textarea id="ssb-msg" placeholder="Nhập 1 câu sẽ gửi cho tất cả đoạn chat ở trên…"></textarea>
             <div class="row" style="align-items:center">
-              <input type="file" id="ssb-img" accept="image/*" style="display:none">
-              <button class="b b-gray" id="ssb-img-pick">📷 Chọn ảnh (tùy chọn)</button>
-              <span class="hint" id="ssb-img-info">Chưa chọn — copy ảnh rồi Ctrl+V để dán</span>
+              <button class="b b-gray" id="ssb-img-pick" title="Bấm nút này rồi CLICK vào 1 ảnh bất kỳ trên giao diện Pancake (ảnh trong chat, ảnh mẫu…) — ảnh đó sẽ được dùng làm ảnh gửi">🖼 Chọn ảnh trên trang</button>
+              <span class="hint" id="ssb-img-info">Chưa chọn — bấm nút rồi click 1 ảnh trên giao diện (hoặc Ctrl+V dán ảnh)</span>
               <button class="b b-gray" id="ssb-img-clear" style="display:none">✕ Bỏ ảnh</button>
             </div>
+            <div id="ssb-img-preview-wrap" style="display:none;margin:2px 0 4px"><img id="ssb-img-preview" style="width:56px;height:56px;object-fit:cover;border-radius:8px;border:1px solid #475569;display:block" title="Ảnh đang chọn để gửi"></div>
             <div class="row" style="align-items:center">
               <button class="b b-gray" id="ssb-qr-capture" title="Bắt câu như gửi tay: bấm nút này (hoặc Alt+Q) rồi gõ / trong khung chat Pancake, click vào 1 câu — BOTFAKE bắt câu đó (cả ảnh) làm câu gửi, KHÔNG gửi vào chat đang mở">🎯 Bắt câu (Alt+Q)</button>
               <span class="hint" id="ssb-qr-info">Câu nhanh: chưa chọn — gõ tay như cũ</span>
@@ -5820,23 +5828,34 @@
       const host = document.getElementById(PANEL_ID);
       if (host) host.style.display = 'none'; // F5 hoặc Alt+Shift+B để hiện lại
     });
-    // chọn ảnh kèm theo
-    const imgInput = root.getElementById('ssb-img');
+    // chọn ảnh kèm theo: CLICK VÀO 1 ẢNH TRÊN GIAO DIỆN (không mở hộp chọn file nữa)
     const imgInfo = root.getElementById('ssb-img-info');
     const imgClearBtn = root.getElementById('ssb-img-clear');
-    const setImg = (file) => {
-      if (file && state.quickReply) {
-        // chọn ảnh tay → bỏ câu nhanh đang chọn (2 nguồn ảnh không dùng chung 1 lượt)
-        state.quickReply = null;
-        try { localStorage.removeItem('ssb_qr_v1'); } catch (e) { /* ignore */ }
-        const qi = root.getElementById('ssb-qr-info');
-        if (qi) qi.textContent = 'Câu nhanh: chưa chọn — gõ tay như cũ';
-        const qc = root.getElementById('ssb-qr-clear');
-        if (qc) qc.style.display = 'none';
-        const qp = root.getElementById('ssb-qr-photos');
-        if (qp) { qp.style.display = 'none'; qp.innerHTML = ''; }
+    const imgPreviewWrap = root.getElementById('ssb-img-preview-wrap');
+    const imgPreview = root.getElementById('ssb-img-preview');
+    const clearQrSelection = () => {
+      if (!state.quickReply) return;
+      // chọn ảnh tay → bỏ câu nhanh đang chọn (2 nguồn ảnh không dùng chung 1 lượt)
+      state.quickReply = null;
+      try { localStorage.removeItem('ssb_qr_v1'); } catch (e) { /* ignore */ }
+      const qi = root.getElementById('ssb-qr-info');
+      if (qi) qi.textContent = 'Câu nhanh: chưa chọn — gõ tay như cũ';
+      const qc = root.getElementById('ssb-qr-clear');
+      if (qc) qc.style.display = 'none';
+      const qp = root.getElementById('ssb-qr-photos');
+      if (qp) { qp.style.display = 'none'; qp.innerHTML = ''; }
+    };
+    const updateImgPreview = () => {
+      const im = state.image;
+      if (imgPreview && imgPreviewWrap) {
+        if (im && im.url) { imgPreview.src = im.url; imgPreviewWrap.style.display = ''; }
+        else { imgPreview.removeAttribute('src'); imgPreviewWrap.style.display = 'none'; }
       }
-      if (state.image && state.image.url) { try { URL.revokeObjectURL(state.image.url); } catch (e) { /* ignore */ } }
+      if (imgClearBtn) imgClearBtn.style.display = im ? '' : 'none';
+    };
+    const setImg = (file) => {
+      if (file) clearQrSelection();
+      if (state.image && state.image.file && state.image.url) { try { URL.revokeObjectURL(state.image.url); } catch (e) { /* ignore */ } }
       state.image = file ? { file, name: file.name || 'ảnh', url: URL.createObjectURL(file), w: 0, h: 0 } : null;
       // đọc kích thước ảnh — request thật của app gửi kèm width/height
       if (file && state.image && typeof createImageBitmap === 'function') {
@@ -5848,10 +5867,103 @@
       if (imgInfo) {
         imgInfo.textContent = file
           ? '📷 ' + (file.name || 'ảnh') + ' (' + Math.round((file.size || 0) / 1024) + ' KB)'
-          : 'Chưa chọn ảnh';
+          : 'Chưa chọn — bấm “Chọn ảnh trên trang” rồi click 1 ảnh trên giao diện';
       }
-      if (imgClearBtn) imgClearBtn.style.display = file ? '' : 'none';
+      updateImgPreview();
     };
+    // URL ảnh trên trang hay là bản thu nhỏ (_thumb) → gỡ hậu tố về ảnh GỐC
+    const originalImgUrl = (u) => String(u || '').split('?')[0].replace(/_thumb(\.[a-z0-9]+)$/i, '$1');
+    const setImgUrl = (url, name) => {
+      const clean = originalImgUrl(url);
+      if (!clean) return;
+      clearQrSelection();
+      if (state.image && state.image.file && state.image.url) { try { URL.revokeObjectURL(state.image.url); } catch (e) { /* ignore */ } }
+      state.image = { file: null, url: clean, name: name || 'ảnh trên trang', w: 0, h: 0, web: true };
+      const probe = new Image();
+      probe.onload = () => {
+        if (state.image && state.image.url === clean) { state.image.w = probe.naturalWidth || 0; state.image.h = probe.naturalHeight || 0; }
+      };
+      probe.src = clean;
+      if (imgInfo) imgInfo.textContent = '🖼 Đã chọn ảnh trên trang: ' + (name || clean.split('/').pop() || 'ảnh');
+      updateImgPreview();
+      logLine('🖼 Đã chọn 1 ảnh trên giao diện để gửi: ' + (name || clean));
+    };
+    // ===== CHẾ ĐỘ CHỌN ẢNH TRÊN TRANG: bấm nút → rê chuột thấy ảnh nào viền tím, click là chọn =====
+    const IMG_PICK_BADGE_ID = 'ssb-img-pick-badge';
+    let imgPickHover = null;
+    const clearImgPickHover = () => {
+      if (imgPickHover) { try { imgPickHover.style.outline = ''; imgPickHover.style.cursor = ''; } catch (e) { /* ignore */ } imgPickHover = null; }
+    };
+    const setImgPickBadge = (on2) => {
+      let b = document.getElementById(IMG_PICK_BADGE_ID);
+      if (on2) {
+        if (!b) {
+          b = document.createElement('div');
+          b.id = IMG_PICK_BADGE_ID;
+          b.textContent = '🖼 BOTFAKE ĐANG CHỌN ẢNH: click vào 1 ẢNH bất kỳ trên giao diện để dùng ảnh đó gửi đi (Esc để hủy)';
+          Object.assign(b.style, {
+            position: 'fixed', top: '10px', left: '50%', transform: 'translateX(-50%)',
+            zIndex: 2147483647, background: '#5865F2', color: '#fff', padding: '8px 14px',
+            borderRadius: '8px', font: '600 13px system-ui, sans-serif',
+            boxShadow: '0 4px 18px rgba(0,0,0,.35)', pointerEvents: 'none', maxWidth: '92vw', textAlign: 'center',
+          });
+          document.body.appendChild(b);
+        }
+      } else if (b) b.remove();
+    };
+    const setImgPick = (on2, silent) => {
+      if (on2 && state.qrCapture && typeof window.__botfakeQrCapture__ === 'function') window.__botfakeQrCapture__(false);
+      state.imgPick = !!on2;
+      setImgPickBadge(state.imgPick);
+      const btn = root.getElementById('ssb-img-pick');
+      if (btn) {
+        btn.textContent = state.imgPick ? '🖼 Đang chọn ảnh… (Esc hủy)' : '🖼 Chọn ảnh trên trang';
+        btn.style.background = state.imgPick ? '#5865F2' : '';
+        btn.style.color = state.imgPick ? '#fff' : '';
+      }
+      if (!state.imgPick) clearImgPickHover();
+      if (state.imgPick && !silent) logLine('🖼 BẬT chọn ảnh: click vào 1 ảnh bất kỳ trên giao diện Pancake để dùng ảnh đó gửi đi. Esc để hủy.');
+    };
+    window.__botfakeImgPick__ = (on2) => setImgPick(on2 == null ? !state.imgPick : on2);
+    const findImgEl = (t) => {
+      if (!t || !t.closest) return null;
+      return t.closest('img') || (t.querySelector ? t.querySelector('img') : null);
+    };
+    const imgUrlFromElement = (t) => {
+      const img = findImgEl(t);
+      if (img) return img.currentSrc || img.src || img.getAttribute('data-src') || img.getAttribute('src') || '';
+      try {
+        const bg = window.getComputedStyle(t).backgroundImage;
+        const m = bg && bg.match(/url\(["']?(.*?)["']?\)/);
+        return m ? m[1] : '';
+      } catch (e) { return ''; }
+    };
+    const onImgPickHover = (e) => {
+      if (!state.imgPick) return;
+      const t = e.target;
+      if (!t || t.id === PANEL_ID) return; // hover trong panel BOTFAKE → bỏ qua
+      const img = findImgEl(t);
+      if (!img || img === imgPickHover) return;
+      clearImgPickHover();
+      imgPickHover = img;
+      try { img.style.outline = '3px solid #5865F2'; img.style.cursor = 'copy'; } catch (err) { /* ignore */ }
+    };
+    const onImgPickClick = (e) => {
+      if (!state.imgPick) return;
+      const t = e.target;
+      if (!t || t.id === PANEL_ID) return; // click trong panel BOTFAKE → để panel tự xử lý
+      const url = imgUrlFromElement(t);
+      if (!url) return; // click không trúng ảnh nào → giữ nguyên chế độ chờ
+      // Chặn TRƯỚC app: click này chỉ để CHỌN ảnh, không mở ảnh/không chèn vào chat
+      e.preventDefault();
+      e.stopPropagation();
+      if (e.stopImmediatePropagation) e.stopImmediatePropagation();
+      setImgPick(false, true);
+      const img = findImgEl(t);
+      setImgUrl(url, (img && (img.alt || img.title)) || '');
+    };
+    document.addEventListener('mouseover', onImgPickHover, true);
+    document.addEventListener('click', onImgPickClick, true);
     // ===== CÂU NHANH: chọn/bỏ chọn + khôi phục sau F5 =====
     const qrInfo = root.getElementById('ssb-qr-info');
     const qrClearBtn = root.getElementById('ssb-qr-clear');
@@ -5908,6 +6020,7 @@
       } else if (b) b.remove();
     };
     const setQrCapture = (on2, silent) => {
+      if (on2 && state.imgPick && typeof window.__botfakeImgPick__ === 'function') window.__botfakeImgPick__(false);
       state.qrCapture = !!on2;
       if (qrCaptureTimer) { clearTimeout(qrCaptureTimer); qrCaptureTimer = null; }
       setQrCaptureBadge(state.qrCapture);
@@ -6039,14 +6152,9 @@
         renderQrPhotos(savedQr);
       }
     } catch (e) { /* ignore */ }
-    on('ssb-img-pick', 'click', () => { if (imgInput) imgInput.click(); });
-    if (imgInput) {
-      imgInput.addEventListener('change', () => {
-        setImg((imgInput.files && imgInput.files[0]) || null);
-      });
-    }
+    on('ssb-img-pick', 'click', () => setImgPick(!state.imgPick));
     on('ssb-img-clear', 'click', () => {
-      if (imgInput) imgInput.value = '';
+      setImgPick(false, true);
       setImg(null);
     });
     // Ctrl+V: copy ảnh (screenshot, ảnh trên web…) rồi dán thẳng vào trang
@@ -6548,6 +6656,11 @@
   }
 
   function onKeydown(e) {
+    if (e.key === 'Escape' && state.imgPick) {
+      if (typeof window.__botfakeImgPick__ === 'function') window.__botfakeImgPick__(false);
+      logLine('🖼 Đã hủy chọn ảnh');
+      return;
+    }
     // Alt+Q: bật/tắt chế độ BẮT CÂU NHANH (chờ click vào popup "/" của app)
     if (e.altKey && !e.ctrlKey && !e.metaKey && (e.key === 'q' || e.key === 'Q')) {
       e.preventDefault();
