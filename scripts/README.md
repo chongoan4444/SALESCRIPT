@@ -1,0 +1,373 @@
+# BOTFAKE — Gửi 1 câu cho toàn bộ đoạn chat có cùng snippet
+
+File: `pancake-send-by-snippet.user.js` — chạy bằng **Tampermonkey** trên trang chat Pancake
+(`/page/conversation`). Gửi **cùng 1 câu** (có thể **kèm 1 ảnh**) cho tất cả đoạn chat đã chọn.
+
+## Mục đích
+
+Khi bạn chọn 1 snippet trong danh sách đoạn chat (dòng tin nhắn cuối cùng hiển thị dưới tên khách),
+script sẽ:
+
+1. Tìm **toàn bộ** các đoạn chat đang có **cùng snippet** đó trong danh sách.
+2. Gửi **cùng 1 câu** mà bạn nhập cho tất cả các đoạn chat đó (gửi lần lượt, có giãn cách).
+
+Phù hợp khi nhiều khách nhắn cùng 1 câu hỏi / cùng 1 tin tự động và bạn cần trả lời 1 lần cho tất cả.
+
+## Cài đặt
+
+1. Cài tiện ích **Tampermonkey** (Chrome/Edge/Firefox).
+2. Tạo script mới → dán toàn bộ nội dung `pancake-send-by-snippet.user.js` → Lưu.
+3. Mở Pancake → vào mục **Đoạn chat** (trang `/page/conversation`).
+
+## Sử dụng
+
+1. Bấm vào biểu tượng panel **“💬 Gửi 1 câu theo snippet”** góc dưới bên phải (kéo thả được).
+2. **Chọn đối tượng nhận tin** — 2 cách:
+   - **Chọn chuỗi (2 đầu):** **Alt+Click** vào dòng chat **đầu chuỗi** → **giữ Alt và nhấp tiếp** dòng
+     **cuối chuỗi**. Tất cả chat nằm **giữa 2 dòng đó** trong danh sách được chọn thành 1 chuỗi
+     (nhấp lần 3 = bắt đầu chuỗi mới; Esc = hủy). Nút “Chọn chuỗi (2 nhấp)” cũng làm được điều tương tự.
+   - **Chọn theo snippet:** bấm 1 chat bất kỳ (chat đó được chọn) → bấm **“Lấy snippet từ chat đang chọn”**
+     (hoặc `Alt+Shift+D`) — mọi chat có snippet giống nhau sẽ được chọn.
+3. Các dòng **viền xanh lá (nền + viền)** là chat sẽ được nhận tin (dòng đầu/cuối chuỗi hoặc nguồn snippet
+   viền xanh dương). Màu này **tự vẽ lại bền vững**: cuộn ra khỏi màn hình rồi quay lại, bấm mở chat rồi
+   bấm ra… màu vẫn còn (script tự tô lại mỗi khi danh sách render).
+   Nút **“⬇ Từ đây xuống cuối”**: chọn tất cả chat từ chat đang mở (đang được chọn trong app) trở xuống
+   cuối danh sách (tự tải danh sách nếu chưa tải).
+4. **Script không bao giờ tự cuộn danh sách** — khi cần quét toàn bộ chat (để chọn chuỗi chính xác
+   khắp danh sách / so khớp snippet ngoài vùng đang thấy), bấm **“⚡ Tải danh sách”**:
+   - **Tải qua API trước (siêu nhanh)** — đúng request mà app Pancake tự gọi, **lấy bộ lọc/thứ tự
+     thẳng từ state của app** (`currentPageId`/`multiplePageIds`, `unread_first`, `filter_multi_tag`,
+     tag/loại đang lọc) nên khớp đúng màn hình; phân trang `next_cursor` — 2000–3000 chat chỉ mất
+     vài giây, **không cuộn gì cả**. Log ghi chẩn đoán đối chiếu (`API: N · màn hình: M · thiếu: X`);
+     nếu không khớp (bộ lọc lạ) thì tự chuyển sang quét giao diện cho đúng những gì đang thấy.
+   - **Quét giao diện** (dự phòng): bước cuộn lớn, chờ tối thiểu, đếm dần trên nút, xong tự cuộn về chỗ cũ.
+   Chuỗi **hàng nghìn chat** vẫn chạy tốt. Với chuỗi ≥150 chat nên chọn tốc độ **“Song song 5 luồng”**
+   để không bị Facebook chặn (429).
+5. Bỏ tick chat nào không muốn gửi trong danh sách mục 2.
+6. Nhập **1 câu** cần gửi vào mục 3 → chọn **tốc độ gửi** → bấm **“▶ Chạy”** → xác nhận.
+   - **🚀 Gửi tất cả cùng lúc** (mặc định): bắn mọi request song song — xong trong 1 phát.
+   - **⚡ Song song 5 luồng**: 5 chat cùng lúc — vẫn nhanh nhưng nhẹ hơn cho server.
+   - **🐢 Tuần tự**: gửi lần lượt, có giãn cách (mặc định 300 ms, đổi được) — dành khi bị báo spam/429.
+   - Có nút **Dừng** giữa chừng; log phía dưới hiện rõ chat nào gửi thành công / lỗi gì.
+
+Phím tắt: `Alt+Shift+B` ẩn/hiện panel, `Alt+Shift+D` lấy snippet từ chat đang chọn, `Esc` hủy chọn chuỗi.
+
+## Script dựa vào phần nào của source trong repo?
+
+| Phần source | Nội dung được dùng |
+|---|---|
+| `html.txt`, `html2.txt`, `html3.txt`, `html comment list` | Cấu trúc DOM danh sách đoạn chat: `#conversationList` → `<div id="{pageId}_{conversationId}">` → `.conversation-list-item` với `.name-text`, `.time-modul`, `.snippet-text`; chat đang chọn có class `selected`. Icon `static/images/envelope*.svg` = chat Inbox, `static/images/comments.svg` = chat Bình luận (script phân biệt để cảnh báo). Ô soạn tin `#replyBoxComposer` (gửi bằng phím Enter). |
+| `_app-9331d46f21a84eb1.v6.js` | Cách website tự gửi tin: `executeByApi` → `POST {api}/v1/pages/{page_id}/conversations/{id}/messages?access_token=…` (`action=reply_inbox`, `multipart/form-data`); khi server trả lỗi dạng `(#10)/(#551)/(#613)…` (`canFallbackToExt`) app tự fallback sang `executeByExt` (extension message `type:"REPLY_INBOX_PHOTO"`, `attachmentType:"SEND_TEXT_ONLY"`) rồi `executeBySocketFB`. Script tái hiện đúng3 tầng đó, dùng các biến toàn cục app expose sẵn: `__pancakeReduxStore__`, `__ExtensionAdapter__`, `__GlobalIdCacheTest__`, `__tempGlobalIdCache__`, `__syncMissingThreadId__`. |
+| `pancake.vn2.har` | Xác nhận `access_token` (JWT) được gửi trong query string của mọi request `/api/v1/…` — script lấy token trực tiếp từ request thật của trang (hook fetch/XHR, `performance` entries, `__NEXT_DATA__`, URL ảnh trong DOM). |
+
+Không dùng selector bịa: mọi class/id/đường API ở trên đều lấy trực tiếp từ source.
+
+## 3 tầng gửi (tự động dự phòng) — CHỈ gửi hàng loạt
+
+1. **API** — nhanh nhất, gửi song song nhiều chat cùng lúc.
+2. **Socket (Facebook WebSocket)** — **đúng đường “gửi bình thường”** mà app Pancake dùng khi bạn
+   gõ tay (`executeBySocketFB` → `__MqttHelper__.sendMessage` → `/ls_req`). Vượt được lỗi
+   `"(#10) … một ứng dụng khác hiện đang kiểm soát thread này"` (bot/app khác giữ quyền thread).
+   Cần **extension Pancake V2** (đăng nhập Facebook trong trình duyệt).
+3. **Extension Pancake** — đường `executeByExt` của app (`REPLY_INBOX_PHOTO`).
+
+**Không còn cơ chế gửi từng con** (đã bỏ gửi tuần tự và tầng giao diện “nhảy vào từng chat”).
+Gửi theo lượt: chỉnh **“Mỗi lượt: N tin — nghỉ N ms”** ngay trên panel (mặc định **5000 tin/lượt, nghỉ 0ms** —
+cả hai **đều chỉnh được và lưu lại, giữ qua F5**; số tin ≤ số/lượt thì gửi 1 lượt). Mỗi lượt bắn song song toàn bộ. Bấm
+**“⛶ Phóng to log”** / **“⛶ Phóng to”** (bảng LIST CÂU GỬI) để bung thành **cửa sổ lớn
+nổi trên trang** (không làm panel cao thêm) — cửa sổ **kéo tiêu đề để di chuyển**, **kéo góc dưới-phải
+để phóng to/thu nhỏ** (đúp chuột góc = về mặc định), vị trí + cỡ **lưu giữ qua F5**; bấm **“🗕 Thu nhỏ…”**
+hoặc **✕** trên tiêu đề cửa sổ để thu về đúng chỗ cũ trong panel. Nút **✕** trên tiêu đề panel để tắt
+hẳn panel — **F5** (hoặc **Alt+Shift+B**) để hiện lại.
+
+**Chống trùng tin (gửi đúng 1 lần/chat):** mỗi chat chỉ xuất hiện 1 lần trong danh sách gửi (tự loại
+dòng trùng id, chặn bấm đúp). Khi một kênh báo **“không rõ kết quả”** (lỗi mạng/timeout — tin có thể
+đã đi), script **dừng ngay**, không thử kênh khác và **không gửi thêm** — ghi `⚠` trong log để bạn biết.
+**Lỗi là lỗi**: tin báo ❌ (chắc chắn chưa gửi) chỉ bị báo trong log — **không gửi lại, không kiểm tra
+lại** — ưu tiên tốc độ.
+- **⚡ Gửi nhanh** (mặc định bật, ô cạnh thiết lập lượt): bắn API **không chờ server xác nhận** — xong là báo ✅ ngay.
+  Chat bị API từ chối RÕ thì tự **bù sang kênh chưa thử** (thường là Extension) trong nền (log có dòng bù);
+  thua tiếp thì sang kênh kế — **mỗi kênh đúng 1 lần**; không rõ kết quả thì bỏ — không gửi lại để tránh trùng.
+  `(#10)/(#551) …ngoài cửa sổ 24h…` **vẫn bù** — Extension cứu được (xem v1.46.0).
+- **Không đoán trước kênh bằng mốc idle (v1.45.0)**: trước đây ảnh chat idle>24h bị ép đi thẳng Ext
+  "khỏi bắn API chắc thua" — nhưng ngoài cửa sổ 24h thì Ext cũng dính `(#10)` (cùng chính sách) → mỗi
+  chat uổng ~3s trong hàng đợi Ext mà vẫn thua. Nay **cả text lẫn ảnh đều API-trước** (HAR: request gửi
+  tay có `content_id`+`attachment_id`+`content_url`), bắn song song, lỗi cửa sổ hiện rõ trong ~1s rồi
+  bỏ; dữ liệu idle sai (list cũ) thì API vẫn gửi được — không loại oan. Chỉ chat **đã thắng qua Ext
+  trong phiên** (hint) mới đi thẳng Ext; API bị chặn cấp page giữa lô `(#10) kiểm soát thread` thì chat
+  còn lại đi thẳng Socket/Ext.
+- **Cứu globalId (PSID)**: nếu WS/Ext không tìm ra PSID thì dùng ngay `from_psid` mà API đã trả sẵn trong dữ liệu
+  chat (khỏi dò tìm); Ext bị PSID rỗng thì bỏ qua cho nhanh; Socket/Ext đều thua rõ thì **API là cứu cánh cuối**
+  (chỉ chạy khi chắc chắn chưa gửi gì — không lo trùng).
+- **Gửi giống hệt request thật của app** (đã so khớp từng trường với curl thật): đủ `send_by_platform=web`,
+  `width`/`height` ảnh, đúng thứ tự trường, và body `contents/facebook` dạng JSON như app.
+- **Bỏ bước thừa**: ảnh ngoài cửa sổ 24h không bắn API trước nữa (chắc chắn #551) — đi thẳng Ext,
+  API chỉ là cứu cánh cuối; nhãn log bù đúng kênh thật (ảnh = Ext, chữ = Socket/Ext).
+- **Hết delay giữa 2 lần gửi**: PSID đã có trong dữ liệu → dùng ngay, khỏi chờ WS/Ext dò tìm (trước ngốn
+  vài giây/tin); dòng chat đủ threadId + pageId → khỏi tải lại conversation. Lô gửi vẫn song song toàn phần.
+- **Socket hết báo "không rõ" oan**: socket chết (frame chưa hề đi) hoặc server báo gửi thất bại
+  (markOptimisticMessageFailed) → THUA RÕ → tự bù Ext/API tiếp; chỉ "đã gửi nhưng không có ACK"
+  mới bị dừng chống trùng. Không còn con nào bị im lặng bỏ sót.
+- **API không bị cướp oan**: `#551` (chặn của TỪNG NGƯỜI — ngoài cửa sổ) chỉ bù cho chính chat đó,
+  không tước API cả lô nữa (chỉ rate limit/FB handover/thread-control mới chặn lô); chat thiếu mốc
+  thời gian → để API thử trước thay vì đoán bừa.
+- **Payload Ext đủ trường như app**: dòng chat giờ mang theo `thread_key`/tên khách/`updated_at` — payload
+  gửi qua Extension không còn thiếu `convId`/`customerName`/`conversationUpdatedTime` (nguyên nhân Ext hay
+  "không gửi được"); PSID chỉ lấy từ `from_psid` chính danh; server từ chối người nhận → kênh sau tự dò lại
+  PSID chính chủ qua WS/Ext.
+- **Bù Socket hết chậm**: Socket được "làm nóng" ngay từ lúc bắn lô (kết nối + đồng bộ chạy song song
+  các bắn API) — con cần bù Socket chỉ còn ~1–2s thay vì ~10s phí kết nối như trước.
+- **Socket nhanh hơn nữa**: dựng thẳng khung `/ls_req` gốc của app (label 46 + 21, id sinh đúng kiểu
+  app) và gọi `helper.publish` — bỏ hẳn bước chờ 1s trong `sendMessage` của app. Vẫn chờ ACK của
+  server để phân loại chắc/thiếu — không mất gì về độ chính xác.
+- **Full speed**: mặc định 5000 tin/lượt, nghỉ 0ms giữa lượt — lô gửi bung hết tốc độ như tool gửi
+  hàng loạt (không còn khoảng hãm nào trong đường gửi). Muốn hãm lại thì chỉnh 2 ô — vẫn lưu qua F5.
+- **Bù qua EXTENSION, nhanh như app (v1.44.0)**: API bị từ chối RÕ (lỗi kênh) thì app fallback **NGAY**
+  sang Extension (executeByExtOnce) — không chờ nhịp. Extension **tự resolve globalId đúng** (bằng chứng
+  `update_global_id` trong tinnhan.har) nên cứu được cả chat Socket thua (globalId ≠ PSID) lẫn chat FB
+  đang giữ nhịp sau bắn dồn (log 21:58 — Socket thua 30/30). Bù đúng 1 lần **qua Extension sau ~1.5s**;
+  Socket chỉ dùng khi extension chưa kết nối (và vẫn chờ nhịp 12s cho khung /ls_req). Bù thắng được ghi
+  nhớ kênh — lần gửi sau vào thẳng kênh đó. Vẫn đúng luật: tối đa 1 lần bù/chat, "maybe" tuyệt đối
+  không gửi thêm, chat đã xác nhận thành công không bao giờ gửi lại.
+- **Hết đuôi chờ 97s, hết bù lại kênh vừa thua (v1.45.0)**: delay bù **có hạn ≤4.5s** (trước đây dồn
+  1.5s + số-thứ-tự×0.5s → chat cuối chờ 97s); **không bù lại kênh vừa thua** (Ext vừa "không gửi được"
+  mà còn bù Ext = chắc thua lần 2); ảnh cũng API-trước. 🏁 chốt số lần bị chặn cửa sổ 24h.
+- **Sửa GỐC "gửi tay được mà script không gửi được" (v1.46.0)**: app gửi ngoài cửa sổ 24h được nhờ cờ
+  `is_record_ctx_7_days` (cửa sổ quảng cáo 7 ngày) — HAR chứng minh **11/13 lần gửi tay THÀNH CÔNG đều
+  mang cờ `true`**. Cờ bật khi `dr()` có `ad_clicks` — mà `ad_clicks` **chỉ có khi app TẢI CHAT**
+  (`GET …/conversations/{id}/messages?customer_id=…&user_view=true&is_new_api=true&separate_pos=true` —
+  HAR), **list chat KHÔNG có** → script gửi hàng loạt trước đây luôn thiếu cờ → API chặn oan
+  `"(#10)…ngoài khoảng thời gian…"` dù app gửi tay vẫn chạy. Nay script **nạp đúng request đó** cho
+  chat ngoài 24h (cache theo chat) rồi mới quyết cờ — vẫn nghiêm ngặt `dr()`: thiếu `ad_clicks` là
+  không bịa cờ. Và `(#10)/(#551)` **KHÔNG phải "mọi kênh đều thua"**: Extension cứu được (Thanh Binh —
+  bù THÀNH CÔNG qua Extension ngay sau `(#10)`, log 07:36) → **chuỗi bù = plan của app**:
+  `api → extension → socket`, mỗi kênh đúng 1 lần, 'maybe' dừng ngay, hết kênh thì nói "đã thử hết kênh".
+- **`global_id` THẬT + đúng thứ tự kênh của app (v1.47.0)**: tinnhan1.har chứng minh **3/3 khách có
+  `global_id` KHÁC PSID** (`61576542790011` vs psid `2747100…`) — trong khi đó script trước đây **đoán
+  `global_id` = `from_psid`** → Ext "không gửi được", Socket "server báo gửi thất bại" (đúng triệu chứng
+  log 08:19; chat "Võ Khánh" thắng là do id đoán trúng). Nay `resolveGlobalId` lấy **`global_id` thật
+  từ dữ liệu chat** (`customers[0].global_id` — nạp từ đúng request app gọi khi mở chat) → chạy đua
+  WS↔Ext → **`from_psid` chỉ là phương án cuối**, không cache phỏng đoán. Và **đúng plan của app**:
+  text ngoài cửa sổ 24h + không có cờ `dr()` → **Extension TRƯỚC** (`["extension","api","socket"]` —
+  HAR: gửi tay 3/3 chat không có POST /messages nào, thẳng Ext); ảnh vẫn API-trước. Sau gửi thành
+  công, script gọi đủ 3 request app vẫn gọi: `fill_admin_name` (per chat) + `check_inbox` +
+  `contents/touch` (per page, cuối lô) — file `post` + HAR.
+- **Gửi lô & gửi bù siêu tốc cho hàng chục nghìn tin (v1.50.0)**:
+  - **Không rơi `customerId`/`customers` khi tải danh sách qua API (`convApiRow` + `peekConv`)**: trước đây các dòng ngoài màn hình (58/69 chat trong log 09:22) mất `customers[0].id` nên `ensureConvCtx` bỏ qua → vừa mất cờ `is_record_ctx_7_days` (bị ép sang hàng đợi Ext), vừa mất `global_id` thật.
+  - **Xóa bẫy treo 30s ở `MqttHelper.findGlobalId` + đọc thẳng `threadMapping` 0ms + đúng 9 trường `findGlobalIdForConv`**: trong log 08:57–09:00, mỗi đợt lỗi cách nhau đúng 32s do `MqttHelper.findGlobalId` chờ timeout 30s (`b = 30000`) rồi rơi xuống `from_psid` sai; nay đọc thẳng cache `threadMapping`/`threadMappingStoreV2` (0ms) và giới hạn chờ WS tối đa 2.5s.
+  - **Bù tức thì (0.1s thay vì chờ 2–5s / 12s) + 6 luồng Extension / 4 luồng Socket song song + dừng ngay khi khách khóa nick (`1545041`/`#100`)**: không lặp 3 kênh vô ích cho tài khoản đã khóa/chặn page.
+- **Socket/Ext gửi LẦN LƯỢT từng chat (hàng đợi)**: gửi lô mà bắn Socket/Extension đồng loạt thì
+  hỏng hàng loạt (Extension trả "không gửi được", socket bị server "báo gửi thất bại") — đúng như
+  thực tế "chọn riêng 1 con thì chạy, chọn cả lô thì lỗi". Nên mọi bước Socket/Ext được xếp vào 1
+  hàng đợi: lệnh xong mới tới lệnh kế — giống hệt kịch bản gửi riêng từng con vốn chạy ngon. API vẫn
+  bắn song song full speed (fetch thuần không đụng Extension/Socket).
+- **Socket không còn 'không kết nối' oan**: socket được làm nóng ngay khi mở panel; nếu đang kết nối
+  dở thì kênh Socket chờ xong rồi gửi thay vì bỏ cuộc. Lỗi Extension giờ giữ nguyên lý do extension
+  trả về (log lộ đúng nguyên nhân thay vì chỉ 'không gửi được'). Token lấy từ cookie `jwt` như app.
+- **Payload Ext không bao giờ thiếu `convId`**: dòng list cũ/thiếu `thread_key` → tự dẫn xuất `t_` +
+  `thread_id` (đúng định dạng của app) hoặc nạp đầy đủ conversation; `conversationUpdatedTime` không
+  bao giờ là NaN — hai lý do hay khiến Extension từ chối trong khi gửi tay vẫn chạy.
+- **Gửi API y hệt 13 request gửi THẬT của app (`tinnhan.har` 2026-10-17)**: `POST .../messages`
+  KHÔNG kèm `access_token` trong URL (auth bằng cookie `jwt` như người thật) và body đúng thứ tự
+  `action → is_record_ctx_7_days (khi dr()) → message → [ảnh] → send_by_platform`. **Bản trước
+  bỏ hẳn `is_record_ctx_7_days` là SỢI** — đối chiếu HAR gửi thật: app luôn kèm cờ này khi dr()
+  đúng, 11/13 request thành công có cờ. THIẾU cờ = bị soi cửa sổ 24h gắt (#551) với **mọi chat
+  ngoài cửa sổ 24h** — đây là "lỗi không gửi được tin" triệt để đã tìm ra. Text luôn đi API-trước.
+- **Dữ liệu GIỮ QUA F5 (v1.43.0)**: câu gửi lưu `localStorage` kèm **bản dự phòng** (key hỏng/mất →
+  tự khôi phục, không mất câu đã soạn); **tick câu + ô nội dung đang gõ + nhật ký gửi** cũng được lưu
+  — F5 xong làm việc tiếp đúng chỗ cũ. Khởi động có dòng "💾 Đã nạp N câu · M chat đã lưu".
+  **Câu chỉ tự xóa khi lô có ít nhất 1 tin được bắn** (mỗi câu chỉ gửi 1 lần — chống gửi trùng);
+  lô fail toàn bộ → GIỮ NGUYÊN câu + log rõ "không mất dữ liệu".
+- **Gửi xong tự bỏ chọn**: sau lượt gửi, các đoạn chat đã đánh dấu tự được "Xóa" chọn (như bấm nút
+  Xóa) — sẵn sàng chọn lượt mới, và bấm chạy lại không bao giờ dính dấu cũ (chống gửi trùng).
+- **Text lẫn ảnh đều API-trước — hết vòng vo (v1.45.0)**: hint/dự đoán không ép chat vào Socket/Ext
+  (chậm, hàng đợi Extension xếp hàng) — gửi thẳng API cookie-auth như gửi tay (HAR 200 chứng minh, ảnh
+  có đủ `attachment_id`+`content_url`); chỉ chat đã thắng qua Ext trong phiên mới dùng thẳng Ext. Bù
+  cũng hết chậm: không dò PSID qua Extension khi kênh chỉ từ chối, không bù lại kênh vừa thua.
+- **Tự lọc tag "chốt"/"chặn" lúc gửi — 3 lớp bằng chứng (v1.40.0)**: trước khi bắn, script kiểm tra
+  tag cấm của TỪNG chat qua đủ 3 nguồn — (1) **tag hiển thị ngay trên dòng chat (DOM)** — mắt thấy gì
+  dùng nấy, tag "CHẶN" hiện trên dòng là bị loại cho dù dữ liệu nào khác hỏng; (2) dữ liệu app:
+  `filledTags` (app tự map id → tên tag) hoặc `tags` id + bảng tag trang
+  (`pageSettingTags` — shape `{[pageId]: defs}` lẫn mảng phẳng); (3) tải lại tag 1 lượt qua API lọc
+  sẵn theo id (id giữ dạng **số** như app — id chuỗi bị server bỏ qua). Và **chốt phút chót**: soi lại
+  tag/icon NGAY TRƯỚC khi bắn từng chat — tag gắn sau bước lọc vẫn bị chặn. Không kiểm tra được gì →
+  vẫn gửi (thiếu dữ liệu không được làm mất tin); log kèm tên tag đã khớp để đối chiếu. So khớp tên
+  nguyên từ, không phân biệt hoa/thường, chuẩn hóa Unicode: "CHẶN"/"chặn"/"Chặn tin"/"Huyền chốt" bị
+  loại; "Bình Chánh"/"Chánh"/"chanh" KHÔNG dính (không loại oan).
+- **Bỏ qua chat có icon điện thoại**: chat nào hiện icon 📞 (`phone-green` = `has_phone`, sale đang
+  chăm số) cũng bị loại khỏi lô — soi cả icon trên màn hình, dữ liệu live của app lẫn dòng đã lưu.
+  Log tách riêng từng nhóm: tag chốt/chặn 🧹 và icon điện thoại 📞.
+  Lọc tag CHẶT CHẼ: chỉ loại khi CHÍNH chat đó mang tag cấm trong dữ liệu trả về (server có lơ
+  filter vẫn không loại oan), so khớp "chốt"/"chặn" nguyên từ ("Bình Chánh"/"Chánh" không dính),
+  và log kèm tên tag đã khớp để đối chiếu.
+
+Tự động tăng tốc: sau lần đầu API bị `(#10)/(#551)…`, các chat còn lại **bỏ qua API** đi thẳng sang Socket;
+kênh gửi thành công được **ghi nhớ** (session) nên lần gửi sau vào thẳng kênh đó.
+Mỗi chat chỉ **tải/giải quyết 1 lần** cho mọi kênh dùng chung (conversation, threadId, globalId, bình luận);
+tìm globalId **chạy đua** WebSocket (`__MqttHelper__.findGlobalId`, có cache) ↔ Extension — ai xong trước dùng trước
+(đúng `concurrentlyGetGLobalId` của app); ảnh cho Extension upload song song bước tìm thread/globalId. Log từng dòng ghi rõ
+kênh: `— đã gửi`, `— qua Socket`, `— qua Extension`.
+
+**Gửi kèm ảnh (📷 Chọn ảnh / Ctrl+V):** chọn file ảnh, hoặc copy ảnh (screenshot, ảnh trên web…)
+rồi **Ctrl+V** dán thẳng vào trang — ảnh dán không có tên file sẽ tự đặt `clipboard.png`. Đúng chuỗi app dùng khi gửi ảnh — upload file lên `POST /v1/contents`
+(1 lần) → gắn attachment Facebook qua `POST /v1/pages/{p}/contents/facebook` (1 lần/page) →
+gửi qua **API** (`attachment_id` + `content_url`) hoặc **Extension** (`REPLY_INBOX_PHOTO`,
+`attachmentType:"PHOTO"`). Kênh gửi ảnh là **API → Extension** (Socket không hỗ trợ ảnh).
+Không tải được ảnh thì **HỦY gửi** — không bao giờ gửi thiếu ảnh.
+Gắn attachment đúng như app: `POST /v1/pages/{p}/contents/facebook` (`content_ids`, `is_reusable=true` cho
+đường API) — riêng đường **Extension** upload attachment **mới** với `is_reusable=false` y như `executeByExtOnce`
+(app không dùng lại attachment tái sử dụng cho Ext — dùng lại sẽ bị từ chối "Extension không gửi được").
+Kèm cờ `is_record_ctx_7_days` khi đủ điều kiện cửa sổ quảng cáo 7 ngày của app (`dr()`: khách ≥1 ngày không
+tương tác + page bật `ctx_7_days_enabled` + khách có `ad_clicks` ≤7 ngày) — cờ này cho phép gửi ngoài cửa sổ
+24h với khách từ quảng cáo, đúng việc gửi tay trong app làm được (đối chiếu `buildRequestBody` trong `_app`:
+`(0,ev.dr)()&&(j.is_record_ctx_7_days=!0)`). **Nghiêm ngặt đúng dr()**: thiếu dữ liệu `ad_clicks` thì KHÔNG
+bật cờ (không bịa thêm — app cũng vậy; **thiếu `ad_clicks` là không bật**, nhưng nay script tự nạp
+`ad_clicks` từ request app dùng khi tải chat — v1.46.0 — nên cờ đúng như app, hết bỏ sót oan). Chat
+ngoài 24h mà không thuộc cửa sổ quảng cáo thì API từ chối `"(#551)"/"(#10)…"` — **vẫn bù sang kênh khác**
+(Extension cứu được — Thanh Binh, log 07:36), mỗi kênh đúng 1 lần. Kết quả "đã gửi" ở chế độ
+nhanh = request **đã bắn**, xác nhận đến nơi xử lý trong nền — server từ chối là **báo rõ + tự bù
+qua kênh chưa thử**, không bao giờ "báo gửi" rồi im lặng.
+**Học `globalUserId` đúng từ extension & tăng tốc lô lớn 1.500–5.000 tin (v1.38.0 → v1.51.0)**:
+- **Bền vững hóa `global_id` qua F5 (`localStorage` + IndexedDB `"fb_meta_data"`)**: nạp toàn bộ bảng `global_user_ids` & `global_user_ids_2` từ IndexedDB `"fb_meta_data"` của Pancake và `localStorage` (`ssb_global_id_cache_v1`) vào RAM ngay khi chạy (0ms).
+- **Vá lỗi nội tại `window.__MqttHelper__` của Pancake (`patchMqttHelper`)**: sửa lỗi `triggerLoadMoreThreads(e, t)` trong bundle (`@822420`) truyền nhầm `t` (Object) thay vì `t.step` (Array) vào `findBlockAction` khiến mỗi trang `loadThread` (~15 chat) bị ngủ cứng hết timeout 5.000ms (5s/trang = 3 chat/s, mất 59s cho 12 trang đầu ở log `10:15:26→10:16:25`); đồng thời nâng `maxLoadThreadCount` từ 10 lên 500 trang (~7.500 chat) và bỏ `await sleep(1000)` trong `findGlobalId` khi socket đã mở → tốc độ nạp `threadMappingStoreV2` qua WebSocket tăng từ 5.000ms/trang lên ~80ms/trang (nhanh gấp 60x).
+- **Tách cổng chuẩn bị HTTP (`extPrepLane = 18`) khỏi cổng bắn Extension (`extSendLane = 10`)**: chuẩn bị sẵn `uploadPhotoForPage` (`reusable=false`) và `resolveGlobalId` ở phía trước để khi vào `adapter.send` không mất thời gian chờ HTTP.
+- **`photoOutWin` & điều tiết `sendBatch` (`BATCH_POOL_SIZE = 24`)**: lô ảnh ngoài cửa sổ 24h (`!isRecordCtx7Days`) đi thẳng vào Extension thay vì bắn 1.500 request `POST /messages` biết chắc bị `(#551)` làm nghẽn mạng Chrome 60s đầu.
+- **Bộ tổng hợp số tin đã gửi thành công thật sự (v1.52.0) & bản lưu dự phòng v1.51.0**:
+  - Thanh **`#ssb-summary`** nằm ngay dưới thanh tiến trình (trên khung LOG), đếm **real-time** số tin đã được server/Extension/Socket **xác nhận đến nơi thật sự** (không đếm nhầm tin mới bắn `fired` chưa xác nhận), tách rõ từng kênh (`[API: X · Ext: Y · Socket: Z]`), số tin đang xử lý nền (`⏳ Đang xử lý`), số tin lỗi (`❌ Lỗi`), không rõ (`⚠ Không rõ`), bỏ qua do tag/SĐT (`🧹 Bỏ qua`), và thời gian chạy (`⏱ Ns`). Khi toàn bộ tin bắn nền & bù ngầm hoàn tất (`pending === 0`), tự động chốt trạng thái `🏁 TỔNG HỢP` (lưu giữ qua F5) và in dòng `📊 TỔNG HỢP CHỐT LƯỢT GỬI: ✅ Đã gửi thành công X/Y tin (%) ...` vào LOG.
+  - Bản copy nguyên trạng trước khi thêm tổng hợp được lưu tại **`scripts/pancake-send-by-snippet.v1.51.0-backup.user.js`** để có thể quay lại dùng hoặc sửa bất cứ lúc nào nếu thấy không cần.
+- **🧩 Câu nhanh NHIỀU ĐOẠN gửi lần lượt theo thứ tự (v1.110.0)**: câu lệnh Pancake có thể gồm nhiều đoạn (`messages[]` — ví dụ đoạn 1 là ảnh, đoạn 2 là 1 câu, đoạn 3 là 1 câu khác). Trước đây script chỉ lấy `messages[0]` nên mất các đoạn sau. Nay `normalizeQuickReply` giữ nguyên từng đoạn (`parts`), khâu chuẩn bị đối chiếu + bind fbId (content_id) **từng đoạn theo từng page**, và khi gửi thì mỗi khách nhận **từng đoạn lần lượt đúng thứ tự của câu lệnh** (trong 1 đoạn có cả ảnh lẫn chữ vẫn ảnh trước → chữ sau như v1.107). Chốt chống trùng: lỗi ngay đoạn đầu (chưa gì đến nơi) thì xử lý kênh/bù như tin thường; đã có đoạn đến nơi rồi mới lỗi thì chốt ⚠ và **không bắn lại từ đầu** để tránh trùng đoạn đã đi. Ô chọn câu và log bắt câu hiện thêm số đoạn ("· 3 đoạn").
+- **🎯 Bắt câu nhanh bằng Alt+Q như gửi tay (v1.109.0)**: thêm chế độ bắt câu đúng thao tác gửi tay của người dùng — bấm nút **🎯 Bắt câu (Alt+Q)** trong panel (hoặc nhấn **Alt+Q** ở bất cứ đâu) thì BOTFAKE hiện băng rôn tím và chờ; người dùng gõ `/` trong khung chat Pancake như bình thường rồi **click vào 1 câu** trong popup. BOTFAKE chặn click ở pha bắt (capture) **trước khi app kịp chèn câu vào composer** → câu không bị gửi/chèn vào chat đang mở, ký tự lệnh còn sót (`/` hoặc đúng shortcut) được dọn khỏi composer. Mã câu đọc từ `.shortcut-tag` trong popup `#qr_autocomplete .suggestion-element` (đúng selector script đang chạy thật của người dùng), rồi đối chiếu với dữ liệu câu nhanh của đúng page đó để lấy đủ **chữ + toàn bộ ảnh (content_id)** và đặt làm câu gửi cho lượt hàng loạt — y như gửi bằng câu lệnh, kể cả khôi phục qua F5 như lựa chọn ở ô dropdown. **Alt+Q/Esc** hủy bắt, tự tắt sau 2 phút nếu không chọn.
+- **⚡ Gửi theo CÂU NHANH Pancake như gửi tay (v1.108.0)**: người dùng cho biết gửi ảnh bình thường chỉ dùng 1 câu lệnh "/" chọn đúng câu (đã gồm chữ + ảnh) là xong. Kiểm chứng `guianh1.har` trên main: câu nhanh chứa 2 ảnh có sẵn `content_ids` → POST `/contents/facebook` bind ra fb_ids chỉ **~30ms** (2 lượt đo 30,8ms/29,4ms), và tin được ghi vào thread **ảnh 03:26:32 → chữ 03:26:33** (ảnh trước, chữ sát sau — nhờ cơ chế ảnh-trước-chữ-sau của v1.107). Ngược lại ảnh chọn tay của BOTFAKE chỉ có URL (upload `/v1/contents` không trả content_id) nên mỗi chat phải bind bằng `urls` — server kéo/xử lý lại file mất **trung bình 1,47s/chat** (đo 155 lượt trong `guicau.har`). Thay đổi: (1) Panel có thêm **⚡ Nạp câu nhanh** + ô chọn câu — nạp từ cache câu nhanh chính chủ của app (`window.__quickReplyCacheManager__.all(pageId)`, bundle @845300) hoặc endpoint settings đúng URL app tự dựng (`load_quick_replies_only=true`, @341733); chọn 1 câu thì chữ tự điền vào ô câu, ảnh của câu gắn cho cả lượt, lựa chọn **lưu qua F5**. (2) Bind **nhiều ảnh trong 1 lượt** bằng `content_ids` (đúng hàm N của app @882612 + đúng HAR: 2 content_ids → 2 fb_ids) cho cả API/Socket/Extension; fbIds đa ảnh giữ riêng ở `ctx.nonReusableFbIds`. (3) Câu nhanh là dữ liệu **từng page**: lượt gửi nhiều page thì page nào cũng được đối chiếu đúng shortcut đó; page thiếu câu nhanh sẽ bị bỏ qua kèm log rõ từng chat — không gửi chữ trơ thiếu ảnh. Ảnh chọn tay giữ nguyên như cũ (chọn ảnh tay sẽ tự bỏ chọn câu nhanh).
+- **🖼➡💬 Tin ảnh+chữ đi theo thứ tự "ẢNH TRƯỚC → CHỮ SAU" (v1.107.0)**: người dùng yêu cầu ảnh phải tới trước chữ (hoặc sát nhau), không chấp nhận chữ trước ảnh sau. Đối chiếu bundle: app thật cũng gửi 2 task rời trong 1 khung `/ls_req` (task ảnh `send_type:3` trước, task chữ `send_type:1` sau) — nhưng FB xử lý task chữ tức thì còn task ảnh qua khâu xử lý file nên tải lớn là ảnh trễ cả chục phút; cộng thêm cơ chế "thăm dò bằng chữ trước" ở vùng khách chết (bắn chữ dò trước, ảnh theo sau) càng làm chữ luôn đi trước. Nay ở kênh Socket, tin có cả ảnh lẫn chữ đi theo luồng riêng: **bắn riêng gói ẢNH trước và chờ FB xác nhận ảnh đã vào thread, mới bắn gói CHỮ ngay sau đó** (chênh ~1 vòng ACK) — khách luôn thấy ảnh trước, chữ sát sau. Hệ quả an toàn: ảnh bị từ chối → thử lại 1 lần bằng fbId mới tinh (phân biệt fbId lỗi với khách chết), vẫn thua mới kết luận như ca từ chối cũ và để kênh khác thử bằng nguyên gói — **không còn chữ mồ côi**; ảnh đã vào mà chữ trục trặc → bù **chỉ phần chữ** bằng Extension, không được thì chốt ⚠ chứ không bắn lại cả gói (chống trùng ảnh). Bỏ hẳn cơ chế thăm dò chữ-trước (`inBlockedCluster = false`). Tin chỉ-chữ và chỉ-ảnh giữ nguyên.
+- **🖼 Trị "ảnh đi sau chữ cả chục phút" ở lượt gửi ảnh lớn (v1.106.0)**: log user 19.335/27.793 gửi được trong 758s, cuối log có ca "đã gửi được chữ nhưng FB từ chối ảnh đính kèm". Đo từ `guicau.har`: upload ảnh POST `/contents/facebook` **trung bình 1,47s/lượt** (p50 1,30s), mỗi chat có ảnh bắt buộc 1 upload riêng (`is_reusable=false`) → làn upload là trần cứng. Ba thay đổi: (1) **bỏ upload ảnh TRƯỚC ở pipeline nạp nền** — pipeline chạy trước làn bắn rất xa, fbId tạo xong chờ nhiều phút mới bắn thì bị FB từ chối riêng phần ảnh (chữ vẫn đi) → phải cứu lại bằng upload mới + bắn riêng ảnh khi ACK nền về (về muộn khi tải lớn) → ảnh tới sau chữ cả chục phút; nay upload **đúng lúc bắn** (song song với dò global_id trong `prepareDirectCtx`, fbId luôn tươi, tổng số upload không đổi). (2) Khung có ảnh bị từ chối hẳn ở vùng khách chết (reject streak ≥3): không đốt thêm 1 upload mới ~1,5s để bắn lại Socket — kết luận cuối giữ nguyên, vùng khách sống và tin chữ vẫn bắn lại chống burst-reject như cũ. (3) Làn upload **96 → 128**.
+- **⏹ Sửa "bấm Dừng mà nút Chạy không trở lại" (v1.105.0)**: nút Dừng chỉ ngăn việc MỚI — các request đang bay trước đó phải chốt xong lượt mới khép và thả nút Chạy; nhưng nhiều fetch trên đường gửi (`sendViaApi`, `getFullConversation`, upload ảnh, gửi bình luận…) là **fetch trần không hạn chót**: 1 kết nối bị server treo (hay gặp khi Pancake nghẽn) là worker treo vĩnh viễn, lượt gửi không bao giờ kết thúc. Nay mọi fetch trên đường gửi đi qua `fetchWithTimeout` (hạn 15s, khớp `fetchJson` của khâu tải; quá hạn ở API được xếp loại "không rõ" — vẫn chống trùng như lỗi mạng). Nút Chạy cũng hiện rõ trạng thái `⏳ Đang gửi…` / `⏳ Đang dừng…` thay vì chỉ mờ đi. Đồng thời tiêu đề panel hiện **đúng version thật** (`APP_VERSION`) thay cho chữ cứng "v1.60.0" từ đời cũ.
+- **🗑 Gỡ khâu "chuẩn bị ngay khi tải danh sách" (v1.104.0)**: theo đánh giá của người dùng là vô dụng — `startPrepAfterLoad` (v1.92–v1.95, chạy nền tới 256 luồng dò mã cho toàn bộ danh sách sau mỗi lần tải) bị gỡ hẳn cùng `prepConvForSend` (chỉ còn nó dùng). Tải xong là xong; lúc bấm gửi, làn bắn tự nạp ngữ cảnh/mã như bản 1.80 (prefetch song song lúc bắn vẫn giữ nguyên — phần đó thuộc chính thiết kế 1.80, không chặn ai), mã tra được vẫn lưu kho bền qua `saveCache` cho các lượt sau.
+- **↩ (#551) thử lại như v1.80 + ⚡ Socket-first cho chat đã có mã (v1.103.0)**: theo yêu cầu người dùng: (1) **gỡ cơ chế "bỏ qua thẳng" của v1.99** — API trả `(#551)/(#10)` thì quay về đúng v1.80: vẫn bù Extension/Socket qua kênh chưa thử (có ca #551 gửi lại vẫn được), `windowSkipped` xóa sạch khỏi code; bộ tải danh sách nhanh (đa luồng + điều tốc 429 của v1.85) giữ nguyên không đụng. (2) **Đòn bẩy tốc độ tuyệt đối mà không bỏ sót ai**: chat trong cửa sổ 24h nhưng **đã có global_id thật trong cache + WebSocket của page đang sống** → bắn **Socket trước** thay vì API (publish thẳng qua Facebook, bắn-nhả không chờ ACK — trần tốc độ cao hơn hẳn làn HTTP API 48 luồng qua server Pancake); Socket thua hẳn vẫn đi tiếp Extension → API đủ 3 kênh; chat chưa có mã vẫn đi API như cũ (API không cần mã). Mọi chat vẫn được thử đủ kênh trước khi kết luận — không đánh đổi độ phủ lấy tốc độ.
+- **🔍 Đối chiếu từng dòng với v1.80.0 (commit `515896c`) và đưa đường gửi về đúng số gốc (v1.102.0)**: kiểm chứng bằng file thật (bản người dùng dán khớp 100% với git): `sendViaApi`/`sendViaExtension`/`sendViaSocket`/`prepareDirectCtx` **giống hệt** v1.80; `sendOne` chỉ khác ở các nhánh rẻ (bỏ qua (#551), cứu hộ API-trước cho chat chưa có mã, cờ gom bù đã tắt). Khác biệt thật còn lại trên đường nóng: (1) **5 hằng số bị nới ở v1.87/v1.88** — làn API 48→64, upload ảnh 96→128, làn Extension 6→12, làn nhanh 192→256, worker nền Ext 48→64, prefetch 96→128 — nay **trả về đúng số v1.80**; (2) **MAKE_MESSENGER_LINK bị bật ở mọi quy mô từ v1.90**: mỗi chat chưa có mã trong lô lớn đốt thêm 1 lệnh Extension tới 5s trong làn dò mã (24 làn dùng chung) trước khi kết luận — nay quay về cổng của v1.80 (lô lớn chốt luôn khi Extension xác nhận không có mã; ML chỉ giữ cho lô nhỏ ≤50). Giữ nguyên ngoài đường bắn: tải v1.85, chuẩn bị sau tải, 2 tab, chống dò trùng mã, bỏ qua thẳng (#551)/(#10).
+- **⏮ Quay về cơ chế gửi của bản nhanh v1.80/v1.89 (v1.101.0)**: sau nhiều vòng vá trên kiến trúc gom bù tập trung (v1.91–v1.100) mà tốc độ vẫn kém bản cũ đo thật (v1.80: 143 tin/s; v1.89: ~101 tin/s), bản này **gỡ các lớp điều phối thêm vào sau v1.89 khỏi đường bắn**: (1) không bật `buBatchMode` nữa → `sendOne` tự đi tiếp kênh ngay khi kênh đầu thua hẳn (không dừng chờ đợt bù), `scheduleBuRetry` bù nền ngay khi thua, chạy chồng lên đợt chính; (2) pipeline chuẩn bị lúc bắn quay về prefetch kiểu v1.80 (`ensureConvCtx` GET /messages 128 luồng + upload ảnh trước), bỏ `prepConvForSend`/`prepCtx` (ngữ cảnh "đã chuẩn bị" nửa vời khiến làn gửi không dò lại rồi dồn việc vào đợt bù); (3) bỏ worker bù xen + pha chờ rút cạn cuối lượt. **Giữ nguyên** các tính năng không nằm trên đường bắn hoặc đã được chốt riêng: bộ tải danh sách v1.85, chuẩn bị sau tải (v1.92), chạy 2 tab (v1.93), dò `MAKE_MESSENGER_LINK` (v1.90), chống dò trùng global_id (v1.97), **bỏ qua thẳng (#551)/(#10)** (v1.99), chống trùng đầy đủ.
+- **🧺 Bù XEN — hết cảnh đợt bù nối đuôi làm chậm cả lượt (v1.100.0)**: đối chiếu với bản nhanh v1.89 (đo ~101 tin/s) thấy 2 lỗi cấu trúc làm bản v1.91–v1.99 chậm hơn: (1) đợt bù bị **nối tiếp** sau đợt chính — đợt chính bắn xong còn chờ xác nhận Socket tối đa 180s rồi mới bù nối tiếp qua làn Extension 12 luồng, tổng thời gian bị cộng dồn thay vì chồng lấn như bản cũ cho bù chạy nền; (2) từ v1.98 hàng đợi bù phình to (mọi ca thua phát đầu đều vào). Nay 32 worker bù **túc trực rút hàng đợi ngay trong lúc đợt chính đang bắn** (ca thua hẳn là được bù ngay, mỗi kênh vẫn đúng 1 lần theo sổ `buRetryDone`, chống trùng nguyên vẹn: `deliveredIds` + chờ-riêng-từng-chat còn đợi ACK Socket tối đa 90s ngay trong `runBuBatchItem`); đợt chính xong chỉ chờ hàng đợi rút cạn → tổng thời gian quay về ≈ max(đợt chính, bù). Đồng thời pipeline chuẩn bị nền lúc bắn giảm 256→128 luồng cho bớt tranh tài nguyên với làn bắn. Giữ nguyên: chốt kênh lượt đầu (v1.98), bỏ qua thẳng (#551)/(#10) (v1.99), `buPhaseActive` chặn TỔNG HỢP chốt sớm (v1.95).
+- **⏭ (#551)/(#10) → BỎ QUA THẲNG (v1.99.0)**: theo yêu cầu người dùng (đối chiếu `guikhachcu.har` — lớp khách cũ này `global_id` trống ngay trong dữ liệu Pancake, `can_inbox` vẫn `true` nhưng Facebook không cho gửi lúc này): API cứ trả `(#551) Người này hiện không có mặt` / `(#10)…ngoài khoảng thời gian cho phép…` là **dừng ngay tại chỗ** — không đi tiếp kênh khác, không vào đợt bù tập trung. Áp dụng ở cả 3 đường: vòng kênh của `sendOne` (cờ `windowSkipped`), đường bắn-nhả `fireApiAndWatch` và nhánh gửi thẳng. Ca bị bỏ qua tính vào nhóm **🧹 Bỏ qua** trong tổng hợp (không tính là lỗi ❌), log riêng dạng `⏭ … — BỎ QUA THẲNG (không thử kênh khác)`; cuối lượt có dòng `🚫 N ca Facebook báo không có mặt/ngoài giờ (#551)/(#10) — đã bỏ qua thẳng`. (Thay cho cơ chế cũ "API (#551)/(#10) → bù Extension/Socket".)
+- **🎯 Chốt kênh lượt đầu — đợt chính mỗi chat chỉ bắn đúng 1 kênh (v1.98.0)**: trả lời yêu cầu "gửi đúng kênh ngay lượt đầu". Với khách khỏe, bot vốn đã bắn đúng kênh phát đầu nhờ phân loại lúc chuẩn bị (có mã thật + Socket sẵn sàng → Socket; ngoài 24h → Extension/API theo cờ quảng cáo `dr()`; kênh từng thắng với khách đó được `channelHints` ghi nhớ ưu tiên) — cảnh "đi lại 3 kênh" chỉ xảy ra ở đuôi chat chết, khi kênh đầu thua hẳn rồi đợt chính tự đi tiếp kênh 2/3 ngay tại chỗ. Nay trong lượt gửi (`buBatchMode`), vòng lặp kênh của `sendOne` **dừng ngay sau lần thử đầu tiên thua hẳn** (các nhánh dừng sẵn có giữ nguyên: `maybe` → dừng chống trùng, khách không nhận → dừng, token hỏng → dừng); kết quả mang cờ `firstShotFailed` và `sendOneAndLog` đưa thẳng vào **đợt bù tập trung** (không cần khớp mẫu lỗi "đáng bù" như trước), nơi các kênh còn lại được thử mỗi kênh đúng 1 lần. Hiệu quả: đợt chính thành đúng 1 phát/khách theo phân loại — nhanh và gọn; việc thử lại dồn hết vào đợt bù đã có. Giữ nguyên chống trùng, bù tối đa 1 lần/kênh, `sockFiredPending`, `deliveredIds`.
+- **🐌 Vá chậm sau bản gửi-ngay: chống dò trùng + pipeline nền chỉ dò nhẹ (v1.97.0)**: lượt đo thật 27.803 tin/827s (~34 tin/s, Ext gánh 2.526 tin, 8.313 lỗi) cho thấy 2 nguồn lãng phí do chính cơ chế lai: (1) pipeline chuẩn bị nền và làn gửi **cùng dò global_id cho cùng 1 chat** — đốt đôi công và tranh nhau làn Extension (kênh chậm nhất, 12 luồng). Nay `resolveGlobalId` có sổ dò-đang-chạy (`gidResolveInflight`): chat nào đang được dò thì nơi tới sau dùng chung kết quả, không dò lại (đợt bù ép dò lại bằng forceFind thì không dùng chung). (2) Pipeline nền lúc đang bắn chuyển sang **dò nhẹ** (`prepLight`: chỉ cache + WebSocket, bỏ qua hỏi Extension và MAKE_MESSENGER_LINK) — việc nặng để làn gửi/đợt bù lo đúng ca cần; chuẩn bị sau tải vẫn dò đầy đủ như cũ vì lúc đó không có làn bắn tranh tài nguyên. Giữ nguyên mọi hàng rào an toàn và đợt bù tập trung.
+- **🚀 Gửi ngay kiểu lai — bỏ rào chắn chờ chuẩn bị lúc bấm gửi (v1.96.0)**: theo lựa chọn của người dùng. Phân tích từ log: thủ phạm tin lẻ tẻ ngày trước là bù rải theo timer (đã xóa ở v1.91 bằng đợt bù tập trung — không phụ thuộc rào chắn), còn phần tra mã nặng đã chuyển về lúc tải danh sách từ v1.92 (log 23,3k: chuẩn bị sau tải xong ~3,5 phút trong lúc người dùng soạn câu); rào chắn ở sendBatch chỉ còn gây chờ chết 1–2 phút ngay khi bấm gửi (log 20:45:51→20:47:07 mới qua 12k/23,3k) mà lợi ích thêm không đáng. Nay sendBatch bỏ `await` khâu chuẩn bị: **bấm gửi là bắn ngay** bằng kho mã đã ấm; chuẩn bị quay lại dạng pipeline chạy trước ở nền (256 luồng, cùng thứ tự với làn bắn — cơ chế của bản nhanh v1.70/v1.80 từng đo 143 tin/s), `prepCtxById` chỉ gán sau khi từng chat chuẩn bị xong hẳn nên làn bắn hoặc dùng trọn vẹn hoặc tự xử như bản nhanh, không chờ, không đụng ngữ cảnh dở; pipeline tự dừng khi có lượt gửi mới (`prepRun !== runSeq`) hoặc bấm dừng. Giữ nguyên: chuẩn bị sau tải (v1.92), chuẩn bị chia tầng + prepMode (v1.94), đợt bù tập trung + cờ chặn chốt tổng hợp sớm (v1.91/v1.95), toàn bộ hàng rào chống trùng.
+- **🔧 Sửa 3 lỗi lộ ra từ log chạy thật 28,5k/23,3k + tăng luồng chuẩn bị (v1.95.0)**: (1) Log 20:27 báo `Chuẩn bị sau tải XONG: 1462 chat` trong khi thật ra bị ngắt ở 1.462/28.555 vì người dùng bấm gửi — nay báo đúng `⏸ tạm dừng ở x/y` khi chưa chạy hết (chỉ "XONG" khi đủ số). (2) Lượt 36 chat: dòng `📊 TỔNG HỢP CHỐT` hiện trước cả dòng bù thành công tạo ra con số 36/36 — thêm cờ `buPhaseActive` chặn chốt tổng hợp trong suốt đợt bù tập trung (cả 2 chỗ tính `isDoneAll`), số liệu chỉ chốt sau khi bù xong hẳn. (3) Hạn chót chuẩn bị 120s của v1.94 cắt hơi sớm khi máy đang chạy nhanh đều (log 23,3k: đầu 1.000–2.000 chat/s rồi đuôi thiếu mã ~70–150 chat/s) — nay hạn chót **tự gia hạn** mỗi khi tốc độ cửa sổ gần nhất ≥60 chat/s, chỉ cắt khi thật sự ì vì đuôi thiếu mã. Đồng thời tăng luồng cả 2 khâu chuẩn bị 128→256 (phần lớn thời gian là chờ dò mã qua WebSocket/Extension nên an toàn; làn Extension vẫn là van điều tiết thật). Số đo đối chứng trong log: chuẩn bị bản cũ ~15 chat/s (28.553 chat/10 phút chưa xong, phải bỏ ngang) → v1.94 ~110 chat/s sau tải (23.320 chat/3,5 phút) và ~150–2.000 chat/s trước khi bắn tùy đoạn.
+- **⚡ Chuẩn bị chia tầng — hết cảnh chờ cả tiếng ở 100k (v1.94.0)**: khâu chuẩn bị cũ (v1.91/1.92) bị chậm ở quy mô 100.000 vì 2 lỗi thiết kế: (1) gọi GET /messages nạp dữ liệu cho **từng chat** — 100k request nặng tự gây nghẽn/429 lên Pancake dù phần lớn chat mã đã có sẵn trong kho; (2) đốt MAKE_MESSENGER_LINK (tới 5s/chat) cho mọi chat thiếu mã ngay ở khâu chuẩn bị. Nay chuẩn bị chạy qua `prepConvForSend` dùng chung cho cả sau-tải lẫn trước-khi-bắn: **có sẵn global_id trong RAM/kho → điền thẳng 0ms không gọi server** (đúng fast-path của sendOne, đếm riêng "có mã sẵn"); chỉ chat thật sự thiếu mới dò bằng `prepareDirectCtx` ở chế độ `prepMode` — `resolveGlobalId` thấy `ctx.prepMode` thì **bỏ qua MAKE_MESSENGER_LINK** (đường cứu chậm đó dời về đợt bù tập trung, nơi số chat ít), và bỏ hẳn `ensureConvCtx` ép nạp từng chat. Pool chuẩn bị 96→128 (không còn bão GET Pancake nên an toàn). Riêng khâu chuẩn bị **trước khi bắn** có **hạn chót 120 giây**: quá hạn, số chat còn lại để đợt bắn tự xử như bản nhanh v1.80 (log ghi rõ `⏭`), không bao giờ bắt người dùng chờ chuẩn bị xong 100%. Chuẩn bị sau tải vẫn chạy nền không hạn chót (không chặn ai) nhưng cũng dùng đường chia tầng nên nhanh hơn nhiều lần; log cả 2 khâu đều tách bạch "có mã sẵn · tra thêm · chưa có mã".
+- **🪟 Chạy 2 tab song song KHÔNG dính vào nhau (v1.93.0)**: rà soát toàn bộ điểm dùng chung giữa các tab và vá tận gốc cho kịch bản "2 tab — 2 danh sách khách khác nhau — 2 câu khác nhau — ấn gửi cùng lúc". (a) Phần cốt lõi vốn đã riêng: danh sách đã chọn, câu đang gửi, tiến độ, khóa chống trùng đều nằm trong RAM từng tab → tin tab nào đi đúng danh sách + đúng câu của tab đó. (b) Kho câu đã lưu dùng chung trước đây bị ghi đè mù bằng bản RAM của tab đang lưu → tab này gửi xong có thể xóa mất câu tab kia vừa tạo, hoặc hồi sinh câu tab kia đã tiêu thụ. Nay `persistSavedLists` **hợp nhất khi ghi**: giữ nguyên câu của tab khác, câu trùng id lấy bản sửa mới hơn (`updatedAt` đóng dấu ở tạo/sửa câu), và mọi lần xóa tay/tiêu thụ sau gửi đều ghi **tombstone** (`ssb_saved_lists_gone_v1`, lọc cả lúc nạp) để không tab nào hồi sinh được câu đã mất; thêm listener `storage` để tab đang mở tự đồng bộ danh sách câu khi tab kia thay đổi (đang gửi thì không ai được sửa giữa chừng). (c) Trạng thái gõ dở (tick câu + ô nội dung), nhật ký và bảng TỔNG HỢP được tách khóa theo từng tab (`TAB_ID` trong sessionStorage — khác nhau giữa các tab, vẫn giữ nguyên qua F5 cùng tab; đọc dự phòng khóa cũ 1 lần) → F5 tab nào chỉ khôi phục đúng việc dở của tab đó. (d) Kho global_id hợp nhất khi ghi (`flushPersistentGids` gộp bản đang lưu với RAM) — không tab nào ghi đè mất mã tab khác vừa tra. (e) Heartbeat `ssb_sending_hb_v1`: bấm gửi mà phát hiện tab khác đang gửi thì log cảnh báo rõ "tin không lẫn nhau, nhưng chung tài khoản nên có thể chậm/dễ 429 hơn" — chỉ cảnh báo, không chặn.
+- **🧰 Chuẩn bị ngay khi tải danh sách (v1.92.0)**: theo yêu cầu "khi tải danh sách hãy thực hiện chuẩn bị luôn" — ngay khi `scanFullList` kết thúc (gắn ở khối `finally` nên phủ cả 2 đường tải API/quét giao diện và cả trường hợp dừng giữa chừng dùng số đã tải; KHÔNG đụng gì vào cơ chế crawl v1.85 đã chốt tốc độ), script tự chạy `startPrepAfterLoad`: `warmUpSockets` + `prepareDirectCtx` (không ảnh — lúc tải chưa chọn ảnh) cho toàn bộ `state.allRows`, 96 luồng chạy nền, có dòng tiến độ `🧰 Chuẩn bị sau tải: x/y`. global_id tra được lưu vào kho bền sẵn có (localStorage + IndexedDB) nên sống qua F5 và qua các lượt gửi sau; chat đã chuẩn bị trong phiên được nhớ (`loadPreppedIds`) để tải lại không làm lại từ đầu. Phiên chuẩn bị tự hủy khi tải lại danh sách (`loadPrepSeq`), và nhường ngay khi đang tải lại/đang gửi (phần còn lại do khâu chuẩn bị lúc gửi của v1.91 lo — lúc đó gần như chỉ chạm cache 0ms). Nhờ vậy quy trình mới: bấm ⚡ Tải danh sách → máy tự chuẩn bị trong lúc người dùng chọn câu/soạn → bấm gửi là vào thẳng đợt bắn 1 lượt + bù tập trung như v1.91.
+- **🧰 Gửi 1 lượt gọn: chuẩn bị hết → bắn 1 lượt → bù 1 đợt tập trung (v1.91.0)**: theo yêu cầu hết cảnh "gửi xong bù nhỏ giọt lẻ tẻ" — trước đây chat sẵn thì bắn ngay, chat thiếu mã/kênh dự phòng thì bù rải theo timer suốt nhiều phút sau. Nay mỗi lượt gửi chạy đúng 3 giai đoạn: (1) **CHUẨN BỊ** toàn bộ danh sách trước khi bắn tin đầu tiên — nạp ngữ cảnh + tra global_id bằng mọi đường (gồm MAKE_MESSENGER_LINK của v1.90) + upload ảnh trước, 96 luồng như v1.90, có dòng tiến độ `🧰 Chuẩn bị: x/y`; (2) **BẮN 1 LƯỢT** bằng chính ngữ cảnh đã chuẩn bị (cờ `__prepped` chặn dò lại global_id lần 3 ở làn nền) nên tin tới dày, gần như đồng loạt; (3) **BÙ TẬP TRUNG**: trong lượt, `scheduleBuRetry` không setTimeout rải rác nữa mà gom hết chat chưa tới vào 1 hàng đợi (gộp trùng theo chat, giữ nguyên sổ mỗi-kênh-1-lần `buRetryDone`); đợt chính xong + xác nhận nền Socket chốt hết (chờ tối đa 180s) thì chạy 1 đợt bù gọn 64 luồng (`🧺 BÙ TẬP TRUNG N chat…` → `cứu thêm X/N`), chốt hẳn từng chat ngay tại chỗ (đến nơi/⚠ không rõ-dừng/❌ hết kênh) rồi mới TỔNG HỢP. Giữ nguyên toàn bộ hàng rào an toàn: khóa `sockFiredPending` (bù không bao giờ chồng lên tin đang chờ ACK), `deliveredIds` không gửi lại, bù tối đa 1 lần/kênh, `maybe` → dừng, nhịp bắn 1ms, làn Ext 12. Đánh đổi đã được người dùng chốt: bấm chạy sẽ chờ khâu chuẩn bị (có tiến độ rõ ràng) rồi tin mới bay đồng loạt.
+- **🎯 Cứu nhóm chat lỗi không dò được global_id (v1.90.0)**: log chạy thật cho thấy cả một lớp chat thua y hệt cả 3 kênh (`API: (#551)/(#10)` · `Extension: INCORRECT THREAD` · `Socket: Không tìm thấy globalId`); kiểm chứng HAR `batmesss.har` thấy Pancake thật sự không có sẵn global_id của nhóm này (`customers[0].global_id = null` trong chính GET `/messages`), còn bundle chỉ ra app có đường tra đích danh nữa là **MAKE_MESSENGER_LINK** (đọc `selected_item_id` từ liên kết Messenger làm global_id — đã có sẵn trong script nhưng bị tắt ở mọi lô lớn, dồn nhóm chat này vào gửi Extension không global_id → `INCORRECT THREAD` chắc chắn). Nay lô lớn cũng thử MAKE_MESSENGER_LINK (hết hạn 5s, qua Extension thật) trước khi kết luận không có global_id; tìm được thì lưu kho + gửi bằng mã thật, không được thì vẫn cứu hộ API-trước như v1.86. Đồng thời hạ luồng nạp nền 128→96 (mức của bản nhanh v1.80) vì chính 128 luồng tự gây 429 (`🧯` xuất hiện ngay trong lúc gửi) làm mất oan global_id của một số chat. Giữ nguyên nhịp 1ms, làn Ext 12, worker nền 64, chống trùng, chờ dò 1,5s như v1.89.
+- **⏪ Sửa hồi quy tốc độ gửi của v1.86/1.87 (v1.89.0)**: lượt đo 27.821 tin/683s ≈ 41 tin/s (bản nhanh từng đạt 143 tin/s). Nguyên nhân: thời gian chờ dò global_id qua WebSocket ở làn nền bị kéo lên 9s (1.86) rồi 6s (1.87) — mỗi chat chưa có sẵn global_id nằm đủ cửa sổ trong làn nền. Nay trả về đúng thông số bản nhanh (WS 1,5s, bỏ deadline cứng); global_id về muộn vẫn được bắt lại ngay trước khi bắn nhờ bước đối chiếu `threadMappingStoreV2` cuối trong `sendViaSocket`. Giữ nguyên: cứu hộ API-đi-đầu (1.86), làn Ext 12 + worker nền 64 (1.87), nới làn + upload ảnh trước (1.88).
+
+- **🚀 Tối đa tốc độ gửi trong hàng rào an toàn (v1.88.0)**: KHÔNG đụng cơ chế gửi/xác nhận (nhịp Socket 1ms, khóa chống bắn trùng khi chưa xác nhận, bù đúng 1 lần/kênh, "không rõ" là dừng, deadline dò 6s giữ nguyên). Chỉ nới đường ống trung tính: prefetch 96→128 worker, làn upload ảnh 96→128, làn API 48→64, worker làn nhanh 192→256; và **upload ảnh trước ở pipeline nạp nền** cho chat đã có global_id (fbId gắn đúng conv_id của chat đó, chưa từng bắn, dùng 1 lần ở 0ms khi tới lượt) — đang ở cụm khách chặn thì không upload trước để khỏi đốt upload oan.
+
+- **🐢→📷 Tăng tốc gửi ảnh (v1.87.0)**: gửi ảnh chậm vì 3 cổ chai xếp chồng — upload ảnh riêng ~1,5s/chat (bắt buộc, không bỏ được), dò global_id ở làn nền mất tới ~10s/chat (bản 1.86 cho chờ 9s làm nặng thêm), và làn gửi Extension chỉ 6 lệnh song song. Nay: cắt cứng dò global_id ở làn nền (WS 5s, Ext 6s, deadline tổng 6s → quá hạn đi thẳng đường cứu hộ API), làn Extension 6→12, worker làn nền 48→64.
+
+- **📷 Sửa gửi ảnh thua oan INCORRECT THREAD (v1.86.0)**: log gửi ảnh cho thấy một lớp chat ❌ `Ext: INCORRECT THREAD | socket: Không tìm thấy globalId` — đối chiếu bundle: app **không bao giờ** gửi Extension khi `globalUserId=null` (hủy ngay `no_global_id_found`), còn script bắn Ext null-gid nên chat nào Extension không tự tìm được thread thì thua, lại đốt 1 upload ảnh ~1,5s/chat (HAR guicau: TB 1.469ms). Sửa: (1) cứu hộ chưa có global_id → **API (conversation_id, ảnh gắn sẵn theo page) đi đầu**, Extension theo thread_id sau; (2) dò global_id qua WebSocket ở làn nền chờ 9s thay vì 1,5s (khớp timeout Extension, không tốn thêm thời gian); (3) bỏ dòng ❌ "đã thử hết kênh" in trùng lần 2.
+
+- **🧯 Điều tốc chống 429 có phối hợp (v1.85.0)**: log thật trên v1.84 cho thấy server trả 429 ngay từ ~120 chat; các luồng tự thử lại khiến áp lực không giảm → ~15 chat/s. Nay mọi request danh sách dùng chung 1 nhịp điều tốc: dính 429 → **toàn bộ luồng nghỉ chung 2,5s** + **số luồng phụ được phép sống giảm một nửa** (10→5→2→1→0, cuối cùng luồng gốc đi một mình đúng nhịp server nhả); không spawn thêm vượt ngân sách. Dòng `⚡⚡` báo thêm `🧯 dính 429×N`.
+
+- **⚡ Tập trung tăng tốc tải danh sách (v1.84.0, từ nền v1.80.0)**: giữ nguyên kiến trúc tải đã ổn định (luồng gốc + 10 luồng phụ), chỉ gỡ nghẽn: (1) bỏ `computeMatches()` quét toàn bộ danh sách mỗi 400ms trong lúc tải (nghẽn CPU luồng giao diện) — chỉ đếm O(1), khớp 1 lần khi xong; (2) luồng phụ gặp lỗi lẻ không chết nữa (nghỉ rồi đi tiếp, tối đa 6 lần) để giữ đủ đường song song; (3) luồng gốc gặp lỗi lẻ thì thử lại đúng cursor tối đa 8 lần có log, không cụt danh sách trong im lặng — hết dữ liệu thật mới dừng, bị cắt thì dòng `⚡⚡` ghi rõ `⚠ CHƯA ĐẦY ĐỦ` kèm tốc độ chat/giây.
+
+- **⏪ ĐÃ QUAY VỀ v1.80.0 NGUYÊN VẸN (theo yêu cầu người dùng)**: file script khôi phục từ commit `515896c`. Người dùng xác nhận **v1.80.0 mới là bản ổn định** (không phải v1.75/v1.81); toàn bộ thay đổi tải danh sách v1.81–v1.83 (14 luồng phụ, bỏ computeMatches khi tải, thử lại luồng gốc) **không còn hiệu lực**.
+
+- **⏪💻 Về nền v1.81 + vá lỗi cụt danh sách trên laptop (v1.83.0)**: khôi phục file đúng v1.81 (bản chạy tốt trên PC), bỏ thay đổi của v1.82 (rút timeout xuống 10s làm máy yếu càng dễ đứt). Gốc lỗi laptop: luồng gốc gặp 1 request lỗi (vượt thời gian chờ do máy/mạng yếu) là `break` ngay, danh sách cụt ở ~360 chat mà vẫn báo tải xong. Nay luồng gốc gặp bất kỳ lỗi nào cũng nghỉ 2s rồi thử lại đúng cursor tối đa 10 lần (có log `⏸ Tải bị gián đoạn…`), quá 10 lần mới dừng và ghi rõ `⚠ CHƯA ĐẦY ĐỦ` trong dòng `⚡⚡`.
+
+- **🩹 Sửa tải đứng im ở ~200 chat (v1.82.0)**: 14 luồng phụ của v1.81 đẩy server vào 429, luồng gốc rơi vào vòng thử lại 12 lần trong im lặng (mỗi vòng tối đa ~45s vì timeout hủy của `fetchJson` cố định 15s bất chấp tham số) → giao diện đứng hình không một dòng log. Nay: về 10 luồng phụ như mức ổn định đã kiểm chứng; timeout hủy tôn trọng `timeoutMs` truyền vào; luồng gốc gặp 429 chỉ thử lại tối đa 5 lần, **có log báo rõ** và dừng kèm hướng dẫn thay vì im lặng.
+
+- **⚡ Tăng tốc tải danh sách 1 page (v1.81.0)**: đo thật 34.462 chat/342,1s ≈ 100 chat/s trên bộ tải v1.75. Hai thay đổi: (1) bỏ `computeMatches()` quét toàn bộ danh sách mỗi 400ms trong lúc tải (nghẽn luồng giao diện, nặng dần theo N) — chỉ đếm O(1), khớp 1 lần khi xong; (2) luồng phụ 10→14 (mức 20 của v1.76 từng gây bão 429) + các chuỗi gặp 429 nghỉ rồi đi tiếp đúng cursor thay vì chết/cắt cụt danh sách. Dòng `⚡⚡` nay in thêm chat/giây.
+
+- **🚀 Tăng tốc gửi cho quy mô 100k (v1.80.0, trên nền v1.75.0)**: từ số đo lô 34.466 tin/542s (≈64 tin/s) — khớp với trần cung cấp global_id của GID PREFETCH (48 worker × ~0,75s mỗi GET /messages ≈ 64 chat/s). Nới: prefetch 48→96 worker, làn GET ngữ cảnh 96→128, nhịp publish Socket 2ms→1ms (vẫn nhịp đều từng khung + retry + reject-streak, không bắn chùm 0ms), worker làn nhanh 160→192. Không đổi logic kênh/khóa chống trùng. Nghiệm thu: so dòng `🏁` (tốc độ phát lệnh) và TỔNG HỢP CHỐT trước/sau.
+
+- **⏪ ĐÃ QUAY VỀ v1.75.0 NGUYÊN VẸN (theo yêu cầu người dùng)**: file script chính khôi phục từ commit `f58374f`; toàn bộ thay đổi tải danh sách v1.76–v1.79 (thêm luồng, cổng điều tốc, bỏ computeMatches khi tải, thử lại 429) **không còn hiệu lực**. Lưu ý: máy gửi của v1.75.0 và các bản sau giống hệt nhau (đều là nền v1.73) — tốc độ gửi không đổi khi quay bản; muốn nhanh hơn cho quy mô 100k phải tối ưu tiếp máy gửi/xác nhận nền chứ không nằm ở số phiên bản.
+
+- **⏪ Khôi phục nhịp tải của v1.75 (v1.79.0)**: người dùng đo v1.75 đạt ~160 chat/giây, các bản điều tốc v1.77/1.78 chậm hẳn → **bỏ hẳn cổng điều tốc**, tải danh sách quay về đúng thông số v1.75 (10 luồng phụ bước nhảy 1.1–11 span cho 1 page, 10 chuỗi cho nhiều page, `fetchJson` thử lại 400ms×lần). Chỉ giữ 2 thứ không làm chậm nhịp chính: bỏ `computeMatches()` trong lúc tải (v1.76) và các chuỗi gặp 429 thì nghỉ + đi tiếp đúng cursor thay vì chết/cắt cụt danh sách; dòng `⚡⚡` vẫn báo số lần dính 429.
+
+- **🐢→⚡ Sửa điều tốc gây siêu chậm (v1.78.0)**: v1.77 ôm "suất" cổng trong lúc `fetchJson` tự thử lại 429 nhiều giây + hạ trần quá mạnh → thông lượng sập. Nay: request danh sách dính 429 **trả về ngay** (`noRetry429`), việc nghỉ/thử lại do cổng + từng chuỗi xử lý ở ngoài cổng; trần song song bắt đầu 6, hạ nhẹ -1 khi 429 (min 2), cooldown chung 2,5s, chạy êm 16 request thì nâng dần (max 10); các chuỗi được thử lại 429 tối đa 12 lần.
+
+- **🧯 Điều tốc tải danh sách theo 429 (v1.77.0)**: log console người dùng cho thấy 21 chuỗi song song của v1.76 làm server Pancake trả **429 (Too Many Requests)** hàng loạt — request bị từ chối + thử lại khiến tải còn chậm hơn. Thêm **cổng điều tốc thích ứng** cho mọi request danh sách: tối đa 8 request đang bay, gặp 429 thì hạ trần (min 3) + đóng băng chung 1,5s, chạy êm thì nâng dần (max 12); luồng gốc/luồng phụ/chuỗi page gặp 429 đều **nghỉ rồi đi tiếp đúng cursor** thay vì chết hoặc cắt đứt danh sách (trước đây luồng gốc gặp lỗi là dừng, danh sách bị cụt). Nghỉ thử lại khi 429 trong `fetchJson` cũng dài hơn + jitter. Dòng `⚡⚡` nay báo thêm `⚠ dính 429×N (đã tự điều tốc)`.
+
+- **⚡ Tăng tốc tải danh sách (v1.76.0)**: server Pancake trả cố định ~60 chat/request (đo từ HAR, mỗi request ~150–500ms) nên tốc độ tải = số chuỗi cursor chạy song song. (1) Chế độ 1 page: tăng luồng phụ khâu đoạn từ 10 → **20 luồng** (tổng 21 chuỗi song song, mỗi luồng cách nhau ~1 trang). (2) Chế độ nhiều page: chạy gần như **mọi page cùng lúc (tối đa 24 chuỗi)** thay vì 10. (3) Bỏ `computeMatches()` mỗi 400ms trong lúc tải (hàm O(N) chạy ~150 lần với danh sách 18k gây nghẽn main-thread, làm chậm cả giải mã JSON của request đang bay) — trong lúc tải chỉ cập nhật số đếm O(1), khớp danh sách chạy 1 lần khi tải xong. Dòng log `⚡⚡ …` nay in thêm **chat/giây** để so tốc độ trước/sau.
+
+- **🚀 Bắn ngay khi bấm gửi (v1.75.0, trên nền v1.73.0 đã quay lại)**: bỏ chờ quét tag cấm toàn bộ (trước đây `await` tối đa ~25s + tải bảng tag từng page) trước tin đầu tiên. Lượt gửi bắt đầu tức thì với 2 lớp lọc đồng bộ (tag trên dòng chat + `filledTags`/dữ liệu app); việc tải bảng tag còn thiếu và quét toàn bộ chat dính tag cấm chuyển xuống **chạy nền**, nạp tới đâu thì chốt chặn trước từng tin chặn tới đó, kèm quét lại mỗi 3.000 tin như cũ. Log mới: `🔎 Quét nền tag cấm: … (vẫn bắn ngay…)` rồi `🛡 Đã nạp X chat…` khi quét xong. Lưu ý: bản này **không** gồm thay đổi v1.74.0 (đã quay lại v1.73.0 theo yêu cầu).
+
+- **⏪ ĐÃ QUAY LẠI v1.73.0 (theo yêu cầu người dùng)**: file script chính đã được khôi phục nguyên vẹn từ commit `88c0f82` (v1.73.0); thay đổi v1.74.0 (xếp Extension timeout là "không rõ") **không còn hiệu lực**. Lưu ý: ở v1.73.0, Extension timeout (`{success:false, data:null}`) vẫn bị coi là thua chắc → vẫn còn nguy cơ trùng ~1 phút ở lô lớn như đã phân tích ở mục v1.74.0 bên dưới.
+
+- **🔴 Chặn trùng do Extension timeout ở lô lớn (v1.74.0)**: trong `__ExtensionAdapter__.send` của bundle (@869517), khi hết thời gian chờ adapter trả `{success:false, data:null}` — đây là **timeout, kết quả chưa rõ** (Extension có thể đã gửi xong nhưng phản hồi về không kịp), không phải thua chắc chắn. Script cũ xếp hình này là "thua chắc" rồi bắn tiếp kênh khác → khách nhận 2 tin cách nhau ~1 phút (35s timeout + hàng đợi kênh kế) ở lô ~18.000. Từ v1.74.0: Extension timeout/không rõ lý do → xếp `⚠ không rõ`, **dừng hẳn cho chat đó, không bắn thêm kênh nào** (đúng luật chống trùng: chỉ bù khi kênh trước xác nhận CHƯA gửi).
+
+- **🛟 Cứu các chat bị sót vì không dò được `global_id` (v1.73.0)**: lỗi `Ext: Không tìm thấy global_id của khách (khách đã khóa nick hoặc xóa tài khoản)` bị kết luận quá sớm — trong bundle, `findGlobalIdForConv` trả `null` cả khi Extension mất kết nối, adapter thất bại, thiếu dữ liệu hoặc có exception, không chỉ khi khách khóa nick. Từ v1.73.0, các chat này **không bị chốt chết nữa**: vẫn gửi thật đúng 1 lần qua Extension bằng `thread_id` (`globalUserId=null`), nếu Extension xác nhận thua mới đi tiếp Socket/API theo `conversation_id` như fallback của luồng gửi tay. Log mới: `🛟 … — chưa dò được global_id; chưa kết luận khách khóa nick…`.
+
+- **🔒 Khóa chống gửi trùng + cắt bù vô ích (v1.72.0)**: ở chế độ bắn-nhả, mỗi chat được **khóa ngay khi bắn Socket** — khi ACK chưa chốt, không kênh nào (kể cả bù Extension) được bắn thêm cho chat đó; chỉ khi Facebook **xác nhận từ chối** mới mở khóa để bù. Lượt bắn lại trong nền cũng kiểm tra "đã đến nơi chưa" trước khi bắn. Ngoài ra, chat nào Socket đã bắn lại 1 lần vẫn bị từ chối thì chốt luôn "khách không nhận được tin", **không bù Extension nữa** — cắt hàng trăm lượt bù vô ích (log cũ: bù Ext cho khách FB đã báo "Người này hiện không có mặt") giúp phần xác nhận nền chốt nhanh hơn và loại bỏ nguy cơ lặp câu do bù chồng.
+
+- **Vá kích hoạt nấc 2 (v1.71.1)**: v1.71.0 bị lỗi rơi cờ `sockFired` khi `sendOne` tự gọi lại ở đường gửi nhanh nên nấc 2 không kích hoạt (log vẫn chờ ACK như cũ, ~1.004 tin/phút). v1.71.1 truyền đủ cờ qua cả 3 nhánh — dấu hiệu nhận biết nấc 2 đang chạy: dòng ✅ có đuôi *(đang xác nhận nền…)*.
+
+- **🔥 Nấc 2 — Bắn-nhả Socket + xác nhận nền (v1.71.0)**: với lô lớn (>50 tin), Socket không còn giữ worker chờ ACK của Facebook (~2,8s/tin) nữa: publish xong là nhả worker đi bắn tiếp ngay (chỉ còn nhịp 2ms/khung giữ nhịp). ACK thật về sau được xử lý ở nền y hệt mẫu `fireApiAndWatch` của kênh API: thành công → ghi nhận đã đến nơi (im lặng, bảng tổng hợp tự cập nhật + tự chốt khi hết tin chờ), bị từ chối → bù kênh khác đúng 1 lần, không rõ kết quả → báo ⚠ và không gửi thêm. Nhờ vậy tốc độ phát lệnh không còn bị khóa bởi tốc độ trả ACK của server. Bản **v1.70.0 được giữ nguyên làm backup** tại `scripts/pancake-send-by-snippet.v1.70.0-backup.user.js` — cần quay lui chỉ việc cài lại file backup. Lưu ý đọc log bản này: dòng ✅ từng tin nghĩa là "đã bắn, đang xác nhận nền"; kết quả CHỐT nằm ở dòng `📊 TỔNG HỢP CHỐT LƯỢT GỬI` tự in khi mọi ACK đã về hết.
+
+- **Tăng tốc gửi (v1.70.0)**: nhịp bắn Socket 4ms → **2ms** (500 khung/giây/page), số khung Socket chờ ACK trên mỗi page 32 → **64**, làn hỏi Extension tìm `global_id` 16 → 24 luồng, làn quét nhanh 128 → 160 worker. Thêm **pipeline nạp trước `global_id` chạy nền**: trong lúc gửi, một pipeline riêng chạy trước để nạp sẵn dữ liệu chat cho các chat phía sau, tới lượt gửi là có sẵn `global_id` trong cache (0ms) thay vì đứng chờ HTTP từng chat.
+
+- **Chặn tuyệt đối chat dính tag "chốt"/"chặn" (v1.69.0)**: bản trước chỉ tải 1 trang (60 chat) khi lọc theo tag và chỉ chờ 1,8s — page có nhiều hơn 60 chat dính tag là lọt. Nay script **quét TOÀN BỘ chat dính tag cấm qua API** (tối đa 300 trang) nạp vào một danh sách chặn riêng, kiểm tra lại **ngay trước khi bắn từng chat**, và **quét lại mỗi 3.000 tin trong lúc gửi** để bắt cả tag vừa được gắn giữa lượt. Page nào app chưa nạp bảng tag thì script tự gọi `GET /pages/{id}/settings` (đúng request của app) để lấy bảng tag. Khi bắt đầu gửi, log sẽ in `🛡 Đã nạp X chat đang dính tag cấm` — đối chiếu số này với số chat đang gắn tag trên app để kiểm chứng.
+
+- **Quy mô 60.000–100.000 tin/lượt (v1.68.0)**: nâng số chat mỗi lượt tối đa từ 50.000 lên **100.000**; mở rộng các làn CHUẨN BỊ (dò ngữ cảnh `GET /messages` 64→96 luồng, upload ảnh 64→96 luồng, làn quét nhanh 96→128 worker, làn nền Extension 32→48 worker) — cơ chế gửi (Socket 32 frame/page, nhịp 4ms, Extension) giữ nguyên như cũ. Panel tự in **đồng hồ tốc độ mỗi 30 giây** (`📊 … tốc độ X tin/phút · dự kiến còn ~Y nữa`) và dòng chốt cuối lượt kèm tổng thời gian + tốc độ trung bình để đối chiếu thực tế.
+
+- **Tải danh sách SIÊU TỐC (v1.67.0)**:
+  - **Nhiều page → chạy song song theo từng page**: khi đang xem nhiều page cùng lúc, script tách mỗi page thành 1 chuỗi cursor riêng (`/api/v1/pages/{pageId}/conversations` — đúng endpoint app dùng khi xem 1 page trong `buildConversationsRequest`, `_app` module 907775) và chạy **tối đa 10 chuỗi cùng lúc**. Mỗi chuỗi vẫn đi tuần tự theo `next_cursor` THẬT của server nên **không hở, không thiếu chat nào**; tải xong gộp lại và sắp xếp đúng thứ tự app (ghim → chưa đọc → đã đọc, mới nhất trước — đã kiểm chứng khớp 100% thứ tự server trên dữ liệu thật `pancake.vn2.har`). Page nào lỗi giữa chừng sẽ tự chuyển về cách tải chung để đảm bảo đủ danh sách.
+  - **1 page → luồng chính + 10 luồng phụ độc lập**: các luồng phụ không còn phải chờ nhau theo từng vòng (1 request treo không làm đứng cả lượt tải nữa); hễ luồng chính chạm tới đoạn phụ nào là khâu cả đoạn vào và bỏ qua hàng loạt request tuần tự.
+  - **Hiển thị trực tiếp nhẹ hơn**: trong lúc tải, danh sách trên panel chỉ NỐI THÊM phần mới tải được thay vì dựng lại toàn bộ từ đầu sau mỗi chặng — danh sách càng dài càng không bị chậm dần. Tải xong panel có in thời gian tải thực tế (ví dụ: `⚡⚡ Tải song song 15 page: 3000 chat trong 4.2s`).
+  - Vẫn dừng ngay khi chuỗi 2 đầu đã đủ 2 đầu, và bấm nút lần nữa để dừng & dùng ngay số chat đã tải.
+
+- **Cơ chế tải danh sách chuẩn & luôn xóa sạch danh sách cũ khi bấm `⚡ Tải danh sách` (v1.55.0)**:
+  - Khi bấm **`⚡ Tải danh sách`**, script **xóa sạch hoàn toàn danh sách cũ (`state.allRows = null`)** ngay lập tức rồi **tải mới lại 100% từ trang đầu qua API `/api/v1/conversations`** (không giữ lại cache danh sách cũ, không nối tiếp từ `next_cursor` cũ gây lệch thứ tự hoặc không tải lại).
+- **Tối ưu tốc độ & cứu trọn 3.000–6.000 mess ngoài 24h trên lô lớn (v1.54.0 → v1.56.0)**:
+  - **Chống đóng băng `ensureConvCtx` khi bị rate-limit 429 & bỏ qua `GET /messages` thừa cho chat `> 7 ngày`**: chỉ đánh dấu `entry.fetched = true` khi `GET /v1/pages/{pid}/conversations/{cid}/messages` thành công thật sự (kèm tự động retry 3 lần qua `ctxFetchLane = 32` luồng). Với các chat đã quá 7 ngày (`idle > 7 ngày`) hoặc page tắt `ctx_7_days_enabled` (không thể bật `is_record_ctx_7_days`), bỏ qua bước gọi `GET /messages` trước khi bắn để đi thẳng vào `Socket ⇄ Ext` (0ms nếu đã có `global_id` từ cache/WebSocket), giảm hàng nghìn request HTTP thừa.
+  - **Điều phối động `prepareDirectCtx` + `pickBestDirectOrder` (`__sendBySocketCacheFB__` tại `@927067` & `@937200`) & tách `socketLane` (16 luồng) khỏi bước chuẩn bị**: chuẩn bị chung `full`, `threadId`, `globalId`, và `nonReusableFbId` trong `extPrepLane` (32 luồng) trước rồi mới quyết định thứ tự `Socket ⇄ Extension` ngay tại thời điểm chuẩn bị xong (tránh việc tính ở giây thứ 0 làm khóa cứng 5.985/6.000 chat vào Extension và bỏ trống `socketLane`). Khi WebSocket đã kết nối và đã có `global_id` thật (`!ctx.gidFromPsid`), luôn ưu tiên bắn qua **`Socket` (`socketPublishSend`, ~80–120ms/tin)** và chỉ giữ slot `socketLane` đúng trong lúc bắn frame `/ls_req`.
+  - **Chống báo oan `fbErrorCode: 1545041 ("Người này hiện không có mặt.")` trong `sendViaExtension` (`executeByExtOnce` tại `@961019` & `@966000`)**: khi chưa tìm được `global_id` thật (`ctx.gidFromPsid === true` hoặc `ctx.gid === null`) nhưng đã có `threadId`, truyền **`globalUserId: null`** kèm `threadId` và `convId` vào `REPLY_INBOX_PHOTO` đúng chuẩn `_app` để Extension tự tìm hội thoại theo `threadId` và trả về `globalUserId` thật, tuyệt đối không truyền `from_psid` phỏng đoán vào `globalUserId` của Extension.
+  - **Nâng cấp `resolveGlobalId` (`BATCH_GET_GLOBAL_ID` `@897543` + `MAKE_MESSENGER_LINK` `@894200` + `cleanupRace`)**: gọi `BATCH_GET_GLOBAL_ID` ngay trong `warmUpSockets` để nạp hàng loạt `threadsWithGlobalId` vào cache RAM (0ms); trong `resolveGlobalId`, ngay khi một nhánh tìm ra `global_id` thì `cleanupRace()` hủy tức thì timer/`PENDING_MESSAGES` của WebSocket và giải phóng các task chờ trong `gidExtLane` (6 luồng); nếu `GET_GLOBAL_ID_FOR_CONV` trả `null` thì fallback sang `MAKE_MESSENGER_LINK` (`uiVersion: 6`) lấy `globalId` / `selected_item_id`.
+  - **Vá chuẩn `MqttHelper.loadThread` cho cả `label: "313"` / `"145"` (`queue_name: "trq"`, `@827500`)**: sửa lỗi `reference_thread_key = fp.referenceThreadKey`, tự khởi tạo `sock.lastApplyCursor`, và tự giải phóng `loading_thread_{pageId}` ở `0ms` khi `publish` của `trq` hoàn tất (chấm dứt việc mỗi trang `loadThread` bị treo 5.000ms).
+- **Kiến trúc Ultra-Turbo cho quy mô 20.000–30.000 tin nhắn/lần (v1.57.0)**:
+  - **Tách làn Cao Tốc `0ms` (`peekFastGlobalId`) & Phân làn 2 tầng trong `sendBatch` (`FAST_POOL_SIZE = 128` + `DISCOVERY_POOL_SIZE = 32`)**: kiểm tra đồng bộ `0ms` trong RAM/Cache/`threadMappingStoreV2` (`peekFastGlobalId`). Mọi chat ngoài 24h đã có sẵn `global_id` thật và WebSocket đang mở sẽ **bỏ qua `await ensureConvCtx(c)`** (không tốn hàng nghìn request `GET /messages` kiểm tra `ad_clicks` cho các chat 1..7 ngày khi đã sẵn sàng bắn qua `Socket`) và **bỏ qua hoàn toàn `extPrepLane`**, đi thẳng vào **`socketLane` (64 luồng WebSocket song song)**. Trong `sendBatch`, 90–95% chat có sẵn `global_id` hoặc trong 24h chạy trên `fastList` (128 worker) độc lập hoàn toàn với 5–10% chat chưa có `global_id` trên `discoveryList` (32 worker), loại bỏ triệt để hiện tượng Head-of-Line Blocking.
+  - **Đua song song 3 nguồn trong `resolveGlobalId` + cờ `ctx.gidDiscoveryRan` (`this.concurrentlyGetGLobalIdExecuted` `@961019`) + cắt sớm `wsTimer`**: chạy đua song song cả `ensureConvCtx` (`GET /messages`), `gidExtLane` (`findGlobalIdForConv` / `MAKE_MESSENGER_LINK`), và `mqtt.PENDING_MESSAGES` cùng lúc; khi cả HTTP lẫn Extension đều trả `null`, tự cắt `wsTimer` sau `120ms` thay vì chờ hết `4.500ms`, đồng thời đánh dấu `ctx.gidDiscoveryRan = true` để kênh thứ 2 không lặp lại bước dò mạng/Extension (giảm thời gian xử lý chat lỗi từ ~9–10s xuống ~0.2s).
+  - **Cache `nonReusablePhotoCache` theo `pageId + photo` cho kênh `Socket` & điều tiết `sideEffectLane` (4 luồng)**: khi gửi kèm ảnh qua `Socket` cho 20.000–30.000 chat trên cùng page, chỉ upload `reusable=false` 1 lần/page và tái sử dụng `fbId` ở `0ms` (tự động upload mới nếu `Socket` báo `markOptimisticMessageFailed`); gom `fill_admin_name` và `update_global_id` (bỏ qua nếu `gid` đã từ server/cache) vào `sideEffectLane` (4 luồng nền).
+  - **Tối ưu `O(1)` toàn diện cho CPU/DOM & mở rộng tải danh sách 30.000+ chat**: dùng `Map` `O(1)` (`getReduxConvById`) thay cho `.find()` tuyến tính trên Redux; dùng bộ đếm `O(1)` (`summaryCounters`) cho `getBatchSummaryCounts`; throttle cập nhật DOM/localStorage trong `logLine`, `updateBatchSummaryUI`, và `markChannel` (`80ms–400ms`) khi chạy lô lớn; nâng `loadListViaApi` lên `1500` trang (~45.000–75.000 chat, bỏ `sleep(120)` cứng), `maxLoadThreadCount = 5000` trang WebSocket, và `WAVE_SIZE` lên tới `50.000` tin/lượt (mặc định `30.000`).
+- **Khắc phục triệt để lỗi "có tin chỉ gửi được chữ không gửi ảnh", bứt tốc từ mess 301 đến 20.000 mess, xóa sổ lỗi nghẽn `không có ACK` & lướt siêu tốc qua cục khách đã chặn page (v1.58.0 → v1.66.0)**:
+  - **Cấp `fbId` (`is_reusable=false`) riêng cho từng cuộc hội thoại (`uploadOneTimePhoto`, 64 luồng song song) kết hợp Hồ dự trữ `spareFbIdPool[pageId]` (`v1.58.0–v1.66.0`)**: trên Facebook Messenger (`executeBySocketFB` `@976000` & `executeByExtOnce` `@964800` trong `_app`), `fb_id` sinh từ `POST /v1/pages/{pageId}/contents/facebook?is_reusable=false` là **ID đính kèm dùng 1 lần (single-use attachment ID)**. Bản `v1.64.0–v1.66.0` chạy **song song (`Promise.all`)** cả `resolveGlobalId` (`GET /messages`) và `uploadOneTimePhoto` (`POST /contents/facebook`) ở Làn 1 (giảm 30% độ trễ HTTP mỗi chat), mở khóa **Làn Cao Tốc `0ms` (`fastGid0`) cho cả tin nhắn kèm ảnh**, đồng thời bổ sung `spareFbIdPool[pageId]`: nếu một chat chuẩn bị xong `fbId` mà chưa bắn ở Làn 1 hoặc phát hiện khách đã khóa nick trước khi bắn, `fbId` chưa tiêu thụ đó được cất vào `spareFbIdPool[pageId]` để chat sống kế tiếp lấy dùng ngay ở **0ms**.
+  - **Cơ chế Lướt Siêu Tốc qua "Cục Khách Đã Chặn Page" (`Cluster-Skip Probe / inBlockedCluster` — `v1.66.0`)**: các khách đã chặn page / khóa nick thường bị dồn thành một cụm dài hàng trăm đến hàng nghìn chat liên tiếp (như dải `130..287`). Khi gặp `>= 3` khách liên tiếp bị từ chối (`socketRejectStreak[pageId] >= 3`) và tin nhắn có cả chữ lẫn ảnh:
+    + Script **tạm ngừng gọi HTTP `POST /contents/facebook` upload ảnh trước**, mà bắn gói Chữ qua WebSocket trước (`~30ms`, **tốn `0` HTTP request upload ảnh**).
+    + Với 99.9% khách đã chặn trong cụm đó: Facebook MQTT trả về `rejected` ngay lập tức sau `~30ms`, giúp lướt qua hàng trăm/hàng nghìn khách đã chặn mà **không tốn dù chỉ 1 request upload ảnh vô ích**!
+    + Nếu gặp khách còn sống nằm lẫn trong cụm: gói Chữ đi thành công (`ok`) → lập tức reset `socketRejectStreak = 0`, upload ảnh (ưu tiên `0ms` từ `spareFbIdPool`) và bắn tiếp phần Ảnh ngay lập tức (khách sống nhận đủ 100% cả chữ lẫn ảnh), đồng thời lưu bền vững `global_id` của cả khách đã chặn vào `localStorage` để lần gửi sau có sẵn ở `0ms`!
+  - **Vá lỗi chí mạng `TypeError` trong `resolveSearchGlobalIdTask` (`@823506` của `_app`) & Đánh thức tức thì (`0ms`) `PENDING_MESSAGES['find_global_id_|...']` (`v1.65.0`)**: trong `_app-9331d46f21a84eb1.v6.js` tại `@823506`, hàm `resolveSearchGlobalIdTask` viết `o.context.initPageData.threadMapping[c]` không có optional chaining (`?.`). Khi `initPageData.threadMapping` là `undefined` (dữ liệu nằm ở `threadMappingStoreV2`), nó văng `TypeError: Cannot read properties of undefined` ngay ở phần tử đầu tiên và không gọi `.callback` cho bất kỳ `PENDING_MESSAGES` nào, bắt các đợt chat đang chờ phải đứng hình 4.5–6 giây đợi `wsTimer` hết hạn mới đọc được `lateGid` (như ở log `07:27:35→07:27:41` và `07:27:48→07:27:52`). Bản `v1.65.0` khởi tạo sẵn `threadMapping = {}` và `threadMappingStoreV2 = {}` trước khi `origResolve` chạy, đồng thời chủ động đánh thức `PENDING_MESSAGES['find_global_id_|...']` ngay trong `syncSocketMappingsToCache` (`0ms`) + `wsPoll` `60ms`, xóa sổ hoàn toàn các khoảng đứng hình 4.5–6 giây!
+  - **Kiến trúc Đa Tầng Không Chặn Đầu (`Two-Pass Non-Blocking Pipeline`), Xóa sổ lỗi nghẽn `không có ACK` & Chống bỏ sót tin sống do Facebook MQTT Burst-Reject (`v1.61.0–v1.66.0`)**:
+    + **Giãn nhịp vi mô `paceSocketPublish` (`4ms` = 250 tin/giây) + Retry Thông Minh theo Chuỗi (`socketRejectStreak <= 4` — `v1.65.0`)**: giữ khoảng cách vi mô `4ms` giữa 2 gói `/ls_req` trên cùng 1 fanpage, đồng thời khi đang gửi ở vùng các chat sống (`socketRejectStreak <= 4`), nếu bị `rejected` lần đầu thì tự động nghỉ `100ms` và bắn thử lại lần 2 ngay trên Socket (cứu 100% các chat sống dính burst như `v1.61.0`); ngược lại khi gặp cả một dải hàng trăm khách đã khóa nick liên tiếp (`socketRejectStreak > 4`, như dải `130..287`), tự động bỏ qua retry lần 2 để lướt qua vùng chat khóa nick nhanh gấp đôi!
+    + **Chống báo oan `❌ Ext: Không tìm thấy global_id của khách` khi `findGlobalIdForConv` bị timeout (`v1.64.0–v1.65.0`)**: chỉ gán `ctx.extFinderReturnedNull = true` khi chính `findGlobalIdForConv` của Extension đã chạy xong và trả về rỗng (`confirmedNull === true`), tuyệt đối không gán khi lệnh bị timeout tạm thời — giúp các chat mà Extension bận lúc đầu vẫn được gọi `sendViaExtension` để gửi bằng `threadId` y hệt như khi gửi tay!
+    + **Cấm tuyệt đối việc bắn `from_psid` (`gidFromPsid`) vào `sendViaSocket` (`v1.63.0`)**: chặn triệt để `gidFromPsid` trong `sendViaSocket` và `pickBestDirectOrder`, giữ `0` dòng `⚠ không có ACK` trên lô hàng nghìn tin.
+    + **Loại bỏ bắn nhầm vào API bị chặn ngoài 24h do `updated_at` (`getConvIdleMs` — `v1.64.0`)**: khớp chuẩn `dr()` trong `_app`, chỉ tính trong cửa sổ 24h dựa trên `last_customer_interactive_at` / `lastAt` của khách; khi `last_customer_interactive_at === null` (dù `updated_at < 24h` do nhân viên vừa gắn tag/nhắn tin) thì xác định ngay là ngoài 24h (`idleLong = true`) để đi thẳng vào Socket từ đầu.
+
+## Lưu ý
+
+- **Snippet so khớp là snippet hiển thị** (đã cắt ngắn có `...` đúng như bạn thấy trong danh sách) —
+  "có cùng snippet" nghĩa là giống nhau trên màn hình bạn đang nhìn.
+- **Chuỗi chọn** lấy theo thứ tự trên→dưới của danh sách đoạn chat tại thời điểm chọn.
+- Gửi tin đi qua **cùng API mà Pancake dùng** khi nhân viên bấm Gửi trong ô chat
+  (`#replyBoxComposer` → `action=reply_inbox`), nên tin hiện trong lịch sử chat như 1 tin nhắn bình thường.
+  Nếu API bị chặn (lỗi `#10` do bot/app khác giữ quyền thread), script tự chuyển sang gửi qua
+  **Socket** (đúng đường gửi tay — nhanh), rồi **Extension Pancake**. Tin không gửi được qua cả 3 kênh
+  sẽ báo lỗi trong log — script **không nhảy vào từng chat để gửi tay** nữa.
+- Đoạn chat loại **COMMENT** (bình luận bài viết) được gửi bằng **cơ chế riêng của app** —
+  `action=reply_comment` (trả lời bình luận mới nhất của khách, công khai dưới bài viết) hoặc
+  `action=reply_post`, fallback qua Extension (`SEND_COMMENT`) — **không** dùng `reply_inbox`
+  (Facebook từ chối `(#551) Người này hiện không có mặt` với chat bình luận). Mặc định các chat
+  này bị bỏ tick — muốn gửi thì tự tick chọn; hộp xác nhận sẽ ghi rõ "TRẢ LỜI BÌNH LUẬN".
+- Nếu log báo **token hết hạn** → tải lại trang Pancake rồi chạy lại (token mới được script tự bắt).
+- Nên chạy với 1 tab Pancake; đừng gửi quá nhanh (để nguyên giãn cách ≥ 1000 ms) để tránh bị Facebook
+  chặn do spam.
+- **LIST CÂU GỬI** (trước đây là “list”): **1 câu = nội dung cần gửi + các chat nhận**. Sau khi gõ
+  câu cần gửi và chọn chat (mục 1), bấm **＋ Tạo câu gửi** — **câu đang gõ lúc đó được gắn liền với câu
+  lưu** (lưu vào trình duyệt — không mất khi tải lại trang) và **tự gắn với lượt gửi hiện tại**.
+  **Tích ô chọn** nhiều câu để **gửi cùng lúc** — **mỗi câu được gửi đúng chữ của câu đó** (chat lẻ
+  không thuộc câu nào thì dùng ô đang gõ). Bấm **✎** để **sửa tên + nội dung từng câu** (ô nhiều dòng),
+  ✕ xóa, kéo **⠿** để sắp xếp thứ tự. Tích 1 câu → nội dung câu tự nạp vào ô cần gửi.
+  **Gửi xong (kể cả lỗi giữa chừng) thì các câu đã chốt tiêu thụ tự xóa** — danh sách xóa được chốt
+  ngay từ khi bấm Gửi, không phụ thuộc việc giữa chừng bấm tích/bỏ tích (mỗi câu chỉ gửi 1 lần — chống gửi trùng).
+- Bấm **—** để thu panel thành **bóng logo BOTFAKE** (con quỷ tím) — **kéo thả bóng** đi bất kỳ đâu
+  (kéo >4px = dời chỗ, bấm thật = mở lại panel);
+  **✕** tắt hẳn panel (Alt+Shift+B để hiện lại). Logo vẽ bằng SVG khớp logo gốc ~99%.
+- Script đặt id prefix `ssb-` nên **không đụng** các script khác đang chạy trên trang của bạn
+  (`pk-*`, `adj-*`, `pancake-*`).
