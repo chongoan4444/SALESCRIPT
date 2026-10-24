@@ -25,7 +25,11 @@ Phù hợp khi nhiều khách nhắn cùng 1 câu hỏi / cùng 1 tin tự độ
 2. **Chọn đối tượng nhận tin** — 2 cách:
    - **Chọn chuỗi (2 đầu):** **Alt+Click** vào dòng chat **đầu chuỗi** → **giữ Alt và nhấp tiếp** dòng
      **cuối chuỗi**. Tất cả chat nằm **giữa 2 dòng đó** trong danh sách được chọn thành 1 chuỗi
-     (nhấp lần 3 = bắt đầu chuỗi mới; Esc = hủy). Nút “Chọn chuỗi (2 nhấp)” cũng làm được điều tương tự.
+     (nhấp lần 3 = bắt đầu chuỗi mới; Esc = hủy).
+     Nút **“Chọn chuỗi (2 nhấp)”** cũng làm được điều tương tự **mà không cần giữ Alt**: bấm nút → nhấp
+     thường dòng ĐẦU → nhấp thường dòng CUỐI (nút tự đổi nhãn `Chọn chuỗi: nhấp dòng ĐẦU` →
+     `… nhấp dòng CUỐI` để biết đang chờ đầu nào; xong chuỗi tự tắt chế độ — click thường lại mở chat
+     bình thường; Esc để hủy).
    - **Chọn theo snippet:** bấm 1 chat bất kỳ (chat đó được chọn) → bấm **“Lấy snippet từ chat đang chọn”**
      (hoặc `Alt+Shift+D`) — mọi chat có snippet giống nhau sẽ được chọn.
 3. Các dòng **viền xanh lá (nền + viền)** là chat sẽ được nhận tin (dòng đầu/cuối chuỗi hoặc nguồn snippet
@@ -43,7 +47,10 @@ Phù hợp khi nhiều khách nhắn cùng 1 câu hỏi / cùng 1 tin tự độ
    - **Quét giao diện** (dự phòng): bước cuộn lớn, chờ tối thiểu, đếm dần trên nút, xong tự cuộn về chỗ cũ.
    Chuỗi **hàng nghìn chat** vẫn chạy tốt. Với chuỗi ≥150 chat nên chọn tốc độ **“Song song 5 luồng”**
    để không bị Facebook chặn (429).
-5. Bỏ tick chat nào không muốn gửi trong danh sách mục 2.
+5. **Không còn danh sách tick từng chat** (khối này đã bị gỡ khỏi panel từ các bản trước; phần code render
+   vào `#ssb-list` còn sót lại là code chết — chưa xoá để giữ an toàn). Chat nhận tin = **các dòng đang
+   được tô viền xanh lá** trong danh sách đoạn chat. Muốn bỏ bớt: **chọn lại** chuỗi/snippet (mục 2), hoặc
+   bấm **“Xóa”** rồi chọn lại; tick/bỏ tick hiện chỉ dùng cho **LIST CÂU GỬI** (chọn câu nào được gửi).
 6. Nhập **1 câu** cần gửi vào mục 3 → chọn **tốc độ gửi** → bấm **“▶ Chạy”** → xác nhận.
    - **🚀 Gửi tất cả cùng lúc** (mặc định): bắn mọi request song song — xong trong 1 phát.
    - **⚡ Song song 5 luồng**: 5 chat cùng lúc — vẫn nhanh nhưng nhẹ hơn cho server.
@@ -235,6 +242,19 @@ qua kênh chưa thử**, không bao giờ "báo gửi" rồi im lặng.
 - **Bộ tổng hợp số tin đã gửi thành công thật sự (v1.52.0) & bản lưu dự phòng v1.51.0**:
   - Thanh **`#ssb-summary`** nằm ngay dưới thanh tiến trình (trên khung LOG), đếm **real-time** số tin đã được server/Extension/Socket **xác nhận đến nơi thật sự** (không đếm nhầm tin mới bắn `fired` chưa xác nhận), tách rõ từng kênh (`[API: X · Ext: Y · Socket: Z]`), số tin đang xử lý nền (`⏳ Đang xử lý`), số tin lỗi (`❌ Lỗi`), không rõ (`⚠ Không rõ`), bỏ qua do tag/SĐT (`🧹 Bỏ qua`), và thời gian chạy (`⏱ Ns`). Khi toàn bộ tin bắn nền & bù ngầm hoàn tất (`pending === 0`), tự động chốt trạng thái `🏁 TỔNG HỢP` (lưu giữ qua F5) và in dòng `📊 TỔNG HỢP CHỐT LƯỢT GỬI: ✅ Đã gửi thành công X/Y tin (%) ...` vào LOG.
   - Bản copy nguyên trạng trước khi thêm tổng hợp được lưu tại **`scripts/pancake-send-by-snippet.v1.51.0-backup.user.js`** để có thể quay lại dùng hoặc sửa bất cứ lúc nào nếu thấy không cần.
+- **🐭 Sửa “click vào đoạn chat không mở được” + sửa nút “Chọn chuỗi (2 nhấp)” (v1.110.1)**: `onDocClick`
+  được đăng ký ở **pha bắt** (`document.addEventListener('click', onDocClick, true)`) nhưng lại gọi
+  `preventDefault()`/`stopPropagation()` cho **mọi** click vào `.conversation-list-item` → sự kiện bị chặn
+  đứt **trước khi Pancake kịp xử lý** ⇒ click vào đoạn chat không mở được chat, không chọn được snippet
+  (lỗi y hệt bản v1.80.4 đã sửa ở commit trước, nhưng file chính v1.110.x chưa được vá).
+  Cách sửa (khớp v1.70/v1.80.5): chỉ can thiệp khi **Alt+click** hoặc đang bật **chế độ chọn chuỗi**
+  (`state.pickMode`); click thường `return` sớm để Pancake mở chat như bình thường.
+  Nhân đó vá tiếp nút **“Chọn chuỗi (2 nhấp)”** — trước đây `state.pickMode` bị tắt ngay sau nhấp đầu
+  nên nhấp thứ 2 rơi vào click thường ⇒ **không bao giờ chọn được chuỗi bằng 2 nhấp thường** (phải Alt+click
+  như cũ). Nay giữ chế độ bật cho tới khi đủ 2 đầu chuỗi, đồng thời **nút tự đổi nhãn** (`nhấp dòng ĐẦU`
+  → `nhấp dòng CUỐI`) và đổi màu xanh khi đang bật. Kiểm chứng bằng jsdom (3 dòng chat giả lập):
+  click thường không bị `preventDefault`, Alt+click 2 lần ra chuỗi A→C (3 chat), 2 nhấp thường ra chuỗi
+  A→B (2 chat), và sau khi xong chuỗi click thường lại mở chat bình thường.
 - **🧩 Câu nhanh NHIỀU ĐOẠN gửi lần lượt theo thứ tự (v1.110.0)**: câu lệnh Pancake có thể gồm nhiều đoạn (`messages[]` — ví dụ đoạn 1 là ảnh, đoạn 2 là 1 câu, đoạn 3 là 1 câu khác). Trước đây script chỉ lấy `messages[0]` nên mất các đoạn sau. Nay `normalizeQuickReply` giữ nguyên từng đoạn (`parts`), khâu chuẩn bị đối chiếu + bind fbId (content_id) **từng đoạn theo từng page**, và khi gửi thì mỗi khách nhận **từng đoạn lần lượt đúng thứ tự của câu lệnh** (trong 1 đoạn có cả ảnh lẫn chữ vẫn ảnh trước → chữ sau như v1.107). Chốt chống trùng: lỗi ngay đoạn đầu (chưa gì đến nơi) thì xử lý kênh/bù như tin thường; đã có đoạn đến nơi rồi mới lỗi thì chốt ⚠ và **không bắn lại từ đầu** để tránh trùng đoạn đã đi. Ô chọn câu và log bắt câu hiện thêm số đoạn ("· 3 đoạn").
 - **🎯 Bắt câu nhanh bằng Alt+Q như gửi tay (v1.109.0)**: thêm chế độ bắt câu đúng thao tác gửi tay của người dùng — bấm nút **🎯 Bắt câu (Alt+Q)** trong panel (hoặc nhấn **Alt+Q** ở bất cứ đâu) thì BOTFAKE hiện băng rôn tím và chờ; người dùng gõ `/` trong khung chat Pancake như bình thường rồi **click vào 1 câu** trong popup. BOTFAKE chặn click ở pha bắt (capture) **trước khi app kịp chèn câu vào composer** → câu không bị gửi/chèn vào chat đang mở, ký tự lệnh còn sót (`/` hoặc đúng shortcut) được dọn khỏi composer. Mã câu đọc từ `.shortcut-tag` trong popup `#qr_autocomplete .suggestion-element` (đúng selector script đang chạy thật của người dùng), rồi đối chiếu với dữ liệu câu nhanh của đúng page đó để lấy đủ **chữ + toàn bộ ảnh (content_id)** và đặt làm câu gửi cho lượt hàng loạt — y như gửi bằng câu lệnh, kể cả khôi phục qua F5 như lựa chọn ở ô dropdown. **Alt+Q/Esc** hủy bắt, tự tắt sau 2 phút nếu không chọn.
 - **⚡ Gửi theo CÂU NHANH Pancake như gửi tay (v1.108.0)**: người dùng cho biết gửi ảnh bình thường chỉ dùng 1 câu lệnh "/" chọn đúng câu (đã gồm chữ + ảnh) là xong. Kiểm chứng `guianh1.har` trên main: câu nhanh chứa 2 ảnh có sẵn `content_ids` → POST `/contents/facebook` bind ra fb_ids chỉ **~30ms** (2 lượt đo 30,8ms/29,4ms), và tin được ghi vào thread **ảnh 03:26:32 → chữ 03:26:33** (ảnh trước, chữ sát sau — nhờ cơ chế ảnh-trước-chữ-sau của v1.107). Ngược lại ảnh chọn tay của BOTFAKE chỉ có URL (upload `/v1/contents` không trả content_id) nên mỗi chat phải bind bằng `urls` — server kéo/xử lý lại file mất **trung bình 1,47s/chat** (đo 155 lượt trong `guicau.har`). Thay đổi: (1) Panel có thêm **⚡ Nạp câu nhanh** + ô chọn câu — nạp từ cache câu nhanh chính chủ của app (`window.__quickReplyCacheManager__.all(pageId)`, bundle @845300) hoặc endpoint settings đúng URL app tự dựng (`load_quick_replies_only=true`, @341733); chọn 1 câu thì chữ tự điền vào ô câu, ảnh của câu gắn cho cả lượt, lựa chọn **lưu qua F5**. (2) Bind **nhiều ảnh trong 1 lượt** bằng `content_ids` (đúng hàm N của app @882612 + đúng HAR: 2 content_ids → 2 fb_ids) cho cả API/Socket/Extension; fbIds đa ảnh giữ riêng ở `ctx.nonReusableFbIds`. (3) Câu nhanh là dữ liệu **từng page**: lượt gửi nhiều page thì page nào cũng được đối chiếu đúng shortcut đó; page thiếu câu nhanh sẽ bị bỏ qua kèm log rõ từng chat — không gửi chữ trơ thiếu ảnh. Ảnh chọn tay giữ nguyên như cũ (chọn ảnh tay sẽ tự bỏ chọn câu nhanh).

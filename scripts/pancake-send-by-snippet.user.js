@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE
 // @namespace    salescript
-// @version      1.110.0
+// @version      1.110.1
 // @description  BOTFAKE — chọn chuỗi chat (Alt+Click 2 đầu) hoặc theo snippet trong Pancake rồi gửi cùng 1 câu (kèm 1 hoặc nhiều ảnh nếu muốn) cho tất cả.
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -45,7 +45,7 @@
 
   const PANEL_ID = 'ssb-root';          // ssb = SaleScript Bulk — không đụng pk-*/adj-*/pancake-* của script khác
   const STYLE_ID = 'ssb-style';
-  const APP_VERSION = '1.110.0'; // khớp @version ở đầu file — hiện lên tiêu đề panel để đối chiếu bản đang chạy
+  const APP_VERSION = '1.110.1'; // khớp @version ở đầu file — hiện lên tiêu đề panel để đối chiếu bản đang chạy
 
   const MAX_NAME_LIST = 12;             // số tên hiển thị khi xác nhận
 
@@ -367,7 +367,9 @@
     state.matches = [];
     highlightRows();
     logLine('🅰 Đã đặt ĐẦU CHUỖI: ' + (info.name || info.id)
-      + ' — giữ Alt và nhấp tiếp dòng CUỐI chuỗi (Esc để hủy)');
+      + (state.pickMode
+        ? ' — nhấp tiếp dòng CUỐI chuỗi (Esc để hủy)'
+        : ' — giữ Alt và nhấp tiếp dòng CUỐI chuỗi (Esc để hủy)'));
     render();
   }
 
@@ -6931,6 +6933,16 @@
       tgl.textContent = state.enabled ? 'BẬT' : 'TẮT';
       tgl.className = 'badge ' + (state.enabled ? 'on' : 'off');
     }
+    const pickBtn = shadow.getElementById('ssb-pick');
+    if (pickBtn) {
+      // Phản ánh trạng thái chế độ "Chọn chuỗi (2 nhấp)" để biết đang chờ nhấp dòng nào
+      pickBtn.className = 'b ' + (state.pickMode ? 'b-blue' : 'b-gray');
+      pickBtn.textContent = state.pickMode
+        ? (state.mode === 'range' && state.rangeStart && !state.rangeEnd
+          ? 'Chọn chuỗi: nhấp dòng CUỐI'
+          : 'Chọn chuỗi: nhấp dòng ĐẦU')
+        : 'Chọn chuỗi (2 nhấp)';
+    }
     const tgt = shadow.getElementById('ssb-target');
     if (tgt) {
       if (state.mode === 'range' && state.rangeStart && state.rangeEnd) {
@@ -7027,11 +7039,17 @@
     const item = e.target && e.target.closest && e.target.closest('.conversation-list-item');
     if (!item) return;
     const isAlt = e.altKey;
+    // Click thường (không Alt, không bật chế độ "Chọn chuỗi (2 nhấp)") = để Pancake mở chat
+    // như bình thường — KHÔNG can thiệp.
+    // Lý do: listener này đăng ký ở CAPTURE phase (document.addEventListener('click', onDocClick, true)),
+    // nên preventDefault/stopPropagation ở đây sẽ chặn ĐỨT sự kiện trước khi Pancake kịp xử lý
+    // → click vào đoạn chat không mở được chat, không chọn được snippet.
+    // Chỉ can thiệp khi Alt+click hoặc đang bật chế độ chọn chuỗi (state.pickMode).
+    if (!isAlt && !state.pickMode) return;
     const info = rowInfo(item);
     if (!info) return;
     e.preventDefault();
     e.stopPropagation();
-    state.pickMode = false;
 
     // Alt + click cùng 1 đoạn 2 lần → chọn từ đoạn này xuống hết cuối danh sách (tùy chọn A)
     const now = Date.now();
@@ -7061,17 +7079,20 @@
     if (isAlt) {
       state.lastAltClickId = info.id;
       state.lastAltClickTime = now;
-      // Alt+Click lần 1 = đầu chuỗi, lần 2 = cuối chuỗi → chọn tất cả ở giữa; lần 3 = bắt đầu chuỗi mới
-      if (state.mode === 'range' && state.rangeStart && !state.rangeEnd) {
-        completeRange(info).catch((err) => logLine('⚠ Lỗi khi tạo chuỗi: ' + err));
-      } else {
-        setRangeStart(info);
-      }
-      render();
-      return;
     }
-
-    // Click thường (không Alt, không Ctrl) = mở chat như bình thường — không can thiệp
+    // Click lần 1 = đầu chuỗi, lần 2 = cuối chuỗi → chọn tất cả ở giữa; lần 3 = bắt đầu chuỗi mới
+    // (Alt+Click hoặc click thường khi đang bật chế độ "Chọn chuỗi (2 nhấp)")
+    const completing = state.mode === 'range' && !!state.rangeStart && !state.rangeEnd;
+    if (completing) {
+      completeRange(info).catch((err) => logLine('⚠ Lỗi khi tạo chuỗi: ' + err));
+      // Đủ 2 đầu chuỗi → tắt chế độ "2 nhấp": click thường lại mở chat như bình thường.
+      state.pickMode = false;
+    } else {
+      setRangeStart(info);
+      // Đang ở chế độ "2 nhấp": GIỮ chế độ bật sau nhấp ĐẦU để nhấp thường kế tiếp
+      // (dòng CUỐI chuỗi) vẫn được script xử lý, không bị Pancake mở chat mất.
+      if (isAlt) state.pickMode = false;
+    }
     render();
   }
 
