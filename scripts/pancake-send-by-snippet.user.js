@@ -64,6 +64,8 @@
     listKey: '',            // key dựng panel list — tránh build lại HTML khi không đổi
     sending: false,
     stopRequested: false,
+    lastAltClickId: null,      // id đoạn vừa Alt+click lần 1 (để phát hiện click cùng đoạn 2 lần)
+    lastAltClickTime: 0,         // thời gian Alt+click lần 1
     sentIds: new Set(),          // id chat đã gửi thành công — giữ qua lượt để "▶ Charging tiếp" không gửi lại
     pickMode: false,
     log: [],
@@ -7025,18 +7027,67 @@
     const item = e.target && e.target.closest && e.target.closest('.conversation-list-item');
     if (!item) return;
     const isAlt = e.altKey;
-    if (!isAlt && !state.pickMode) return; // click thường = mở chat như bình thường
+    const isCtrl = e.ctrlKey || e.metaKey;
     const info = rowInfo(item);
     if (!info) return;
     e.preventDefault();
     e.stopPropagation();
     state.pickMode = false;
-    // Alt+Click lần 1 = đầu chuỗi, lần 2 = cuối chuỗi → chọn tất cả ở giữa; lần 3 = bắt đầu chuỗi mới
-    if (state.mode === 'range' && state.rangeStart && !state.rangeEnd) {
-      completeRange(info).catch((err) => logLine('⚠ Lỗi khi tạo chuỗi: ' + err));
-    } else {
-      setRangeStart(info);
+
+    // Ctrl/Cmd + click: chọn/bỏ chọn TẤT CẢ đoạn cùng snippet trong danh sách hiện tại (toggle)
+    if (isCtrl) {
+      const snippet = info.snippetRaw || info.snippet;
+      const same = state.matches.filter((m) => (m.snippetRaw || m.snippet) === snippet);
+      if (!same.length) {
+        logLine('⚠ Không có đoạn nào cùng snippet trong danh sách hiện tại: “' + clip(snippet, 60) + '”');
+      } else {
+        const allChecked = same.every((m) => m.checked);
+        same.forEach((m) => { m.checked = !allChecked; });
+        logLine((allChecked ? '✅ Bỏ chọn' : '✅ Chọn') + ' ' + same.length + ' đoạn cùng snippet: “' + clip(snippet, 60) + '”');
+      }
+      render();
+      return;
     }
+
+    // Alt + click cùng 1 đoạn 2 lần → chọn từ đoạn này xuống hết cuối danh sách (tùy chọn A)
+    const now = Date.now();
+    if (isAlt && state.lastAltClickId === info.id && now - state.lastAltClickTime < 800) {
+      state.lastAltClickId = null;
+      state.lastAltClickTime = 0;
+      state.mode = 'range';
+      state.target = null;
+      state.rangeStart = info;
+      const rows = state.allRows ? Array.from(state.allRows.values()) : visibleRows();
+      const lastRow = rows[rows.length - 1];
+      if (lastRow) {
+        state.rangeEnd = {
+          id: lastRow.id, name: lastRow.name, snippet: lastRow.snippet,
+          snippetRaw: lastRow.snippetRaw, time: lastRow.time,
+        };
+        computeMatches();
+        logLine('🅰⬇ Chọn từ ' + (info.name || info.id) + ' xuống hết cuối danh sách — ' + state.matches.length + ' chat');
+      } else {
+        state.rangeEnd = null;
+        computeMatches();
+      }
+      render();
+      return;
+    }
+
+    if (isAlt) {
+      state.lastAltClickId = info.id;
+      state.lastAltClickTime = now;
+      // Alt+Click lần 1 = đầu chuỗi, lần 2 = cuối chuỗi → chọn tất cả ở giữa; lần 3 = bắt đầu chuỗi mới
+      if (state.mode === 'range' && state.rangeStart && !state.rangeEnd) {
+        completeRange(info).catch((err) => logLine('⚠ Lỗi khi tạo chuỗi: ' + err));
+      } else {
+        setRangeStart(info);
+      }
+      render();
+      return;
+    }
+
+    // Click thường (không Alt, không Ctrl) = mở chat như bình thường — không can thiệp
     render();
   }
 
