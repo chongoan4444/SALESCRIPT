@@ -6762,13 +6762,18 @@
     const isAlt = e.altKey;
     const info = rowInfo(item);
     if (!info) return;
+    state.pickMode = false;
+
+    // Chỉ can thiệp khi người dùng nhấn Alt + click vào đoạn chat.
+    // Click thông thường (không Alt) để nguyên cho Pancake mở chat như bình thường.
+    if (!isAlt) return;
+
     e.preventDefault();
     e.stopPropagation();
-    state.pickMode = false;
 
     // Alt + click cùng 1 đoạn 2 lần → chọn từ đoạn này xuống hết cuối danh sách (tùy chọn A)
     const now = Date.now();
-    if (isAlt && state.lastAltClickId === info.id && now - state.lastAltClickTime < 800) {
+    if (state.lastAltClickId === info.id && now - state.lastAltClickTime < 800) {
       state.lastAltClickId = null;
       state.lastAltClickTime = 0;
       state.mode = 'range';
@@ -6791,21 +6796,16 @@
       return;
     }
 
-    if (isAlt) {
-      state.lastAltClickId = info.id;
-      state.lastAltClickTime = now;
-      // Alt+Click lần 1 = đầu chuỗi, lần 2 = cuối chuỗi → chọn tất cả ở giữa; lần 3 = bắt đầu chuỗi mới
-      if (state.mode === 'range' && state.rangeStart && !state.rangeEnd) {
-        completeRange(info).catch((err) => logLine('⚠ Lỗi khi tạo chuỗi: ' + err));
-      } else {
-        setRangeStart(info);
-      }
-      render();
-      return;
+    state.lastAltClickId = info.id;
+    state.lastAltClickTime = now;
+    // Alt+Click lần 1 = đầu chuỗi, lần 2 = cuối chuỗi → chọn tất cả ở giữa; lần 3 = bắt đầu chuỗi mới
+    if (state.mode === 'range' && state.rangeStart && !state.rangeEnd) {
+      completeRange(info).catch((err) => logLine('⚠ Lỗi khi tạo chuỗi: ' + err));
+    } else {
+      setRangeStart(info);
     }
-
-    // Click thường (không Alt, không Ctrl) = mở chat như bình thường — không can thiệp
     render();
+    return;
   }
 
   function onKeydown(e) {
