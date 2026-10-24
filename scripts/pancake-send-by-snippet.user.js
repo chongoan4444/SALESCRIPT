@@ -5869,6 +5869,13 @@
     if (state.stopRequested && done < totalAll) {
       logLine('⏸ Đã dừng sớm sau ' + done + '/' + totalAll + ' chat.');
     }
+    // Chạy xong tự nhiên (không phải dừng sớm do người dùng) → reset 2 nút về chế độ ban đầu:
+    // nút chạy về '▶ Charging', nút bên cạnh về '⏹ Dừng' (khóa). Chỉ giữ sentIds khi dừng
+    // giữa chừng để '▶ Charging tiếp' gửi phần còn lại (không gửi trùng, không chạy lại từ đầu).
+    if (!(state.stopRequested && done < totalAll)) {
+      state.sentIds.clear();
+      localStorage.removeItem('SSB_SENT_IDS');
+    }
     if (!sendErr) {
       // chốt per page: check_inbox + contents/touch (app gọi sau gửi — HAR/file "post")
       try {
