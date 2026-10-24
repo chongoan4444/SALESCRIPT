@@ -6756,6 +6756,34 @@
   /* ============================ SỰ KIỆN TOÀN CỤC ============================ */
 
   function onDocClick(e) {
+    // Xử lý click trong panel BOTFAKE (#ssb-list): Ctrl+click chọn/bỏ chọn cùng snippet
+    const listEl = shadow && shadow.getElementById('ssb-list');
+    if (listEl && listEl.contains(e.target)) {
+      const row = e.target.closest && e.target.closest('.item');
+      if (row) {
+        const cb = row.querySelector('input[type="checkbox"][data-i]');
+        if (cb && (e.ctrlKey || e.metaKey)) {
+          const i = parseInt(cb.getAttribute('data-i'), 10);
+          const m = state.matches[i];
+          if (m) {
+            const snippet = m.snippetRaw || m.snippet;
+            const same = state.matches.filter((mm) => (mm.snippetRaw || mm.snippet) === snippet);
+            if (same.length) {
+              const allChecked = same.every((mm) => mm.checked);
+              same.forEach((mm) => { mm.checked = !allChecked; });
+              logLine((allChecked ? '✅ Bỏ chọn' : '✅ Chọn') + ' ' + same.length + ' đoạn cùng snippet: “' + clip(snippet, 60) + '”');
+            }
+            e.preventDefault();
+            e.stopPropagation();
+            render();
+            return;
+          }
+        }
+      }
+      // Click thường trong panel → để checkbox change listener xử lý bình thường
+      return;
+    }
+
     if (!state.enabled) return;
     const item = e.target && e.target.closest && e.target.closest('.conversation-list-item');
     if (!item) return;
