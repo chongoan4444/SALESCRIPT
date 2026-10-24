@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE
 // @namespace    salescript
-// @version      1.111.0
+// @version      1.80.6
 // @description  BOTFAKE — chọn chuỗi chat (Alt+Click 2 đầu) hoặc theo snippet trong Pancake rồi gửi cùng 1 câu (kèm 1 hoặc nhiều ảnh nếu muốn) cho tất cả.
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -45,7 +45,6 @@
 
   const PANEL_ID = 'ssb-root';          // ssb = SaleScript Bulk — không đụng pk-*/adj-*/pancake-* của script khác
   const STYLE_ID = 'ssb-style';
-  const APP_VERSION = '1.111.0'; // khớp @version ở đầu file — hiện lên tiêu đề panel để đối chiếu bản đang chạy
 
   const MAX_NAME_LIST = 12;             // số tên hiển thị khi xác nhận
 
@@ -72,9 +71,9 @@
     savedLists: [],         // các list đã lưu [{id,name,items:[{id,pageId,name,snippet,snippetRaw,time,type,platform}]}]
     listSel: new Set(),     // id các list ĐANG TÍCH — gộp thành lựa chọn để gửi (gửi được nhiều list cùng lúc)
     loadedName: null,       // tên hiển thị (1 list hoặc "N list: …") — hiện ở mục 1
-    quickReply: null,       // câu nhanh Pancake đang chọn { shortcut, text, pageId, items:[{id,url,w,h}] } — nguồn chữ+ảnh kiểu gõ "/"
-    qrList: [],             // danh sách câu nhanh đã nạp cho page hiện tại
-    qrPageId: '',           // page đã nạp qrList
+    imgPick: false,         // đang bật chế độ CHỌN ẢNH TRÊN TRANG (chờ click vào 1 ảnh trên giao diện)
+    listIncomplete: false,  // danh sách tải CHƯA đầy đủ → CHẶN GỬI (tải sai là gửi sai)
+    quickReply: null,       // câu nhanh Pancake bắt bằng Alt+Q { shortcut, text, pageId, items:[{id,url,w,h}], parts:[{text,items}] }
     qrCapture: false,       // đang bật chế độ BẮT CÂU bằng Alt+Q (chờ click vào popup "/" của app)
   };
   state.savedLists = loadSavedLists();
@@ -367,9 +366,7 @@
     state.matches = [];
     highlightRows();
     logLine('🅰 Đã đặt ĐẦU CHUỖI: ' + (info.name || info.id)
-      + (state.pickMode
-        ? ' — nhấp tiếp dòng CUỐI chuỗi (Esc để hủy)'
-        : ' — giữ Alt và nhấp tiếp dòng CUỐI chuỗi (Esc để hủy)'));
+      + ' — giữ Alt và nhấp tiếp dòng CUỐI chuỗi (Esc để hủy)');
     render();
   }
 
@@ -422,34 +419,7 @@
   const UI_KEY = 'ssb_ui_state';       // tick câu + ô nội dung đang gõ — giữ qua F5
   const SL_BAK = SL_KEY + '_bak';      // bản dự phòng câu — chống mất dữ liệu
 
-  // v1.93.0: MỖI TAB MỘT DANH TÍNH RIÊNG (sessionStorage: khác nhau giữa các tab, vẫn giữ
-  // nguyên qua F5 trong cùng 1 tab) — dữ liệu "đang làm dở" của tab nào nằm riêng tab đó,
-  // mở 2 tab cùng lúc KHÔNG dính vào nhau. Dữ liệu CHUNG (câu đã lưu, kho global_id) thì
-  // HỢP NHẤT khi ghi (persistSavedLists / flushPersistentGids) — không tab nào ghi đè mất của ai.
-  const TAB_ID = (() => {
-    try {
-      let t = sessionStorage.getItem('ssb_tab_id');
-      if (!t) {
-        t = Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
-        sessionStorage.setItem('ssb_tab_id', t);
-      }
-      return t;
-    } catch (e) { return 'tab'; }
-  })();
-  const UI_TAB_KEY = UI_KEY + '__' + TAB_ID;    // trạng thái gõ dở (tick câu + ô nội dung) — riêng từng tab
-  const LOG_TAB_KEY = LOG_KEY + '__' + TAB_ID;   // nhật ký — riêng từng tab
-  const SL_GONE_KEY = SL_KEY + '_gone_v1';      // id câu đã XÓA/TIÊU THỤ ở MỌI tab — chống tab khác hồi sinh
-  const HB_KEY = 'ssb_sending_hb_v1';           // heartbeat "có tab đang gửi" — chỉ để cảnh báo gửi song song
-  const goneListIds = new Set();                // id câu TAB NÀY vừa xóa/tiêu thụ → ghi tombstone khi lưu
-  function readGoneIds() {
-    try {
-      const a = JSON.parse(localStorage.getItem(SL_GONE_KEY) || '[]');
-      return new Set(Array.isArray(a) ? a : []);
-    } catch (e) { return new Set(); }
-  }
-
   function loadSavedLists() {
-    const goneNow = readGoneIds(); // v1.93.0: câu đã xóa/tiêu thụ ở tab khác thì không hiện lại
     try {
       const raw = localStorage.getItem(SL_KEY);
       let arr;
@@ -462,7 +432,7 @@
       }
       if (!Array.isArray(arr)) return [];
       // câu cũ (lưu trước khi có text) → nội dung rỗng — vẫn gửi được bằng ô đang gõ
-      return arr.filter((l) => l && l.id && Array.isArray(l.items) && !goneNow.has(l.id))
+      return arr.filter((l) => l && l.id && Array.isArray(l.items))
         .map((l) => ({ ...l, text: String(l.text || '') }));
     } catch (e) {
       // dữ liệu chính hỏng → thử bản dự phòng trước khi bỏ cuộc
@@ -470,7 +440,7 @@
         const bak = JSON.parse(localStorage.getItem(SL_BAK) || '[]');
         if (Array.isArray(bak) && bak.length) {
           logLine('💾 Dữ liệu câu bị hỏng — đã khôi phục ' + bak.length + ' câu từ bản dự phòng.');
-          return bak.filter((l) => l && l.id && Array.isArray(l.items) && !goneNow.has(l.id))
+          return bak.filter((l) => l && l.id && Array.isArray(l.items))
             .map((l) => ({ ...l, text: String(l.text || '') }));
         }
       } catch (e2) { /* ignore */ }
@@ -482,27 +452,7 @@
     try {
       const prev = localStorage.getItem(SL_KEY);
       if (prev && prev !== '[]') localStorage.setItem(SL_BAK, prev); // giữ 1 bản trước — chống mất dữ liệu
-      // v1.93.0: HỢP NHẤT ĐA TAB — không ghi đè mù bằng bản RAM của tab này nữa:
-      //  • câu của TAB KHÁC (có trong bản đang lưu, tab này không giữ, chưa bị đánh dấu đã xóa) → GIỮ NGUYÊN;
-      //  • câu trùng id ở cả 2 phía → lấy bản sửa MỚI HƠN (updatedAt);
-      //  • câu đã xóa/đã tiêu thụ ở bất kỳ tab nào (tombstone SL_GONE_KEY) → KHÔNG bao giờ hồi sinh.
-      let stored = [];
-      try { const p = JSON.parse(prev || '[]'); if (Array.isArray(p)) stored = p; } catch (e) { stored = []; }
-      const gone = readGoneIds();
-      goneListIds.forEach((id) => gone.add(id));
-      const storedById = new Map(stored.filter((l) => l && l.id).map((l) => [l.id, l]));
-      const mine = (state.savedLists || []).filter((l) => l && l.id && !gone.has(l.id)).map((l) => {
-        const st = storedById.get(l.id);
-        return (st && (st.updatedAt || 0) > (l.updatedAt || 0)) ? st : l;
-      });
-      const myIds = new Set(mine.map((l) => l.id));
-      const others = stored.filter((l) => l && l.id && !myIds.has(l.id) && !gone.has(l.id));
-      const merged = mine.concat(others);
-      localStorage.setItem(SL_KEY, JSON.stringify(merged));
-      const mergedIds = new Set(merged.map((l) => l.id));
-      let goneArr = Array.from(gone).filter((id) => !mergedIds.has(id));
-      if (goneArr.length > 1000) goneArr = goneArr.slice(goneArr.length - 1000);
-      try { localStorage.setItem(SL_GONE_KEY, JSON.stringify(goneArr)); } catch (e) { /* ignore */ }
+      localStorage.setItem(SL_KEY, JSON.stringify(state.savedLists));
       return true;
     } catch (e) {
       logLine('⚠ Không lưu được câu vào localStorage: ' + (e && e.message || e));
@@ -514,27 +464,12 @@
   function persistUiState() {
     try {
       const msgEl = shadow && shadow.getElementById('ssb-msg');
-      localStorage.setItem(UI_TAB_KEY, JSON.stringify({
+      localStorage.setItem(UI_KEY, JSON.stringify({
         sel: Array.from(state.listSel || []),
         msg: (msgEl && msgEl.value) || '',
       }));
     } catch (e) { /* ignore — lưu trạng thái là việc phụ */ }
   }
-
-  // v1.93.0: tab khác vừa thêm/sửa/xóa câu → tab này tự đồng bộ lại danh sách câu (chỉ khi
-  // KHÔNG đang gửi — đang gửi thì RAM của tab này là chuẩn, không ai được sửa giữa chừng).
-  window.addEventListener('storage', (ev) => {
-    try {
-      if (!ev || (ev.key !== SL_KEY && ev.key !== SL_GONE_KEY)) return;
-      if (state.sending) return;
-      state.savedLists = loadSavedLists();
-      if (state.listSel) {
-        const okIds = new Set(state.savedLists.map((l) => l.id));
-        state.listSel = new Set(Array.from(state.listSel).filter((id) => okIds.has(id)));
-      }
-      renderSavedLists();
-    } catch (e) { /* ignore */ }
-  });
 
   // Từ các câu ĐANG TÍCH → dựng lựa chọn hiện tại (gộp chat của mọi câu, loại trùng id)
   function rebuildFromLists() {
@@ -652,7 +587,6 @@
       const changed = newName !== l.name || newText !== (l.text || '');
       l.name = newName;
       l.text = newText;
-      l.updatedAt = Date.now(); // v1.93.0: dấu thời gian sửa — tab khác hợp nhất sẽ lấy bản mới hơn
       persistSavedLists();
       renderSavedLists();
       if (state.listSel.has(l.id)) rebuildFromLists(); // câu đang tích → ô cần gửi cập nhật theo
@@ -819,7 +753,7 @@
       try {
         // fetch trần KHÔNG tự hết hạn — kết nối treo là await treo theo → chặn toàn bộ lượt gửi
         const ctl = (typeof AbortController === 'function') ? new AbortController() : null;
-        if (ctl) abortTimer = setTimeout(() => ctl.abort(), 15000);
+        if (ctl) abortTimer = setTimeout(() => ctl.abort(), (reqOpts && reqOpts.timeoutMs) || 15000);
         const r = await fetch(url, {
           method: isPost ? 'POST' : 'GET',
           body: (isPost && reqOpts.bodyObj) ? buildFormDataFromObj(reqOpts.bodyObj) : undefined,
@@ -855,22 +789,6 @@
       }
     }
     return { ok: false, error: lastErr || 'Không tải được' };
-  }
-
-  // fetch CÓ HẠN CHÓT (v1.105.0): fetch trần của trình duyệt KHÔNG tự hết hạn — 1 kết nối bị
-  // server treo (hay gặp khi Pancake nghẽn/429) là worker gửi treo VĨNH VIỄN theo: đợt gửi
-  // không bao giờ khép lại, bấm Dừng cũng không thả được nút Chạy (Dừng chỉ ngăn việc MỚI).
-  // Mọi fetch trên ĐƯỜNG GỬI phải qua đây (hạn 15s như fetchJson của khâu tải).
-  async function fetchWithTimeout(url, opts, ms) {
-    const limit = ms || 15000;
-    if (typeof AbortController !== 'function') return fetch(url, opts || {});
-    const ctl = new AbortController();
-    const t = setTimeout(() => { try { ctl.abort(); } catch (e) { /* ignore */ } }, limit);
-    try {
-      return await fetch(url, Object.assign({}, opts || {}, { signal: ctl.signal }));
-    } finally {
-      clearTimeout(t);
-    }
   }
 
   // Đọc tham số danh sách GIỐNG HỆT app (buildConversationsRequest — module 907775 @1402744 trong _app):
@@ -1163,7 +1081,7 @@
         const res = await fetchPage(seg.pageCount, seg.cursor, seg.items.length, { forceMulti });
         if (!res.ok) {
           if (guard === 1 && !forceMulti) { forceMulti = true; guard--; continue; }
-          return guard === 1 ? { ok: false, error: 'API danh sách lỗi trang 1: ' + res.error } : { ok: true, rows: seg.items };
+          return guard === 1 ? { ok: false, error: 'API danh sách lỗi trang 1: ' + res.error } : { ok: true, rows: seg.items, incomplete: true };
         }
         const j = res.data || {};
         const convs = j.conversations || [];
@@ -1173,7 +1091,8 @@
         if (onProgress) onProgress(seg.items.length, seg.items);
         if (!seg.cursor || !convs.length || !added || (opts && opts.maxPages && guard >= opts.maxPages)) break;
       }
-      return { ok: true, rows: seg.items };
+      // hết vòng lặp mà cursor vẫn còn = còn dữ liệu chưa tải → CHƯA đầy đủ (trừ khi user tự dừng / giới hạn trang có chủ đích)
+      return { ok: true, rows: seg.items, incomplete: !!(seg.cursor && !stopped() && !(opts && opts.maxPages)) };
     };
 
     if (!plainMode) return loadSequential();
@@ -1191,6 +1110,7 @@
     if (probeIds.length >= 2) {
       const perPage = new Map(); // pageId -> rows[]
       const allSet = new Set();
+      const incompletePages = new Set(); // page tải lỗi/thiếu → không được im lặng bỏ qua
       let total = 0;
       let firstPageErrors = 0;
       let midErrors = 0;
@@ -1202,7 +1122,7 @@
         let guard = 0;
         while (guard++ < 1500 && !stopAll && !stopped()) {
           const res = await fetchPage({}, seg.cursor, seg.items.length, { singlePageId: pid, tries: seg.started ? 2 : 3, timeoutMs: 12000 });
-          if (!res.ok) { if (!seg.started) firstPageErrors++; else midErrors++; return; }
+          if (!res.ok) { if (!seg.started) firstPageErrors++; else midErrors++; incompletePages.add(pid); return; }
           seg.started = true;
           const j = res.data || {};
           const convs = j.conversations || [];
@@ -1217,9 +1137,15 @@
           total += seg.items.length - before;
           seg.cursor = (convs.length && j.next_cursor) ? j.next_cursor : null;
           if (onProgress) onProgress(total, null);
-          if (!seg.cursor || !convs.length || seg.items.length === before) return;
+          if (!seg.cursor || !convs.length) return;
+          if (seg.items.length === before) {
+            // trang trả về mà không thêm được chat mới (trùng dữ liệu) — đi tiếp tối đa 5 trang,
+            // vẫn không thêm được thì page này CHƯA đầy đủ, không được coi như đã hết
+            if ((seg.noAddStreak = (seg.noAddStreak || 0) + 1) >= 5) { incompletePages.add(pid); return; }
+          } else seg.noAddStreak = 0;
           if (isRangeSatisfied(allSet)) { stopAll = true; return; }
         }
+        if (seg.cursor && !stopAll && !stopped()) incompletePages.add(pid); // hết vòng lặp mà chưa hết dữ liệu
       };
       const POOL = Math.min(10, queue.length);
       const workers = [];
@@ -1227,9 +1153,10 @@
         workers.push((async () => { while (queue.length && !stopAll && !stopped()) { const pid = queue.shift(); await chain(pid); } })());
       }
       await Promise.all(workers);
-      // Page nào lỗi trang đầu (endpoint lẻ không được) → bù bằng đường chung tuần tự nếu mất quá nhiều
-      if (!total || firstPageErrors >= Math.ceil(probeIds.length / 2) || midErrors > 0) {
-        logLine('⚠ Tải song song theo page không khả thi — chuyển về tải đa luồng chung…');
+      // CHỈ CẦN 1 page tải lỗi/thiếu là danh sách KHÔNG còn đầy đủ → tải lại toàn bộ bằng
+      // đường đa luồng chung (tuyệt đối không dùng danh sách mất nguyên 1 page để gửi)
+      if (!stopAll && !stopped() && (incompletePages.size || !total || firstPageErrors >= Math.ceil(probeIds.length / 2) || midErrors > 0)) {
+        logLine('⚠ ' + (incompletePages.size ? incompletePages.size + ' page tải chưa hết (' + Array.from(incompletePages).slice(0, 5).join(', ') + (incompletePages.size > 5 ? '…' : '') + ')' : 'Tải song song theo page không khả thi') + ' — tải lại toàn bộ bằng đường đa luồng chung để đảm bảo đủ danh sách…');
         return loadSequentialOrStitch();
       }
       const rows = [];
@@ -1271,24 +1198,27 @@
       };
       pushConvs(seg0, (p1.data && p1.data.conversations) || []);
       if (onProgress) onProgress(seg0.items.length, seg0.items);
-      if (!seg0.cursor || stopped() || isRangeSatisfied(seg0.set)) return { ok: true, rows: seg0.items };
+      if (!seg0.cursor || stopped() || isRangeSatisfied(seg0.set)) return { ok: true, rows: seg0.items, stopped: stopped() };
 
       const parsed0 = parseErlangCursor(seg0.cursor);
       if (!parsed0) {
         // Cursor lạ → tuần tự từ trang 2
         let guard = 1;
-        while (guard++ < 1500 && !stopped()) {
+        while (guard++ < 1500 && seg0.cursor && !stopped()) {
           const before = seg0.items.length;
           const res = await fetchPage(seg0.pageCount, seg0.cursor, seg0.items.length, { forceMulti: forceMultiEndpoint });
-          if (!res.ok) break;
+          if (!res.ok) { seg0.truncated = true; break; }
           const j = res.data || {};
           pushConvs(seg0, j.conversations || []);
           if (j.pages_with_current_count) seg0.pageCount = Object.assign({}, seg0.pageCount, j.pages_with_current_count);
           seg0.cursor = (j.conversations && j.conversations.length && j.next_cursor) ? j.next_cursor : null;
           if (onProgress) onProgress(seg0.items.length, seg0.items);
-          if (!seg0.cursor || seg0.items.length === before || isRangeSatisfied(seg0.set)) break;
+          if (!seg0.cursor || isRangeSatisfied(seg0.set)) break;
+          if (seg0.items.length === before && (seg0.noAddStreak = (seg0.noAddStreak || 0) + 1) >= 10) { seg0.truncated = true; break; }
+          if (seg0.items.length !== before) seg0.noAddStreak = 0;
         }
-        return { ok: true, rows: seg0.items };
+        if (seg0.cursor && !stopped() && !isRangeSatisfied(seg0.set)) seg0.truncated = true;
+        return { ok: true, rows: seg0.items, incomplete: !!seg0.truncated && !stopped(), stopped: stopped() };
       }
 
       const STRIDES = [1.1, 2.2, 3.3, 4.4, 5.5, 6.6, 7.7, 8.8, 9.9, 11];
@@ -1420,18 +1350,29 @@
         seg0.cursor = (convs.length && j.next_cursor) ? j.next_cursor : null;
         stitch();
         if (onProgress) onProgress(seg0.items.length, seg0.items);
-        if (seg0.items.length === before || !seg0.cursor || isRangeSatisfied(seg0.set)) break;
+        if (!seg0.cursor || isRangeSatisfied(seg0.set)) break;
+        if (seg0.items.length === before) {
+          // 1 trang không thêm được chat mới (dữ liệu trùng/chồng lấn) chưa phải là hết danh
+          // sách — cursor đã tiến thì cứ đi tiếp; 10 trang liên tiếp như vậy mới coi là kẹt
+          if ((seg0.noAddStreak = (seg0.noAddStreak || 0) + 1) >= 10) {
+            seg0.truncated = true;
+            logLine('⚠ Tải kẹt: 10 trang liên tiếp không thêm được chat mới ở ' + seg0.items.length + ' chat — danh sách CHƯA đầy đủ.');
+            break;
+          }
+        } else seg0.noAddStreak = 0;
         // Bổ sung luồng phụ thay những luồng đã khâu/chết — nhưng không vượt ngân sách sống
         // (rl.helperBudget bị cắt một nửa sau mỗi lần server trả 429)
         const alive = segments.filter((s) => !s.absorbed && s.cursor).length;
         for (let s = alive; s < Math.min(STRIDES.length, rl.helperBudget); s++) spawnHelper();
       }
       helpersDone = true;
+      // hết vòng lặp mà cursor vẫn còn (chưa đi tới cuối) = CHƯA đầy đủ
+      if (seg0.cursor && !stopped() && !isRangeSatisfied(seg0.set)) seg0.truncated = true;
       logLine('⚡⚡ Tải đa luồng 1 page: ' + seg0.items.length + ' chat trong ' + ((Date.now() - startedAt) / 1000).toFixed(1) + 's'
         + ' (~' + Math.round(seg0.items.length / Math.max(1, (Date.now() - startedAt) / 1000)) + ' chat/giây)'
         + (rl.hits ? ' · 🧯 dính 429×' + rl.hits + ' (đã tự giảm luồng)' : '')
         + (seg0.truncated ? ' · ⚠ CHƯA ĐẦY ĐỦ' : ''));
-      return { ok: true, rows: seg0.items };
+      return { ok: true, rows: seg0.items, incomplete: !!seg0.truncated && !stopped(), stopped: stopped() };
     }
   }
 
@@ -1684,11 +1625,6 @@
   }
 
   // Danh sách là virtual list (rc-virtual-list): chỉ render các dòng đang thấy.
-  // v1.104.0: ĐÃ GỠ khâu "chuẩn bị ngay khi tải danh sách" (startPrepAfterLoad của
-  // v1.92–v1.95) theo đánh giá của người dùng là vô dụng: nó đốt hàng trăm luồng dò mã
-  // sau mỗi lần tải mà lúc bấm gửi, làn bắn vẫn tự nạp được như thường. Mã tra được lúc
-  // gửi vẫn lưu vào kho bền qua saveCache sẵn có — lượt sau vẫn có sẵn ở 0ms.
-
   // Khi người dùng bấm "⚡ Tải danh sách": PHẢI XÓA SẠCH DANH SÁCH CŨ (state.allRows = null)
   // rồi tải lại danh sách mới hoàn toàn từ đầu. Nếu đang tải dở mà bấm lần 2 → dừng ngay & dùng số chat đã tải!
   async function scanFullList() {
@@ -1707,6 +1643,7 @@
 
     state.scanning = true;
     state.scanStopRequested = false;
+    state.listIncomplete = false;
 
     try {
       // XÓA SẠCH DANH SÁCH CŨ TRƯỚC KHI TẢI LẠI — tránh giữ lại dữ liệu/thứ tự cũ gây lỗi
@@ -1747,10 +1684,26 @@
         if (cntEl) cntEl.textContent = String(state.allRows.size);
       };
 
-      const api = await loadListViaApi((n, rowsArr) => {
+      const apiProgress = (n, rowsArr) => {
         setBtn('⏹ Dừng tải (' + n + ' chat)');
         syncLiveRows(rowsArr);
-      });
+      };
+      let api = await loadListViaApi(apiProgress);
+      if (api && api.ok && api.incomplete && !api.stopped) {
+        // Tải thiếu mà dùng để gửi là gửi sai — tự tải lại từ đầu 1 lần nữa
+        logLine('⚠ Danh sách tải lần 1 CHƯA đầy đủ (' + api.rows.length + ' chat) — đang tải lại từ đầu…');
+        lastSyncedLen = 0;
+        state.allRows = null;
+        const api2 = await loadListViaApi(apiProgress);
+        if (api2 && api2.ok) api = api2;
+      }
+      if (api && api.ok && api.incomplete && !api.stopped) {
+        state.listIncomplete = true;
+        state.allRows = null;
+        logLine('⛔ Tải 2 lần vẫn CHƯA đầy đủ (' + api.rows.length + ' chat) — KHÔNG dùng danh sách thiếu để gửi (gửi sẽ sai). Kiểm tra mạng rồi bấm ⚡ Tải danh sách lại.');
+        setBtn('⚠ Tải chưa đủ — bấm tải lại');
+        return;
+      }
       if (api && api.ok && api.rows.length) {
         // kiểm tra khớp với các dòng đang thấy trên màn hình:
         //  - thiếu dòng nào → API khác màn hình → quét giao diện
@@ -1782,8 +1735,9 @@
           let ord = 0;
           found.forEach((v) => { v.order = ord++; });
           state.allRows = found;
+          state.listIncomplete = false;
           setBtn('⚡ Tải danh sách (' + found.size + ' chat)');
-          logLine('⚡ Tải qua API: ' + found.size + ' chat — không cần cuộn');
+          logLine('⚡ Tải qua API: ' + found.size + ' chat — ĐẦY ĐỦ, không cần cuộn');
           computeMatches();
           render();
           return;
@@ -1872,7 +1826,9 @@
     } finally {
       state.scanning = false;
       state.scanStopRequested = false;
-      if (btn && state.allRows) {
+      if (btn && state.listIncomplete) {
+        setBtn('⚠ Tải chưa đủ — bấm tải lại');
+      } else if (btn && state.allRows) {
         setBtn('⚡ Tải danh sách (' + state.allRows.size + ' chat)');
       } else if (btn) {
         setBtn('⚡ Tải danh sách');
@@ -2242,7 +2198,7 @@
       + '/conversations/' + encodeURIComponent(convId)
       + '/messages?access_token=' + encodeURIComponent(token);
     try {
-      const res = await fetchWithTimeout(url, {
+      const res = await fetch(url, {
         method: 'POST',
         headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
@@ -2415,12 +2371,12 @@
       const makeFetchOpts = (rObj) => (rObj.isJson
         ? { method: 'POST', body: JSON.stringify(rObj.jsonBody), headers: { Accept: 'application/json', 'Content-Type': 'application/json' }, credentials: 'include' }
         : { method: 'POST', body: rObj.fd, headers: { Accept: 'application/json' }, credentials: 'include' });
-      let res = await fetchWithTimeout(req.url, makeFetchOpts(req));
+      let res = await fetch(req.url, makeFetchOpts(req));
       if (res && res.status === 429 && myRun === runSeq && !state.stopRequested) {
         await sleep(600);
         const req2 = buildInboxSend(conv, text, photo);
         if (!req2.error) {
-          res = await fetchWithTimeout(req2.url, makeFetchOpts(req2));
+          res = await fetch(req2.url, makeFetchOpts(req2));
         }
       }
       if (myRun !== runSeq) return;
@@ -2434,8 +2390,7 @@
       if (certainFail) {
         // "(#10)…ngoài khoảng thời gian…"/"(#551)" KHÔNG phải "mọi kênh đều thua": app vẫn fallback
         // Extension/Socket và gửi ĐƯỢC (log 07:36 — Thanh Binh bù THÀNH CÔNG qua Extension ngay sau
-        // "(#10)"). → PHẢI bù qua kênh chưa thử. (v1.103.0: khôi phục đúng v1.80 theo yêu cầu
-        // người dùng — gỡ cơ chế "bỏ qua thẳng" của v1.99 vì có ca #551 gửi lại vẫn được.)
+        // "(#10)"; HAR có update_global_id chạy sau cả "(#551)"). → PHẢI bù qua kênh chưa thử.
         const win = isWindowClosedError(msg);
         if (win) windowBlocked++;
         if (isThreadControlError(msg) && !batchSkipApi) {
@@ -2471,12 +2426,12 @@
       const makeFetchOpts = (rObj) => (rObj.isJson
         ? { method: 'POST', body: JSON.stringify(rObj.jsonBody), headers: { Accept: 'application/json', 'Content-Type': 'application/json' }, credentials: 'include' }
         : { method: 'POST', body: rObj.fd, headers: { Accept: 'application/json' }, credentials: 'include' });
-      let res = await fetchWithTimeout(req.url, makeFetchOpts(req));
+      let res = await fetch(req.url, makeFetchOpts(req));
       if (res && res.status === 429 && !state.stopRequested) {
         await sleep(600);
         const req2 = buildInboxSend(conv, text, photo);
         if (!req2.error) {
-          res = await fetchWithTimeout(req2.url, makeFetchOpts(req2));
+          res = await fetch(req2.url, makeFetchOpts(req2));
         }
       }
       let data = {};
@@ -2564,7 +2519,7 @@
     try {
       const token = getToken();
       if (!token) return peekConv(conv);
-      const res = await fetchWithTimeout(apiBase() + '/v1/pages/' + (conv.pageId || conv.id.split('_')[0])
+      const res = await fetch(apiBase() + '/v1/pages/' + (conv.pageId || conv.id.split('_')[0])
         + '/conversations/' + encodeURIComponent(conv.id)
         + '?access_token=' + encodeURIComponent(token),
         { headers: { Accept: 'application/json' }, credentials: 'include' });
@@ -2681,23 +2636,7 @@
   //     (extBacklogQueue), TUYỆT ĐỐI KHÔNG giữ chân worker của Làn Nhanh!
   //   • Bước 2 + 3 (Chạy trong hồ nền extBacklogQueue): Đua song song WebSocket PENDING_MESSAGES + Extension,
   //     kèm mạch ngắt thông minh (extNullStreak) và TUYỆT ĐỐI không trả về from_psid sai để bắn mù vào Socket!
-  // v1.97.0: CHỐNG DÒ TRÙNG — pipeline chuẩn bị nền và làn gửi cùng dò global_id cho 1 chat
-  // thì dùng CHUNG 1 lượt dò đang chạy (đắt nhất là các ca phải hỏi Extension), không đốt 2
-  // lần và không tranh làn Extension với nhau. forceFind (đợt bù ép dò lại) không dùng chung.
-  const gidResolveInflight = new Map();
   async function resolveGlobalId(full, threadId, cacheKey, convFromPsid, forceFind, ctx) {
-    const dKey = String(cacheKey || (full && full.id) || '') + '|' + String(threadId || '');
-    if (!forceFind && dKey !== '|') {
-      const flying = gidResolveInflight.get(dKey);
-      if (flying) return flying;
-      const p = resolveGlobalIdInner(full, threadId, cacheKey, convFromPsid, forceFind, ctx);
-      gidResolveInflight.set(dKey, p);
-      try { return await p; } finally { gidResolveInflight.delete(dKey); }
-    }
-    return resolveGlobalIdInner(full, threadId, cacheKey, convFromPsid, forceFind, ctx);
-  }
-
-  async function resolveGlobalIdInner(full, threadId, cacheKey, convFromPsid, forceFind, ctx) {
     const key = (full && full.id) || cacheKey;
     const pageId = (full && full.page_id) || (full && full.pageId) || String(cacheKey || '').split('_')[0];
     const tKey = (pageId && threadId) ? (pageId + '_' + threadId) : '';
@@ -2813,10 +2752,6 @@
       }
     };
 
-    // v1.89.0: thời gian dò về ĐÚNG bản nhanh v1.80 (WS chờ 1,5s). Bản 1.86/1.87 chờ 9s/6s làm
-    // mỗi chat chưa có sẵn global_id nằm đủ cửa sổ trong làn nền → tốc độ sập còn ~41 tin/s.
-    // global_id về muộn vẫn được bắt lại ngay trước khi bắn (sendViaSocket đối chiếu
-    // threadMappingStoreV2 lần cuối), nên chờ ngắn không làm mất cơ hội gửi của chat nào.
     const wsWaitMs = 1500;
     const extWaitMs = 10000;
     const raceTasks = [];
@@ -2956,11 +2891,7 @@
             finishExt(null, !!(mlRes && mlRes.timedOut !== true));
           }).catch(() => finishExt(null, false));
         };
-        if (ctx && ctx.prepLight) {
-          // v1.97.0: pipeline nền lúc đang bắn chỉ dò NHẸ (cache + WebSocket) — không hỏi
-          // Extension ở đây để khỏi tranh làn Ext với các tin đang gửi; ca khó để làn gửi/đợt bù lo.
-          finishExt(null, false);
-        } else if (typeof window.findGlobalIdForConv === 'function') {
+        if (typeof window.findGlobalIdForConv === 'function') {
           Promise.resolve().then(() => window.findGlobalIdForConv({
             pageId: pageId,
             threadId: threadId,
@@ -2972,23 +2903,19 @@
           })).then((v) => {
             if (v && String(v) !== badGid) {
               finishExt(v, false);
-            } else if ((ctx && ctx.prepMode) || isLargeBatch) {
-              // v1.102.0: quay về ĐÚNG v1.80.0 — chuẩn bị hàng loạt và LÔ LỚN không đốt
-              // MAKE_MESSENGER_LINK ở đây: findGlobalIdForConv trả null = Extension đã xác
-              // nhận không có global_id; gọi thêm ML (tới 5s/lệnh) cho hàng nghìn chat chết
-              // làm nghẽn làn dò mã của cả lô (v1.90 bật ML ở mọi quy mô — khác biệt thật
-              // so với v1.80 trên đường dò). ML chỉ còn giữ cho lô nhỏ (<=50) như bản gốc.
+            } else if (isLargeBatch) {
+              // Chính findGlobalIdForConv của Extension đã chạy xong và trả về null → xác nhận khách khóa nick
               finishExt(null, true);
             } else {
               tryMessengerLink();
             }
           }).catch(() => {
-            // v1.102.0: lô lớn cũng chốt luôn như v1.80.0 — không rẽ sang MAKE_MESSENGER_LINK
-            if ((ctx && ctx.prepMode) || isLargeBatch) finishExt(null, false);
-            else tryMessengerLink();
+            if (isLargeBatch) {
+              finishExt(null, false);
+            } else {
+              tryMessengerLink();
+            }
           });
-        } else if (ctx && ctx.prepMode) {
-          finishExt(null, false);
         } else {
           tryMessengerLink();
         }
@@ -3251,9 +3178,6 @@
   // Khi chuẩn bị song song (resolveGlobalId + uploadOneTimePhoto) mà phát hiện chat đã khóa nick trước khi bắn,
   // fbId chưa dùng sẽ được cất vào spareFbIdPool[pageId] để chat sống tiếp theo lấy dùng ngay ở 0ms!
   const spareFbIdPool = {};
-  // v1.88.0: fbId ảnh đã UPLOAD TRƯỚC ở pipeline nạp nền, theo từng conversation (upload kèm
-  // conv_id nên chỉ dùng cho đúng chat đó, chưa từng bắn → dùng 1 lần như fbId mới tinh).
-  const prefetchPhotoFbId = {};
   // 🔒 KHÓA CHỐNG TRÙNG (v1.72.0): các chat đã BẮN Socket ở chế độ bắn-nhả mà ACK chưa chốt.
   // Khi chat còn trong tập này: không kênh nào được bắn thêm cho chat đó (kể cả bù Extension) —
   // chỉ khi FB XÁC NHẬN TỪ CHỐI (rejected) thì mới được bù. Chặn đứng mọi đường bắn chồng gây lặp câu.
@@ -3276,7 +3200,7 @@
   // Nhưng nếu fbId vừa tạo ra mà CHƯA TỪNG BẮN (nằm trong spareFbIdPool[pageId]), lấy dùng ngay ở 0ms!
   function uploadOneTimePhoto(pageId, photo, convId, ctx, forceFresh) {
     if (!photo) return Promise.resolve(null);
-    // v1.108.0: NHIỀU ẢNH (câu nhanh ≥2 ảnh): bind cả mảng fbIds trong 1 lượt /contents/facebook
+    // NHIỀU ẢNH (câu nhanh Alt+Q có ≥2 ảnh): bind cả mảng fbIds trong 1 lượt /contents/facebook
     // (đúng guianh1.har: 2 content_ids → 2 fb_ids trong ~30ms). fbIds của chat này giữ ở
     // ctx.nonReusableFbIds — tách hẳn fbId đơn của đường 1 ảnh bên dưới.
     const _items = normalizePhotoItems(photo);
@@ -3292,23 +3216,14 @@
         .catch((e) => ({ ok: false, error: String(e && e.message || e) }));
     }
     if (!forceFresh && ctx && ctx.nonReusableFbId) {
-      return Promise.resolve({ ok: true, fbId: ctx.nonReusableFbId, fbIds: [ctx.nonReusableFbId] });
-    }
-    // v1.88.0: chat này đã được pipeline nạp nền upload ảnh trước → lấy dùng ngay (0ms),
-    // khỏi chờ ~1,5s upload trong đường bắn. forceFresh (bắn lại sau khi bị từ chối) vẫn
-    // upload mới tinh như cũ — không dùng lại bất kỳ fbId nào đã gắn với 1 lần bắn.
-    if (!forceFresh && convId && prefetchPhotoFbId[convId]) {
-      const pf = prefetchPhotoFbId[convId];
-      delete prefetchPhotoFbId[convId];
-      if (ctx) ctx.nonReusableFbId = pf;
-      return Promise.resolve({ ok: true, fbId: pf, fbIds: [pf] });
+      return Promise.resolve({ ok: true, fbId: ctx.nonReusableFbId });
     }
     const pid = String(pageId || '');
     if (pid && spareFbIdPool[pid] && spareFbIdPool[pid].length > 0) {
       const pooledFbId = spareFbIdPool[pid].pop();
       if (pooledFbId) {
         if (ctx) ctx.nonReusableFbId = pooledFbId;
-        return Promise.resolve({ ok: true, fbId: pooledFbId, fbIds: [pooledFbId] });
+        return Promise.resolve({ ok: true, fbId: pooledFbId });
       }
     }
     return photoUploadLane(() => uploadPhotoForPage(pageId, photo, { reusable: false, convId: convId }))
@@ -3394,12 +3309,7 @@
     //        - Nếu gặp khách còn sống nằm lẫn trong cục: gói Chữ đi thành công (ok) → reset streak = 0 và lập tức
     //          upload ảnh bắn tiếp phần Ảnh ngay lập tức (khách sống vẫn nhận đủ 100% cả chữ lẫn ảnh)!
     const hasTextMsg = !!(text && String(text).trim().length > 0);
-    // v1.107.0: BỎ cơ chế thăm dò bằng chữ trước (inBlockedCluster) cho tin ảnh+chữ. Cơ chế cũ
-    // bắn gói CHỮ trước để dò khách sống trong vùng khách chết, ảnh theo sau — đúng thứ tự
-    // người dùng phàn nàn ("gửi chữ trước rồi gửi ảnh sau"). Từ nay tin ảnh+chữ luôn đi theo
-    // thứ tự ẢNH TRƯỚC → CHỮ SAU (nhánh riêng ngay dưới đây); khách chết bị FB từ chối ngay
-    // ở gói ảnh đầu tiên nên không còn chữ mồ côi. Biến giữ = false để các guard cũ vô hại.
-    const inBlockedCluster = false;
+    const inBlockedCluster = !!(photo && hasTextMsg && !ctx.nonReusableFbId && (socketRejectStreak[pageId] || 0) >= 3);
     let attFbIds = null;
     if (photo && !inBlockedCluster) {
       const up = await uploadOneTimePhoto(pageId, photo, conv.id, ctx, false);
@@ -3418,7 +3328,7 @@
           const fId = (full.from && full.from.id) || conv.fromPsid || '';
           if (pageId && fId && !updatedGidConvSet.has(conv.id) && !(ctx && ctx.gidFromServerOrCache)) {
             updatedGidConvSet.add(conv.id);
-            sideEffectLane(() => fetchWithTimeout(apiBase() + '/v1/pages/' + pageId + '/customers/' + encodeURIComponent(fId) + '/update_global_id?', {
+            sideEffectLane(() => fetch(apiBase() + '/v1/pages/' + pageId + '/customers/' + encodeURIComponent(fId) + '/update_global_id?', {
               method: 'POST',
               headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
               credentials: 'include',
@@ -3437,7 +3347,6 @@
       let raw = rawIn;
       // Tiêu thụ xong fbId của lần bắn này: nếu có bắn lại phải lấy fbId mới tinh
       if (photo && !inBlockedCluster) ctx.nonReusableFbId = null;
-      if (photo) ctx.nonReusableFbIds = null;
 
       // Nếu đang ở chế độ thăm dò trong cục khách chặn (inBlockedCluster) mà gói Chữ đi THÀNH CÔNG (gặp khách sống!):
       // Reset ngay socketRejectStreak = 0 và lập tức upload ảnh + bắn bù RIÊNG PHẦN ẢNH (text = '') cho khách này!
@@ -3446,7 +3355,7 @@
         let probePhotoUp = await uploadOneTimePhoto(pageId, photo, conv.id, ctx, false);
         if (probePhotoUp && probePhotoUp.ok && probePhotoUp.fbId) {
           ctx.nonReusableFbId = null;
-          let sendPhotoRes = await pageLane(() => socketPublishSend(helper, pageId, gid, '', [probePhotoUp.fbId]));
+          let sendPhotoRes = await pageLane(() => socketPublishSend(helper, pageId, gid, '', (probePhotoUp.fbIds && probePhotoUp.fbIds.length) ? probePhotoUp.fbIds : [probePhotoUp.fbId]));
           if (sendPhotoRes && sendPhotoRes.kind === 'ok') {
             recordSocketGidSuccess();
             return { ok: true, id: gid, sendBy: 'socket', sent: true };
@@ -3456,7 +3365,7 @@
           probePhotoUp = await uploadOneTimePhoto(pageId, photo, conv.id, ctx, true);
           if (probePhotoUp && probePhotoUp.ok && probePhotoUp.fbId) {
             ctx.nonReusableFbId = null;
-            sendPhotoRes = await pageLane(() => socketPublishSend(helper, pageId, gid, '', [probePhotoUp.fbId]));
+            sendPhotoRes = await pageLane(() => socketPublishSend(helper, pageId, gid, '', (probePhotoUp.fbIds && probePhotoUp.fbIds.length) ? probePhotoUp.fbIds : [probePhotoUp.fbId]));
             if (sendPhotoRes && sendPhotoRes.kind === 'ok') {
               recordSocketGidSuccess();
               return { ok: true, id: gid, sendBy: 'socket', sent: true };
@@ -3478,7 +3387,7 @@
         const freshPhotoUp = await uploadOneTimePhoto(pageId, photo, conv.id, ctx, true);
         if (freshPhotoUp && freshPhotoUp.ok && freshPhotoUp.fbId) {
           ctx.nonReusableFbId = null;
-          const retryPhotoOnly = await pageLane(() => socketPublishSend(helper, pageId, gid, '', [freshPhotoUp.fbId]));
+          const retryPhotoOnly = await pageLane(() => socketPublishSend(helper, pageId, gid, '', (freshPhotoUp.fbIds && freshPhotoUp.fbIds.length) ? freshPhotoUp.fbIds : [freshPhotoUp.fbId]));
           if (retryPhotoOnly && retryPhotoOnly.kind === 'ok') {
             recordSocketGidSuccess();
             return { ok: true, id: gid, sendBy: 'socket', sent: true };
@@ -3505,13 +3414,7 @@
       } else if (raw && raw.kind === 'ok') {
         socketRejectStreak[pageId] = 0;
       }
-      // v1.106.0: khung CÓ ẢNH bị từ chối hẳn mà đang ở vùng khách chết (reject streak >= 3 —
-      // cùng ngưỡng với cơ chế thăm dò inBlockedCluster): KHÔNG đốt thêm 1 upload mới (~1,5s)
-      // để bắn lại Socket nữa. Hàng nghìn ca chết bắn lại làm nghẽn làn upload của khách
-      // sống (đo từ guicau.har: upload trung bình 1,47s/lượt). Kết luận giữ nguyên như khi
-      // bắn lại rồi vẫn thua (isConfirmedUnavailable bên dưới không đổi); vùng khách sống
-      // (streak < 3) và tin chữ vẫn bắn lại chống burst-reject như cũ.
-      if (raw && raw.kind === 'rejected' && (!ctx || !ctx.gidFromPsid) && !ctx.socketRetriedOnce && (socketRejectStreak[pageId] || 0) <= 4 && !(photo && (socketRejectStreak[pageId] || 0) >= 3)) {
+      if (raw && raw.kind === 'rejected' && (!ctx || !ctx.gidFromPsid) && !ctx.socketRetriedOnce && (socketRejectStreak[pageId] || 0) <= 4) {
         // Chat đã được kênh khác xác nhận đến nơi trong lúc chờ ACK → dừng, không bắn lại (chống trùng)
         if (deliveredIds[conv.id]) return { ok: true, id: gid, sendBy: 'socket', sent: true };
         ctx.socketRetriedOnce = true;
@@ -3599,110 +3502,6 @@
       }
       return { ok: false, sent: 'maybe', error: 'Socket không rõ kết quả' + (reason ? ' (' + reason + ')' : '') };
       };
-      // ===== v1.107.0: TIN ẢNH+CHỮ ĐI THEO THỨ TỰ "ẢNH TRƯỚC → CHỮ SAU" =====
-      // Khung gộp cũ [task ảnh + task chữ] (và cơ chế thăm dò chữ-trước) đều làm khách thấy
-      // CHỮ trước, ẢNH tới sau rất lâu: FB xử lý task chữ tức thì còn task ảnh phải qua khâu
-      // xử lý file đính kèm, tải lớn là trễ cả chục phút; ảnh lỗi thì chữ thành tin mồ côi rồi
-      // mới cứu ảnh ở nền. Nay: bắn RIÊNG gói ẢNH trước và CHỜ FB xác nhận ảnh đã vào thread,
-      // mới bắn gói CHỮ ngay sau đó (chênh nhau ~1 vòng ACK) → khách luôn thấy ảnh trước,
-      // chữ sát ngay sau. Ảnh bị từ chối → CHƯA bắn chữ chút nào: thử lại 1 lần bằng fbId mới
-      // (fbId lỗi thời, khách còn sống), vẫn thua mới kết luận như ca từ chối cũ và để
-      // sendOne thử kênh khác bằng NGUYÊN gói (không mồ côi, không trùng).
-      const settleTextAfterPhoto = async (rawIn) => {
-        let raw = rawIn;
-        if (raw && raw.kind === 'rejected') {
-          socketRejectStreak[pageId] = (socketRejectStreak[pageId] || 0) + 1;
-          // Chữ bị từ chối chớp nhoáng (burst) sau khi ảnh đã vào: bắn lại CHỈ CHỮ 1 lần
-          if ((!ctx || !ctx.gidFromPsid) && !(ctx && ctx.socketTextRetriedOnce) && (socketRejectStreak[pageId] || 0) <= 4) {
-            if (deliveredIds[conv.id]) return { ok: true, id: gid, sendBy: 'socket', sent: true };
-            if (ctx) ctx.socketTextRetriedOnce = true;
-            await sleep(100);
-            raw = await pageLane(() => socketPublishSend(helper, pageId, gid, text, null));
-            if (raw && raw.kind === 'ok') socketRejectStreak[pageId] = 0;
-          }
-        }
-        if (raw && raw.kind === 'ok') return { ok: true, id: gid, sendBy: 'socket', sent: true };
-        // Ảnh ĐÃ vào thread, chỉ còn chữ chưa đi: bù CHỈ PHẦN CHỮ bằng Extension (không gửi
-        // lại ảnh → không trùng ảnh). Bù không được thì chốt 'maybe' (dừng, báo ⚠) — tuyệt
-        // đối không trả sent:false để sendOne khỏi bắn lại cả gói gây trùng ảnh.
-        const extText = await sendViaExtension(conv, text, null, ctx);
-        if (extText && extText.ok) return { ok: true, id: gid, sendBy: 'socket', sent: true };
-        return { ok: false, sent: 'maybe', error: 'Socket: ảnh đã gửi nhưng phần chữ chưa đi được — không gửi lại cả gói để tránh trùng ảnh' };
-      };
-      if (photo && hasTextMsg) {
-        let photoRaw = await pageLane(() => socketPublishSend(helper, pageId, gid, '', attFbIds));
-        ctx.nonReusableFbId = null; // fbId đã tiêu thụ bởi lần bắn ảnh này (dù thành hay bại)
-        ctx.nonReusableFbIds = null;
-        if (photoRaw && photoRaw.kind !== 'legacy') {
-          if (photoRaw.kind === 'rejected') {
-            socketRejectStreak[pageId] = (socketRejectStreak[pageId] || 0) + 1;
-            // Chưa ở sâu trong vùng khách chết: thử lại 1 lần bằng fbId MỚI TINH (phân biệt
-            // fbId lỗi với khách chết thật — 2 fbId khác nhau cùng bị từ chối mới là khách chết)
-            if ((!ctx || !ctx.gidFromPsid) && (socketRejectStreak[pageId] || 0) < 3) {
-              await sleep(100);
-              const freshUp = await uploadOneTimePhoto(pageId, photo, conv.id, ctx, true);
-              if (freshUp && freshUp.ok && freshUp.fbId) {
-                ctx.nonReusableFbId = null;
-                photoRaw = await pageLane(() => socketPublishSend(helper, pageId, gid, '', (freshUp.fbIds && freshUp.fbIds.length) ? freshUp.fbIds : [freshUp.fbId]));
-                ctx.nonReusableFbId = null;
-                if (photoRaw && photoRaw.kind === 'rejected') socketRejectStreak[pageId] = (socketRejectStreak[pageId] || 0) + 1;
-              }
-            }
-          }
-          if (photoRaw.kind === 'ok') {
-            socketRejectStreak[pageId] = 0;
-            recordSocketGidSuccess();
-            // Ảnh đã được FB xác nhận vào thread → bắn CHỮ ngay sau (lô lớn: bắn-nhả như cũ,
-            // kết quả chữ chốt ở nền; lô nhỏ: chờ ACK chữ luôn)
-            if (ctx.sockFired) {
-              if (sockFiredPending.has(conv.id)) return { ok: true, id: gid, sendBy: 'socket', sent: true, fired: true };
-              sockFiredPending.add(conv.id);
-              const myRun2 = runSeq;
-              const finalizeTextBg = (res) => {
-                sockFiredPending.delete(conv.id);
-                if (myRun2 !== runSeq) return;
-                const nm = conv.name || conv.id;
-                if (res && res.ok) { markDelivered(conv.id, 'socket'); postSendSideEffects(conv); return; }
-                if (window && typeof window.__botfakeTrackStatus__ === 'function') window.__botfakeTrackStatus__(conv.id, 'uncertain');
-                logLine('⚠ ' + nm + ' — ' + ((res && res.error) || 'phần chữ không rõ kết quả') + ' (xác nhận nền — ảnh đã gửi, không gửi thêm để tránh trùng)');
-              };
-              const settleTextBg = (rawKind) => {
-                if (myRun2 !== runSeq) return;
-                settleTextAfterPhoto(rawKind)
-                  .then((res) => { if (myRun2 === runSeq) finalizeTextBg(res); })
-                  .catch(() => { sockFiredPending.delete(conv.id); });
-              };
-              pageLane(() => socketPublishSend(helper, pageId, gid, text, null, settleTextBg))
-                .then((imm) => {
-                  if (!imm || imm.kind === 'fired') return;
-                  settleTextBg(imm.kind ? imm : { kind: 'noack' });
-                })
-                .catch(() => settleTextBg({ kind: 'noack' }));
-              return { ok: true, id: gid, sendBy: 'socket', sent: true, fired: true };
-            }
-            const textRaw = await pageLane(() => socketPublishSend(helper, pageId, gid, text, null));
-            return settleTextAfterPhoto(textRaw);
-          }
-          if (photoRaw.kind === 'rejected') {
-            // Chữ chưa hề được bắn → an toàn để kết luận/thử kênh khác bằng nguyên gói
-            const isConfirmedUnavailable = ((!ctx || !ctx.gidFromPsid) && batchStats && batchStats.total > 50)
-              || !!(ctx && ctx.socketRetriedOnce);
-            return {
-              ok: false,
-              sent: false,
-              recipientUnavailable: !!isConfirmedUnavailable,
-              error: isConfirmedUnavailable
-                ? 'Socket: FB từ chối nhận tin (khách hiện không có mặt / đã khóa nick)'
-                : 'Socket: server báo gửi thất bại',
-            };
-          }
-          if (photoRaw.kind === 'dead') return { ok: false, sent: false, error: 'Socket không kết nối' };
-          // noack sau khi đã bắn ảnh: ảnh CÓ THỂ đã vào → không bắn chữ (tránh lệch thứ tự),
-          // không thử kênh khác (tránh trùng ảnh) — chốt 'maybe' theo đúng luật chống trùng
-          return { ok: false, sent: 'maybe', error: 'Socket: đã bắn ảnh nhưng FB không xác nhận — dừng để tránh trùng/lệch thứ tự' };
-        }
-        // helper cũ không có publish ('legacy'): rơi xuống khung gộp cũ bên dưới như trước
-      }
       // 🔥 NẤC 2 (v1.71.0): bắn-nhả cho lô lớn — publish xong trả kết quả ngay cho worker đi bắn tiếp;
       // ACK thật của FB về sau sẽ chạy settleSocketResult ở nền: thành công → markDelivered (im lặng,
       // tổng hợp tự cập nhật), bị từ chối → bù kênh khác đúng 1 lần qua scheduleBuRetry, không rõ → ⚠.
@@ -3866,7 +3665,7 @@
             const fId = (full.from && full.from.id) || conv.fromPsid || '';
             if (pId && fId && !updatedGidConvSet.has(conv.id)) {
               updatedGidConvSet.add(conv.id);
-              sideEffectLane(() => fetchWithTimeout(apiBase() + '/v1/pages/' + pId + '/customers/' + encodeURIComponent(fId) + '/update_global_id?', {
+              sideEffectLane(() => fetch(apiBase() + '/v1/pages/' + pId + '/customers/' + encodeURIComponent(fId) + '/update_global_id?', {
                 method: 'POST',
                 headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
                 credentials: 'include',
@@ -3912,7 +3711,7 @@
       const fd = new FormData();
       fd.append('file', file, file.name || 'image.jpg');
       fd.append('name', file.name || ('image_' + Date.now() + '.jpg'));
-      const res = await fetchWithTimeout(apiBase() + '/v1/contents?access_token=' + encodeURIComponent(token), {
+      const res = await fetch(apiBase() + '/v1/contents?access_token=' + encodeURIComponent(token), {
         method: 'POST', body: fd, credentials: 'include', headers: { Accept: 'application/json' },
       });
       const j = await res.json().catch(() => null);
@@ -3938,7 +3737,7 @@
     const token = getToken();
     if (!token) return { ok: false, error: 'Không có access token' };
     const body = {};
-    // v1.108.0: bind MỌI ảnh trong photo.items trong 1 lượt (đúng hàm N trong _app @882612:
+    // bind MỌI ảnh trong photo.items trong 1 lượt (đúng hàm N trong _app @882612:
     // photos có id → content_ids cả mảng → fb_ids trả về theo đúng thứ tự). Ảnh của câu nhanh
     // Pancake có sẵn content_id nên bind chỉ ~30ms (đo trong guianh1.har) thay vì ~1,47s khi
     // bind bằng urls — server phải kéo/xử lý lại file cho từng chat (đo trong guicau.har).
@@ -3953,7 +3752,7 @@
     let lastErr = '';
     for (let attempt = 1; attempt <= 3; attempt++) {
       try {
-        const res = await fetchWithTimeout(url, {
+        const res = await fetch(url, {
           method: 'POST', body: JSON.stringify(body), credentials: 'include',
           headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
         });
@@ -3998,7 +3797,8 @@
     return { ok: false, error: lastErr || 'Upload ảnh thất bại' };
   }
 
-  /* ============================ CÂU NHANH PANCAKE (cơ chế gõ "/" của app) ============================ */
+
+  /* ============================ CÂU NHANH PANCAKE + BẮT CÂU Alt+Q ============================ */
   // Bằng chứng đã xác minh:
   //  • _app @341733: app tự nạp câu nhanh bằng GET /v1/pages/{page}/settings?access_token=…
   //    &load_quick_replies_only=true&client_version={version} — client_version cũ hơn bản cache
@@ -4009,10 +3809,9 @@
   //    photos là content của Pancake có sẵn id/url/image_data — bind fbId bằng content_ids chỉ
   //    ~30ms (guianh1.har) thay vì ~1,47s khi bind bằng urls (guicau.har).
   function normalizeQuickReply(rec, idx) {
-    // v1.110.0: câu nhanh có thể gồm NHIỀU ĐOẠN theo thứ tự (rec.messages[] — vd: đoạn 1 là
-    // ảnh, đoạn 2 là 1 câu, đoạn 3 là 1 câu khác). Giữ NGUYÊN từng đoạn trong `parts` để gửi
-    // lần lượt đúng thứ tự như gửi tay; `text`/`items` là bản gộp (hiển thị + tương thích
-    // ngược). Trước v1.110 script chỉ lấy messages[0] nên câu nhiều đoạn bị mất đoạn sau.
+    // Câu nhanh có thể gồm NHIỀU ĐOẠN theo thứ tự (rec.messages[] — vd: đoạn 1 là ảnh,
+    // đoạn 2 là 1 câu, đoạn 3 là 1 câu khác). Giữ NGUYÊN từng đoạn trong `parts` để gửi
+    // lần lượt đúng thứ tự như gửi tay; `text`/`items` là bản gộp (hiển thị + tương thích).
     const toItems = (photos) => (Array.isArray(photos) ? photos : []).filter(Boolean).map((ph) => ({
       id: ph.id || '',
       url: ph.url || '',
@@ -4048,7 +3847,7 @@
     try {
       const token = getToken();
       if (!token) return [];
-      const res = await fetchWithTimeout(apiBase() + '/v1/pages/' + pid + '/settings?access_token=' + encodeURIComponent(token) + '&load_quick_replies_only=true&client_version=0', {
+      const res = await fetch(apiBase() + '/v1/pages/' + pid + '/settings?access_token=' + encodeURIComponent(token) + '&load_quick_replies_only=true&client_version=0', {
         headers: { Accept: 'application/json' }, credentials: 'include',
       });
       const j = await res.json().catch(() => null);
@@ -4082,7 +3881,7 @@
       const cid = conv && conv.id;
       if (!pageId) return;
       if (cid && o.perConv !== false) {
-        sideEffectLane(() => fetchWithTimeout(apiBase() + '/v1/pages/' + pageId + '/conversations/' + encodeURIComponent(cid)
+        sideEffectLane(() => fetch(apiBase() + '/v1/pages/' + pageId + '/conversations/' + encodeURIComponent(cid)
           + '/messages/fill_admin_name?', {
           method: 'POST',
           headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
@@ -4091,10 +3890,10 @@
         }).catch(() => null));
       }
       if (o.perPage) {
-        fetchWithTimeout(apiBase() + '/v1/pages/' + pageId + '/check_inbox?', {
+        fetch(apiBase() + '/v1/pages/' + pageId + '/check_inbox?', {
           method: 'POST', headers: { Accept: 'application/json' }, credentials: 'include',
         }).catch(() => null);
-        fetchWithTimeout(apiBase() + '/v1/pages/' + pageId + '/contents/touch?', {
+        fetch(apiBase() + '/v1/pages/' + pageId + '/contents/touch?', {
           method: 'POST',
           headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
           credentials: 'include',
@@ -4114,12 +3913,12 @@
   //  • getPageSocketLane (24 luồng/page): điều tiết số frame /ls_req in-flight trên mỗi kết nối WebSocket
   //    của từng fanpage (tránh vượt ngưỡng burst của edge-chat.facebook.com gây markOptimisticMessageFailed).
   //  • sideEffectLane (4 luồng): điều tiết các request phụ nền (fill_admin_name, update_global_id).
-  const API_SEND_PARALLEL = 48; // v1.102.0: về đúng số v1.80.0 (bản đo 143 tin/s) — v1.88 nới 64 làm nghẽn ngược
+  const API_SEND_PARALLEL = 48;
   const CTX_FETCH_PARALLEL = 128; // v1.80.0: nới làn nạp ngữ cảnh cho quy mô 100k
-  const PHOTO_UPLOAD_PARALLEL = 128; // v1.106.0: 96→128 — đo từ guicau.har: upload ảnh trung bình 1,47s/lượt nên làn upload là trần cứng của gửi ảnh (27,8k chat ≈ 40.800 giây-làn); uploadPhotoForPage đã có retry khi 429
+  const PHOTO_UPLOAD_PARALLEL = 96;
   const GID_EXT_PARALLEL = 24;
   const PREP_PARALLEL_EXT = 160;  // số chat chưa có global_id chuẩn bị HTTP/WS song song (không bị chặn bởi gidExtLane)
-  const BUS_PARALLEL_EXT = 6;     // v1.102.0: về đúng số v1.80.0 (v1.87 nới 12 — Extension bị dồn lệnh dễ timeout 10s hơn là nhanh hơn)
+  const BUS_PARALLEL_EXT = 6;     // số lệnh adapter.send (REPLY_INBOX_PHOTO) chạy song song
   const BUS_PARALLEL_SOCKET = 64; // số frame Socket (/ls_req) in-flight trên mỗi kết nối WebSocket (kèm giãn nhịp 2ms chống burst; vẫn giữ retry + socketRejectStreak bảo vệ)
   const SIDE_EFFECT_PARALLEL = 4; // số request nền (fill_admin_name / update_global_id) chạy song song
   function makeLane(parallel) {
@@ -4177,6 +3976,12 @@
     } catch (e) { return false; }
   }
 
+  // Chuẩn bị chung ngữ cảnh (full, threadId, globalId, nonReusableFbId) TRƯỚC KHI chọn kênh bắn:
+  //   • Ở Làn 1 (ctx.fastOnly): chạy SONG SONG (Promise.all) cả resolveGlobalId (GET /messages ~150ms)
+  //     và uploadOneTimePhoto (POST /contents/facebook ~350ms) để cắt giảm 30% thời gian chờ HTTP!
+  //     Nếu chat chưa có globalId trên Server Pancake (deferredToExt), fbId vừa tạo được cất ngay vào
+  //     spareFbIdPool[pageId] để chat sống kế tiếp dùng ở 0ms (tuyệt đối không lãng phí!).
+  //   • Ở Làn 2 (!ctx.fastOnly): giải quyết globalId trước, chỉ upload ảnh khi chat có thể gửi được.
   async function prepareDirectCtx(conv, photo, ctx) {
     ctx = ctx || {};
     if (!conv || conv.type === 'comment') return ctx;
@@ -4197,16 +4002,14 @@
     }
     const skipPhotoForBlockedCluster = !!(ctx.hasTextMsg && (socketRejectStreak[pageId] || 0) >= 3 && isPageSocketReady(pageId));
     if (!ctx.gidResolved && ctx.threadId) {
-      if (ctx.fastOnly && photo && !ctx.nonReusableFbId && !skipPhotoForBlockedCluster) {
+      if (ctx.fastOnly && photo && !ctx.nonReusableFbId && !ctx.nonReusableFbIds && !skipPhotoForBlockedCluster) {
         const [gidRes, upRes] = await Promise.all([
           resolveGlobalId(full, ctx.threadId, conv.id, conv.fromPsid, ctx.gidForceFind, ctx),
           uploadOneTimePhoto(pageId, photo, conv.id, ctx, false),
         ]);
         ctx.gid = gidRes;
-        if (upRes && upRes.ok) {
-          if (upRes.fbIds && upRes.fbIds.length > 1) ctx.nonReusableFbIds = upRes.fbIds;
-          else if (upRes.fbId) ctx.nonReusableFbId = upRes.fbId;
-        }
+        if (upRes && upRes.ok && upRes.fbId) ctx.nonReusableFbId = upRes.fbId;
+        if (upRes && upRes.ok && upRes.fbIds && upRes.fbIds.length > 1) ctx.nonReusableFbIds = upRes.fbIds;
         if (ctx.deferredToExt) {
           // Chưa dùng ở Làn 1 → nhường ngay fbId này vào spareFbIdPool[pageId] cho chat sống tiếp theo dùng ở 0ms!
           recycleUnusedFbId(pageId, ctx);
@@ -4231,10 +4034,8 @@
     const skipNow = !!(ctx.hasTextMsg && (socketRejectStreak[pageId] || 0) >= 3 && ctx.gid && !ctx.gidFromPsid && isPageSocketReady(pageId));
     if (photo && !ctx.nonReusableFbId && !ctx.nonReusableFbIds && canSend && !skipNow) {
       const up = await uploadOneTimePhoto(pageId, photo, conv.id, ctx, false);
-      if (up && up.ok) {
-        if (up.fbIds && up.fbIds.length > 1) ctx.nonReusableFbIds = up.fbIds;
-        else if (up.fbId) ctx.nonReusableFbId = up.fbId;
-      }
+      if (up && up.ok && up.fbId) ctx.nonReusableFbId = up.fbId;
+      if (up && up.ok && up.fbIds && up.fbIds.length > 1) ctx.nonReusableFbIds = up.fbIds;
     }
     return ctx;
   }
@@ -4344,26 +4145,6 @@
         });
         return { ok: true, id: '', sendBy: 'direct', sent: true, fired: true };
       }
-      // v1.103.0: TỐC ĐỘ TUYỆT ĐỐI — chat TRONG cửa sổ 24h nhưng ĐÃ CÓ global_id thật trong
-      // cache + WebSocket của page đang sống: bắn SOCKET TRƯỚC thay vì API. Socket publish
-      // thẳng qua Facebook (bắn-nhả, không chờ ACK, nhịp 1ms/khung) nên trần tốc độ cao hơn
-      // hẳn làn HTTP API (48 luồng POST qua server Pancake). Socket thua hẳn thì vẫn đi tiếp
-      // Extension → API theo plan (đủ kênh — KHÔNG bỏ sót ai); chat chưa có mã thật vẫn đi
-      // API như cũ (API không cần mã). Đây là đòn bẩy tốc độ chính còn lại sau khi đường gửi
-      // đã về đúng thông số v1.80: chuyển bớt tải từ làn HTTP chậm sang đường Socket nhanh.
-      if (opts.awaitDirect && !batchSkipApi) {
-        const fullQ = peekConv(conv) || conv;
-        const pidQ = (fullQ && (fullQ.page_id || fullQ.pageId)) || conv.pageId || String(conv.id || '').split('_')[0];
-        if (pidQ && isPageSocketReady(pidQ) && peekFastGlobalId(conv, fullQ, '')) {
-          return sendOne(conv, text, photo, {
-            plan: ['socket', 'ext', 'api'],
-            dynamicDirect: true,
-            fastOnly: !!opts.fastOnly,
-            deferredCtx: opts.deferredCtx || null,
-            sockFired: !!opts.sockFired,
-          });
-        }
-      }
       return fireApiAndWatch(conv, text, photo);
     }
     // ngữ cảnh dùng chung cho các kênh của CÙNG 1 chat: conversation, threadId, globalId, nonReusableFbId…
@@ -4372,7 +4153,7 @@
     ctx.sockFired = !!opts.sockFired;
     ctx.hasTextMsg = !!(text && String(text).trim().length > 0);
     ctx.deferredToExt = false;
-    if (!ctx.fastOnly && ctx.gidResolved && !ctx.gid && !ctx.__prepped) {
+    if (!ctx.fastOnly && ctx.gidResolved && !ctx.gid) {
       ctx.gidResolved = false;
     }
     const channels = {
@@ -4442,18 +4223,12 @@
           const canApiRescue = !batchSkipApi && seq.indexOf('api') < 0 && !(photo && !photo.fbId);
           if (canApiRescue) seq.push('api');
           logLine('🛟 ' + (conv.name || conv.id)
-            + ' — chưa dò được global_id; chưa kết luận khách khóa nick, sẽ thử '
-            + (canApiRescue ? 'API theo conversation_id trước, rồi Extension theo thread_id' : 'Extension theo thread_id'));
+            + ' — chưa dò được global_id; chưa kết luận khách khóa nick, sẽ thử Extension theo thread_id'
+            + (canApiRescue ? ' và API theo conversation_id như đường gửi tay' : ''));
         }
       }
       const pid = (ctx.full && (ctx.full.page_id || ctx.full.pageId)) || pid0;
       seq = pickBestDirectOrder(conv, pid, ctx, seq);
-      // v1.86.0: cứu hộ chưa có global_id → API đi ĐẦU (không tốn upload ảnh riêng như Extension,
-      // không chết vô nghĩa như Socket thiếu global_id)
-      if (ctx.extThreadOnlyRescue) {
-        const ai = seq.indexOf('api');
-        if (ai > 0) { seq.splice(ai, 1); seq.unshift('api'); }
-      }
     }
 
     const tried = Array.isArray(ctx.triedErrors) ? ctx.triedErrors.slice() : [];
@@ -4511,20 +4286,9 @@
         recycleUnusedFbId(pid0, ctx);
         return r; // token hỏng — dừng hẳn
       }
-      // v1.98.0: CHỐT KÊNH LƯỢT ĐẦU — trong lượt gửi (buBatchMode), mỗi chat chỉ bắn ĐÚNG 1
-      // kênh tốt nhất đã phân loại (có mã thật + Socket sẵn sàng → Socket; ngoài 24h → Ext/API
-      // theo cờ quảng cáo; kênh từng thắng với khách này được ghi nhớ ưu tiên). Thua hẳn ở
-      // kênh đầu thì DỪNG ngay tại đây — không đi tiếp kênh 2/3 trong đợt chính nữa; các kênh
-      // còn lại để ĐỢT BÙ TẬP TRUNG thử (mỗi kênh đúng 1 lần). Các nhánh 'maybe' (có thể đã
-      // tới — dừng chống trùng), khách không nhận, token hỏng đã return ở phía trên rồi.
-      if (buBatchMode) break;
     }
     recycleUnusedFbId(pid0, ctx);
-    // v1.98.0: thua ở kênh chốt đầu mà còn kênh chưa thử → gắn cờ firstShotFailed để nơi gọi
-    // đưa thẳng vào đợt bù tập trung (kể cả khi câu chữ lỗi không khớp mẫu "đáng bù" cũ —
-    // trước đây không cần qua cổng đó vì đợt chính tự đi tiếp kênh ngay tại chỗ).
-    const firstShotFailed = !!(buBatchMode && triedCh.length && seq.some((x) => triedCh.indexOf(x) < 0));
-    return { ok: false, sent: false, tried: triedCh.slice(), error: tried.join(' | '), firstShotFailed: firstShotFailed };
+    return { ok: false, sent: false, tried: triedCh.slice(), error: tried.join(' | ') };
   }
 
   // ===== CACHE BỀN VỮNG GLOBAL_ID (LOCALSTORAGE + INDEXEDDB "fb_meta_data") & VÁ MQTTHELPER =====
@@ -4550,14 +4314,7 @@
   let gidSaveTimer = null;
   function flushPersistentGids() {
     gidSaveTimer = null;
-    try {
-      // v1.93.0: hợp nhất đa tab — global_id là dữ kiện thật (cùng chat → cùng mã): gộp cả bản
-      // đang lưu (tab khác vừa tra được) vào RAM rồi mới ghi — không tab nào ghi đè mất mã của ai.
-      let storedG = {};
-      try { storedG = JSON.parse(localStorage.getItem(GID_LS_KEY) || '{}') || {}; } catch (e) { storedG = {}; }
-      Object.assign(persistentGidMap, storedG);
-      localStorage.setItem(GID_LS_KEY, JSON.stringify(persistentGidMap));
-    } catch (e) { /* ignore */ }
+    try { localStorage.setItem(GID_LS_KEY, JSON.stringify(persistentGidMap)); } catch (e) { /* ignore */ }
   }
 
   function putGidToMemCaches(key, val) {
@@ -4907,12 +4664,6 @@
   const BU_SPREAD_MS = 50;      // rải nhẹ 50ms — hàng đợi Socket/Ext vốn đã tự điều tiết
   const buRetryDone = {}; // convId → đã bù trong lượt này
   let buRetrySeq = 0;
-  // v1.91.0: trong lượt gửi, bù KHÔNG rải theo timer nữa — gom vào 1 hàng đợi để chạy ĐỢT BÙ
-  // TẬP TRUNG ngay sau đợt bắn chính (hết cảnh tin bù nhỏ giọt lẻ tẻ suốt nhiều phút sau).
-  let buBatchMode = false;
-  let buPhaseActive = false; // v1.95.0: đang chạy đợt bù tập trung — chặn TỔNG HỢP chốt sớm
-  const buBatchQueue = [];       // [{conv, text, photo, name, tried}]
-  const buBatchQueuedIds = {};   // convId → item trong buBatchQueue (chống gom trùng 1 chat)
   let runSeq = 0; // mỗi lượt gửi 1 số — bù của lượt cũ tự hủy khi có lượt mới (chống gửi lẫn/lặp)
   const deliveredIds = {}; // convId → ĐÃ có kênh báo thành công trong lượt này ('api'|'ext'|'socket') — tuyệt đối không gửi lại
   const finalFailedIds = {}; // convId → đã thất bại hẳn (hết kênh hoặc khách khóa nick)
@@ -4923,7 +4674,6 @@
   let summaryUiTimer = null;
   let windowBlocked = 0; // số lần API từ chối "(#10)/(#551)… ngoài cửa sổ 24h" trong lượt (đều được bù kênh khác)
   const SUMMARY_LS_KEY = 'ssb_last_summary_v1';
-  const SUMMARY_TAB_KEY = SUMMARY_LS_KEY + '__' + TAB_ID; // v1.93.0: bảng TỔNG HỢP riêng từng tab
   const batchStats = {
     active: false,
     total: 0,
@@ -4952,16 +4702,10 @@
     };
   }
 
-  let lastHbWrite = 0; // v1.93.0: mốc ghi heartbeat gần nhất (thưa 4s)
   function flushBatchSummaryUI() {
     summaryUiTimer = null;
     try {
       if (!batchStats.active && !batchStats.total) return;
-      // v1.93.0: heartbeat "tab này đang gửi" để tab khác phát hiện gửi song song mà cảnh báo
-      if (batchStats.active && Date.now() - lastHbWrite > 4000) {
-        lastHbWrite = Date.now();
-        try { localStorage.setItem(HB_KEY, JSON.stringify({ tab: TAB_ID, ts: Date.now() })); } catch (e) { /* ignore */ }
-      }
       const c = getBatchSummaryCounts();
       const pct = c.total ? ((c.okTotal / c.total) * 100).toFixed(1) : '0.0';
       const elapsedSec = batchStats.startedAt ? Math.max(1, Math.round((Date.now() - batchStats.startedAt) / 1000)) : 0;
@@ -4970,7 +4714,7 @@
       if (c.okExt) byCh.push('Ext: ' + c.okExt);
       if (c.okSocket) byCh.push('Socket: ' + c.okSocket);
       const chStr = byCh.length ? ' [' + byCh.join(' · ') + ']' : '';
-      const isDoneAll = batchStats.loopFinished && !buPhaseActive && (c.pending === 0 || state.stopRequested);
+      const isDoneAll = batchStats.loopFinished && (c.pending === 0 || state.stopRequested);
       const html = (isDoneAll ? '🏁 <b>TỔNG HỢP:</b> ' : '📊 <b>Đang gửi:</b> ')
         + '<span style="color:#4ade80;font-weight:700">✅ Thành công: ' + c.okTotal + '/' + c.total + ' (' + pct + '%)' + chStr + '</span>'
         + (c.pending > 0 && !state.stopRequested ? ' · <span style="color:#38bdf8">⏳ Đang xử lý: ' + c.pending + '</span>' : '')
@@ -4985,11 +4729,11 @@
       }
       if (c.total > 0) setProgress(c.settled, c.total);
       if (isDoneAll || c.total <= 200) {
-        try { localStorage.setItem(SUMMARY_TAB_KEY, html); } catch (e) { /* ignore */ }
+        try { localStorage.setItem(SUMMARY_LS_KEY, html); } catch (e) { /* ignore */ }
       }
       if (isDoneAll && !batchStats.finalLogged && c.total > 0) {
         batchStats.finalLogged = true;
-        try { localStorage.setItem(SUMMARY_TAB_KEY, html); } catch (e) { /* ignore */ }
+        try { localStorage.setItem(SUMMARY_LS_KEY, html); } catch (e) { /* ignore */ }
         logLine('📊 TỔNG HỢP CHỐT LƯỢT GỬI: ✅ Đã gửi thành công ' + c.okTotal + '/' + c.total
           + ' tin (' + pct + '%)' + chStr
           + ' | ❌ Lỗi: ' + c.failTotal
@@ -5002,7 +4746,7 @@
 
   function updateBatchSummaryUI() {
     const c = getBatchSummaryCounts();
-    const isDoneAll = batchStats.loopFinished && !buPhaseActive && (c.pending === 0 || state.stopRequested);
+    const isDoneAll = batchStats.loopFinished && (c.pending === 0 || state.stopRequested);
     // Khi chạy lô lớn (>200 chat) và chưa kết thúc: throttle cập nhật DOM 80ms/lần để không treo UI Chrome
     if (!isDoneAll && c.total > 200) {
       if (!summaryUiTimer) summaryUiTimer = setTimeout(flushBatchSummaryUI, 80);
@@ -5058,7 +4802,7 @@
   // thử lại, nhưng kênh CHƯA thử vẫn PHẢI thử tiếp (chuỗi như plan của app: api → extension ⇄ socket).
   // Cả Extension lẫn Socket đều hỗ trợ gửi cả chữ lẫn ảnh (cho chat inbox). Bình luận (comment) chỉ
   // hỗ trợ API/Extension. 'maybe'/đã đến nơi → DỪNG tuyệt đối (chống trùng).
-  function scheduleBuRetry(conv, text, photo, name, why, tried, opts) {
+  function scheduleBuRetry(conv, text, photo, name, why, tried) {
     if (!conv) return;
     if (sockFiredPending.has(conv.id)) {
       // Socket đã bắn và ACK chưa chốt — bù kênh khác lúc này có thể gây TRÙNG câu. Chờ xác nhận nền chốt.
@@ -5081,31 +4825,15 @@
       const seen = {};
       const names = triedCh.concat(done).filter((x) => (seen[x] ? false : (seen[x] = true)));
       if (window && typeof window.__botfakeTrackStatus__ === 'function') window.__botfakeTrackStatus__(conv.id, 'fail');
-      // v1.86.0: nơi gọi đã in dòng ❌ (kèm chi tiết từng kênh) cho chat này rồi → không in trùng lần 2
-      if (!(opts && opts.preLogged)) {
-        logLine('❌ ' + name + ' — đã thử hết kênh (' + (names.join(', ') || 'không rõ') + ')'
-          + (conv.type === 'comment' ? ' — bình luận chỉ API/Extension gửi được (Socket không hỗ trợ)' : '')
-          + ' — không bù nữa (mỗi kênh đúng 1 lần)');
-      }
+      logLine('❌ ' + name + ' — đã thử hết kênh (' + (names.join(', ') || 'không rõ') + ')'
+        + (conv.type === 'comment' ? ' — bình luận chỉ API/Extension gửi được (Socket không hỗ trợ)' : '')
+        + ' — không bù nữa (mỗi kênh đúng 1 lần)');
       return;
     }
     const myRun = runSeq;
     // Chỉ bật gidForceFind khi đã từng thử 'ext' hoặc 'socket' mà thất bại; nếu mới chỉ thử 'api'
     // (API từ chối ngoài 24h) thì global_id trong cache/GET /messages vẫn hoàn toàn hợp lệ!
     const hadDirectFail = triedCh.indexOf('ext') > -1 || triedCh.indexOf('socket') > -1 || done.length > 0;
-    // v1.91.0: đang trong lượt gửi → gom vào ĐỢT BÙ TẬP TRUNG (chạy gọn 1 lần sau đợt chính),
-    // không setTimeout rải rác nữa. Chat đã có trong hàng đợi thì chỉ gộp thêm kênh đã thử.
-    if (buBatchMode) {
-      const ex = buBatchQueuedIds[conv.id];
-      if (ex) {
-        triedCh.forEach((t) => { if (ex.tried.indexOf(t) < 0) ex.tried.push(t); });
-      } else {
-        const item = { conv: conv, text: text, photo: photo, name: name, tried: triedCh.slice() };
-        buBatchQueuedIds[conv.id] = item;
-        buBatchQueue.push(item);
-      }
-      return;
-    }
     const delay = hadDirectFail ? (150 + Math.min(buRetrySeq++, 6) * BU_SPREAD_MS) : BU_RETRY_EXT_MS;
     logLine('⏳ ' + name + ' — ' + why + ' — đang bù'
       + (remaining.length > 1 ? ' (Socket/Extension)' : (' qua ' + (remaining[0] === 'ext' ? 'Extension' : 'Socket'))) + '…');
@@ -5160,104 +4888,6 @@
     }, delay);
   }
 
-  // v1.91.0: chạy bù cho 1 chat trong ĐỢT BÙ TẬP TRUNG — thử lần lượt từng kênh CÒN LẠI (mỗi
-  // kênh đúng 1 lần, dùng chung sổ buRetryDone với đường bù thường) và chốt kết quả ngay tại
-  // chỗ: đến nơi → markDelivered; 'maybe' → ⚠ dừng (chống trùng); khách không nhận → ❌ dừng;
-  // hết kênh → ❌ chốt lỗi. Không bao giờ gửi lại cho chat đã xác nhận đến nơi.
-  async function runBuBatchItem(item) {
-    const conv = item.conv, text = item.text, photo = item.photo, name = item.name;
-    const myRun = runSeq;
-    try {
-      if (!conv || deliveredIds[conv.id]) return;
-      // v1.100.0: chat này còn đang chờ ACK Socket bắn-nhả → chờ ĐÚNG chat này chốt (tối đa
-      // 90s) rồi mới bù — thay cho cổng chờ toàn cục 180s cũ chặn cả đợt bù. Đã đến nơi thì thôi.
-      {
-        let waitedPend = 0;
-        while (sockFiredPending.has(conv.id) && !deliveredIds[conv.id] && !state.stopRequested && myRun === runSeq && waitedPend < 90000) {
-          await sleep(250); waitedPend += 250;
-        }
-        if (deliveredIds[conv.id]) return;
-      }
-      const done = buRetryDone[conv.id] || (buRetryDone[conv.id] = []);
-      let triedCh = (item.tried || []).slice();
-      const hadDirectFail = triedCh.indexOf('ext') > -1 || triedCh.indexOf('socket') > -1 || done.length > 0;
-      for (let step = 0; step < 3; step++) {
-        if (myRun !== runSeq) return; // đã có lượt gửi mới — bỏ, không đụng sổ sách của lượt mới
-        if (deliveredIds[conv.id]) return; // vừa đến nơi qua đường khác — thôi
-        if (state.stopRequested) {
-          if (window && typeof window.__botfakeTrackStatus__ === 'function') window.__botfakeTrackStatus__(conv.id, 'fail');
-          logLine('⏸ ' + name + ' — bỏ bù (đang dừng).');
-          return;
-        }
-        const hasExt = !!(window.__ExtensionAdapter__ && typeof window.__ExtensionAdapter__.send === 'function');
-        const baseCandidates = (conv.type === 'comment')
-          ? ['ext']
-          : (hasExt ? ['ext', 'socket'] : ['socket']);
-        const remaining = baseCandidates.filter((c) => triedCh.indexOf(c) < 0 && done.indexOf(c) < 0);
-        if (!remaining.length) {
-          if (window && typeof window.__botfakeTrackStatus__ === 'function') window.__botfakeTrackStatus__(conv.id, 'fail');
-          const seen = {};
-          const names2 = triedCh.concat(done).filter((x) => (seen[x] ? false : (seen[x] = true)));
-          logLine('❌ ' + name + ' — đợt bù tập trung: đã thử hết kênh (' + (names2.join(', ') || 'không rõ') + ')'
-            + (conv.type === 'comment' ? ' — bình luận chỉ API/Extension gửi được (Socket không hỗ trợ)' : '')
-            + ' — không bù nữa (mỗi kênh đúng 1 lần)');
-          return;
-        }
-        const buCtx = { gidForceFind: hadDirectFail };
-        const out = await busEnqueue(async () => {
-          await prepareDirectCtx(conv, photo, buCtx);
-          const pid = (buCtx.full && (buCtx.full.page_id || buCtx.full.pageId)) || conv.pageId || String(conv.id || '').split('_')[0];
-          const ordered = (remaining.length > 1)
-            ? pickBestDirectOrder(conv, pid, buCtx, remaining)
-            : remaining.slice();
-          const ch = ordered.find((c) => triedCh.indexOf(c) < 0 && done.indexOf(c) < 0) || remaining[0];
-          done.push(ch);
-          const r = (ch === 'ext')
-            ? await sendViaExtension(conv, text, photo, buCtx)
-            : await sendViaSocket(conv, text, photo, buCtx);
-          return { ch: ch, r: r };
-        });
-        if (!out || !out.ch) {
-          if (window && typeof window.__botfakeTrackStatus__ === 'function') window.__botfakeTrackStatus__(conv.id, 'fail');
-          logLine('❌ ' + name + ' — đợt bù tập trung: không chạy được kênh bù — chốt lỗi.');
-          return;
-        }
-        const ch = out.ch;
-        const r = out.r;
-        if (r && r.ok) {
-          markDelivered(conv.id, ch);
-          postSendSideEffects(conv);
-          markChannel(conv.id, ch); // lần gửi sau vào thẳng kênh vừa thắng
-          logLine('✅ ' + name + ' — bù tập trung THÀNH CÔNG qua ' + (ch === 'ext' ? 'Extension' : 'Socket'));
-          return;
-        }
-        if (r && r.sent === 'maybe') {
-          if (window && typeof window.__botfakeTrackStatus__ === 'function') window.__botfakeTrackStatus__(conv.id, 'uncertain');
-          logLine('⚠ ' + name + ' — bù tập trung không rõ kết quả — KHÔNG gửi thêm (chống trùng)');
-          return;
-        }
-        if (r && r.recipientUnavailable) {
-          if (window && typeof window.__botfakeTrackStatus__ === 'function') window.__botfakeTrackStatus__(conv.id, 'fail');
-          logLine('❌ ' + name + ' — bù tập trung ' + (ch === 'ext' ? 'Extension' : 'Socket') + ' không được: '
-            + clip((r && r.error) || 'lỗi không rõ', 90) + ' — khách hiện không nhận được tin (không thử tiếp kênh khác)');
-          return;
-        }
-        logLine('❌ ' + name + ' — bù tập trung ' + (ch === 'ext' ? 'Extension' : 'Socket') + ' không được: '
-          + clip((r && r.error) || 'lỗi không rõ', 90) + ' — sang kênh kế nếu còn');
-        triedCh = triedCh.concat([ch]);
-      }
-      // Tối đa 2 kênh bù/chat — quá vòng lặp mà chưa chốt thì chốt lỗi để tổng hợp không treo
-      if (!deliveredIds[conv.id]) {
-        if (window && typeof window.__botfakeTrackStatus__ === 'function') window.__botfakeTrackStatus__(conv.id, 'fail');
-      }
-    } catch (e) {
-      if (conv && !deliveredIds[conv.id]) {
-        if (window && typeof window.__botfakeTrackStatus__ === 'function') window.__botfakeTrackStatus__(conv.id, 'fail');
-      }
-      logLine('❌ ' + name + ' — bù tập trung lỗi: ' + (e && e.message || e));
-    }
-  }
-
   // Nhóm chat theo NỘI DUNG sẽ gửi: chat thuộc câu nào → ĐÚNG chữ của câu đó;
   // chat lẻ (không thuộc câu nào) → câu đang gõ trên ô textarea. Trả về [{text, list}].
   function buildSendGroups(matches, savedLists, typedText) {
@@ -5278,6 +4908,12 @@
 
   async function sendToAll() {
     if (state.sending) return; // chặn bấm đúp / gọi đúp → gửi TRÙNG
+    if (state.listIncomplete) {
+      // Danh sách tải chưa đầy đủ lần gần nhất → gửi lúc này chắc chắn sai (thiếu chat)
+      alert('Danh sách tải CHƯA ĐẦY ĐỦ nên chưa thể gửi.\nHãy bấm “⚡ Tải danh sách” để tải lại cho đủ rồi mới gửi.');
+      logLine('⛔ Chặn gửi: danh sách tải chưa đầy đủ — bấm ⚡ Tải danh sách để tải lại.');
+      return;
+    }
     // LƯU Ý: panel nằm trong shadow DOM → phải lấy phần tử qua shadow.getElementById,
     // document.querySelector sẽ không thấy (đây là nguyên nhân lỗi "Hãy nhập nội dung câu cần gửi")
     const msgEl = shadow && shadow.getElementById('ssb-msg');
@@ -5311,14 +4947,16 @@
     // nội dung sẽ gửi: câu đã tích → chữ của TỪNG CÂU; chat lẻ → ô đang gõ
     let sendGroups = buildSendGroups(targets, state.savedLists, typedText);
     const textsAll = sendGroups.map((g) => g.text).filter((t) => t && t.trim());
-    if (!textsAll.length && !imgState) { alert('Hãy nhập nội dung câu cần gửi (hoặc chọn ảnh).'); return; }
+    if (!textsAll.length && !imgState && !(state.quickReply && state.quickReply.items && state.quickReply.items.length)) { alert('Hãy nhập nội dung câu cần gửi (hoặc chọn ảnh).'); return; }
     const names = targets.slice(0, MAX_NAME_LIST).map((m) => m.name || m.id).join(', ')
       + (targets.length > MAX_NAME_LIST ? ', …' : '');
     const nComment = targets.filter((m) => m.type === 'comment').length;
     const warnComment = nComment
       ? '\n\n⚠ Trong đó ' + nComment + ' chat loại BÌNH LUẬN — sẽ gửi dưới dạng TRẢ LỜI BÌNH LUẬN (công khai dưới bài viết)!'
       : '';
-    const imgNote = imgState ? '\n\n📷 Kèm ảnh: ' + (imgState.name || 'ảnh') : '';
+    const imgNote = imgState ? '\n\n📷 Kèm ảnh: ' + (imgState.name || 'ảnh')
+      : (state.quickReply && state.quickReply.items && state.quickReply.items.length)
+        ? '\n\n⚡ Câu nhanh "' + state.quickReply.shortcut + '" — ' + state.quickReply.items.length + ' ảnh (bắt bằng Alt+Q)' : '';
     const textNote = textsAll.length > 1
       ? '\n\n📝 ' + textsAll.length + ' nội dung — mỗi câu được gửi đúng chữ đã lưu: '
         + textsAll.map((t) => '“' + clip(t, 40) + '”').join(', ')
@@ -5332,28 +4970,12 @@
     // không chặn đúp ở đây thì bấm lần 2 chạy song song lần 1 (log hiện 2 dòng lọc)
     state.sending = true;
     state.stopRequested = false;
-    // v1.93.0: phát hiện tab BOTFAKE khác đang gửi cùng lúc → chỉ CẢNH BÁO, không chặn:
-    // 2 tab độc lập hoàn toàn về danh sách/câu (RAM riêng) nhưng dùng chung 1 tài khoản
-    // Pancake/Facebook → tốc độ mỗi tab có thể chậm hơn và dễ dính 429 hơn.
-    try {
-      const hb = JSON.parse(localStorage.getItem(HB_KEY) || 'null');
-      if (hb && hb.tab && hb.tab !== TAB_ID && Date.now() - (hb.ts || 0) < 15000) {
-        logLine('⚠ Đang có 1 tab BOTFAKE khác cũng gửi cùng lúc — tin KHÔNG lẫn nhau (mỗi tab gửi đúng danh sách + câu của nó), nhưng chung tài khoản nên có thể chậm/dễ 429 hơn.');
-      }
-    } catch (e) { /* ignore */ }
     batchSkipApi = false;
     windowBlocked = 0;
     // trạng thái theo LƯỢT gửi: chat đã đến nơi trong lượt này không bao giờ bị gửi lại;
     // bù của lượt trước đang chờ sẽ tự hủy (runSeq) — không gửi lẫn vào lượt mới
     runSeq++;
     buRetrySeq = 0;
-    // v1.101.0: KHÔNG bật buBatchMode nữa — quay về cơ chế của bản nhanh v1.80/v1.89:
-    // sendOne tự đi tiếp kênh ngay khi kênh đầu thua hẳn (không dừng chờ đợt bù), và
-    // scheduleBuRetry bù NỀN ngay khi thua (chạy chồng lên đợt chính). Các lớp gom bù
-    // tập trung (v1.91/v1.98/v1.100) cộng dồn thời gian — đo thực tế chậm hơn bản cũ.
-    buBatchMode = false;
-    buBatchQueue.length = 0;
-    Object.keys(buBatchQueuedIds).forEach((k) => { delete buBatchQueuedIds[k]; });
     Object.keys(buRetryDone).forEach((k) => { delete buRetryDone[k]; });
     Object.keys(deliveredIds).forEach((k) => { delete deliveredIds[k]; });
     sockFiredPending.clear();
@@ -5361,7 +4983,6 @@
     Object.keys(uncertainIds).forEach((k) => { delete uncertainIds[k]; });
     Object.keys(skippedLateIds).forEach((k) => { delete skippedLateIds[k]; });
     Object.keys(spareFbIdPool).forEach((k) => { delete spareFbIdPool[k]; });
-    Object.keys(prefetchPhotoFbId).forEach((k) => { delete prefetchPhotoFbId[k]; });
     Object.keys(socketRejectStreak).forEach((k) => { delete socketRejectStreak[k]; });
     summaryCounters.okApi = 0;
     summaryCounters.okExt = 0;
@@ -5417,11 +5038,11 @@
     const qrPhotoByPage = {};
     const qrSel = state.quickReply;
     if (qrSel && Array.isArray(qrSel.items) && qrSel.items.length) {
-      // ===== NGUỒN CÂU NHANH (v1.108.0): đúng cách gửi tay — 1 câu lệnh "/" đã gồm cả chữ lẫn ảnh.
-      // Ảnh câu nhanh có sẵn content_id của Pancake nên bind fbId chỉ ~30ms/chat (guianh1.har)
-      // thay vì ~1,47s/chat khi bind bằng URL (guicau.har). Câu nhanh là dữ liệu của TỪNG page:
-      // page nào trong danh sách cũng phải có đúng shortcut này mới được gửi; page thiếu sẽ
-      // được báo rõ từng chat ở khâu bắn (không gửi chữ trơ thiếu ảnh).
+      // ===== NGUỒN CÂU NHANH (bắt bằng Alt+Q): đúng cách gửi tay — 1 câu lệnh "/" đã gồm cả
+      // chữ lẫn ảnh. Ảnh câu nhanh có sẵn content_id của Pancake nên bind fbId chỉ ~30ms/chat
+      // (guianh1.har) thay vì ~1,47s/chat khi bind bằng URL (guicau.har). Câu nhanh là dữ
+      // liệu của TỪNG page: page nào trong danh sách cũng phải có đúng shortcut này mới
+      // được gửi; page thiếu sẽ được báo rõ từng chat ở khâu bắn (không gửi chữ trơ thiếu ảnh).
       logLine('⚡ Dùng câu nhanh "' + qrSel.shortcut + '" (' + qrSel.items.length + ' ảnh) cho lượt này…');
       const qrPages = [];
       targets.forEach((c) => {
@@ -5463,18 +5084,25 @@
         }
       }
       photo = { qr: true, shortcut: qrSel.shortcut, items: qrSel.items, parts: (Array.isArray(qrSel.parts) && qrSel.parts.length) ? qrSel.parts : [{ text: qrSel.text || '', items: qrSel.items }], url: qrSel.items[0].url, id: qrSel.items[0].id, w: qrSel.items[0].w || 0, h: qrSel.items[0].h || 0 };
-    } else if (imgState && imgState.file) {
-      logLine('☁️ Đang tải ảnh lên Pancake…');
-      const up = await uploadContentFile(imgState.file);
-      if (!up.ok) {
-        logLine('⛔ Không tải được ảnh (' + up.error + ') — HỦY gửi để tránh gửi thiếu ảnh.');
-        state.sending = false;
-        batchStats.active = false;
-        render();
-        return;
+    } else if (imgState && (imgState.file || imgState.url)) {
+      if (imgState.file) {
+        logLine('☁️ Đang tải ảnh lên Pancake…');
+        const up = await uploadContentFile(imgState.file);
+        if (!up.ok) {
+          logLine('⛔ Không tải được ảnh (' + up.error + ') — HỦY gửi để tránh gửi thiếu ảnh.');
+          state.sending = false;
+          batchStats.active = false;
+          render();
+          return;
+        }
+        photo = { url: up.url, id: up.id, fbId: '', w: imgState.w || 0, h: imgState.h || 0 };
+        logLine('☁️ Ảnh đã tải lên — đang gắn attachment cho từng page…');
+      } else {
+        // Ảnh chọn bằng cách click trên giao diện: đã có URL ảnh gốc → gắn attachment
+        // cho từng page bằng URL như cũ (không qua bước tải file lên nữa).
+        photo = { url: imgState.url, id: '', fbId: '', w: imgState.w || 0, h: imgState.h || 0 };
+        logLine('🖼 Dùng ảnh đã chọn trên giao diện — đang gắn attachment cho từng page…');
       }
-      photo = { url: up.url, id: up.id, fbId: '', w: imgState.w || 0, h: imgState.h || 0 };
-      logLine('☁️ Ảnh đã tải lên — đang gắn attachment cho từng page…');
       const pageIds = [];
       targets.forEach((c) => {
         const p = c.pageId || String(c.id || '').split('_')[0];
@@ -5524,11 +5152,10 @@
     const quickEl0 = shadow && shadow.getElementById('ssb-quick');
     const quickOn = !!(quickEl0 && quickEl0.checked);
 
-    // CÂU NHANH NHIỀU ĐOẠN (v1.110.0): gửi từng đoạn theo đúng thứ tự như gửi tay — mỗi đoạn
-    // qua sendOne như 1 tin thường (đoạn có ảnh+chữ thì trong đoạn đó vẫn ảnh trước → chữ sau).
-    // Chưa đoạn nào đến nơi mà lỗi → trả nguyên kết quả để xử lý kênh/bù như 1 tin thường;
-    // đã có đoạn đến nơi rồi mới lỗi → chốt ⚠ (uncertain) để TUYỆT ĐỐI không bắn lại từ đầu
-    // gây trùng các đoạn đã đi.
+    // CÂU NHANH NHIỀU ĐOẠN: gửi từng đoạn theo đúng thứ tự như gửi tay — mỗi đoạn qua
+    // sendOne như 1 tin thường. Chưa đoạn nào đến nơi mà lỗi → trả nguyên kết quả để xử lý
+    // kênh/bù như 1 tin thường; đã có đoạn đến nơi rồi mới lỗi → chốt ⚠ (uncertain) để
+    // TUYỆT ĐỐI không bắn lại từ đầu gây trùng các đoạn đã đi.
     const sendQrParts = async (c, parts, sendOpts) => {
       let sentCount = 0;
       let anyFired = false;
@@ -5561,7 +5188,6 @@
 
     const sendOneAndLog = async (c, gtext, itemOpts) => {
       const isDeferredPass = !!(itemOpts && itemOpts.deferredCtx);
-      const prepCtx = (itemOpts && itemOpts.prepCtx) || null; // v1.91.0: ctx đã chuẩn bị xong ở giai đoạn CHUẨN BỊ
       if (!isDeferredPass) {
         // CHỐT PHÚT CHÓT — soi lại tag/icon NGAY TRƯỚC khi bắn từng chat: tag cấm có thể vừa
         // được gắn SAU bước lọc trước, và đây là lớp an toàn cuối cho mọi lỗ dữ liệu
@@ -5586,7 +5212,7 @@
       // 🚀 Tối ưu quyết định cho 20.000–30.000 tin:
       // Nếu đang bật Chế độ nhanh (quickOn) và chat ngoài 24h ĐÃ CÓ SẴN global_id thật trong RAM/WebSocket
       // hoặc Socket đang mở → bỏ qua pre-ctx ở ngoài (để resolveGlobalId bên trong tự gọi ensureConvCtx khi cần).
-      let skipPreCtx = isDeferredPass || !!prepCtx; // đã chuẩn bị trước → khỏi nạp lại ngữ cảnh
+      let skipPreCtx = isDeferredPass;
       if (!skipPreCtx && quickOn && c.type !== 'comment') {
         const full0 = peekConv(c) || c;
         const pid0 = (full0 && (full0.page_id || full0.pageId)) || c.pageId || String(c.id || '').split('_')[0];
@@ -5603,7 +5229,7 @@
         quick: quickOn,
         awaitDirect: true,
         fastOnly: !!(itemOpts && itemOpts.fastOnly),
-        deferredCtx: (itemOpts && itemOpts.deferredCtx) || prepCtx || null,
+        deferredCtx: (itemOpts && itemOpts.deferredCtx) || null,
         // 🔥 Nấc 2 chỉ bật cho lô lớn (>50 tin): bắn-nhả qua Socket + xác nhận nền.
         // Lô nhỏ vẫn chờ ACK trực tiếp để báo kết quả tức thì như cũ.
         sockFired: totalAll > 50,
@@ -5670,16 +5296,13 @@
         fail++;
         if (r.windowClosed) windowBlocked++;
         logLine('❌ [' + done + '/' + totalAll + '] ' + (c.name || c.id) + ' — ' + r.error);
-        // cửa sổ 24h VẪN bù kênh khác như v1.80 (Thanh Binh — có ca (#551) gửi lại vẫn được);
-        // kênh đã thử hết → scheduleBuRetry tự bỏ
-        // không cần khớp mẫu lỗi "đáng bù" như trước (vì đợt chính không còn tự đi tiếp kênh)
-        if (!r.uncertain && !r.recipientUnavailable && (r.firstShotFailed || isRetryableLoss(r.error))) {
+        // cửa sổ 24h VẪN bù kênh khác (Thanh Binh); kênh đã thử hết → scheduleBuRetry tự bỏ
+        if (!r.uncertain && !r.recipientUnavailable && isRetryableLoss(r.error)) {
           const p2 = c.pageId || String(c.id).split('_')[0];
           scheduleBuRetry(c, gtext, !photo ? null
             : (photo.qr
               ? (qrPhotoByPage[p2] ? { items: qrPhotoByPage[p2].items, url: qrPhotoByPage[p2].url, id: qrPhotoByPage[p2].id, fbId: fbIdByPage[p2] || '', fbIds: apiFbIdsByPage[p2] || [], w: qrPhotoByPage[p2].w || 0, h: qrPhotoByPage[p2].h || 0 } : null)
-              : { url: photo.url, id: photo.id, fbId: fbIdByPage[p2] || '', w: photo.w, h: photo.h }),
-            c.name || c.id, 'gửi chưa được', r.tried || [], { preLogged: true });
+              : { url: photo.url, id: photo.id, fbId: fbIdByPage[p2] || '', w: photo.w, h: photo.h }), c.name || c.id, 'gửi chưa được', r.tried || []);
         } else {
           if (window && typeof window.__botfakeTrackStatus__ === 'function') window.__botfakeTrackStatus__(c.id, 'fail');
         }
@@ -5715,8 +5338,8 @@
     //   • Làn 2 (extBacklogWorkers — 16 worker chạy song song ở nền ngay từ giây thứ 0):
     //     Âm thầm rút các chat từ extBacklogQueue để hỏi Extension / WebSocket loadThread mà không bao giờ
     //     chiếm mất bất kỳ ghế nào của Làn 1!
-    const FAST_HTTP_SOCKET_POOL = 192; // v1.102.0: về đúng số v1.80.0 (v1.88 nới 256)
-    const EXT_BACKLOG_WORKERS = 48; // v1.102.0: về đúng số v1.80.0 (v1.87 nới 64)
+    const FAST_HTTP_SOCKET_POOL = 192; // v1.80.0: 160→192 worker làn nhanh
+    const EXT_BACKLOG_WORKERS = 48;
     let gtextRef = '';
     const sendBatch = async (gtext, batch) => {
       gtextRef = gtext;
@@ -5777,28 +5400,14 @@
         }
       };
 
-      // ⚡ GID PREFETCH (v1.70.0 — khôi phục ở v1.101.0): pipeline chạy nền SONG SONG với
-      // làn gửi, đi trước để nạp sẵn ngữ cảnh + global_id (GET /messages, có dedupe inflight
-      // trong ensureConvCtx) cho các chat phía sau — tới lượt worker gửi thì gid đã có sẵn
-      // trong cache (0ms), không phải đứng chờ HTTP. Không await: prefetch chậm hơn làn gửi
-      // cũng vô hại (toàn cache hit), nhanh hơn thì làn gửi bứt tốc. Đây là đúng cơ chế của
-      // bản v1.80 (đo 143 tin/s) và v1.89 (đo ~101 tin/s). Pipeline prepConvForSend của
-      // v1.94–v1.100 làm làn gửi dùng ngữ cảnh "đã chuẩn bị" nửa vời (có cờ __prepped nên
-      // không dò lại) rồi dồn việc dò sâu vào đợt bù — tổng thể chậm hơn nên gỡ bỏ.
+      // ⚡ GID PREFETCH (v1.70.0): pipeline chạy nền SONG SONG với làn gửi, đi trước để nạp sẵn
+      // ngữ cảnh + global_id (GET /messages, có dedupe inflight trong ensureConvCtx) cho các chat
+      // phía sau — tới lượt worker gửi thì gid đã có sẵn trong cache (0ms), không phải đứng chờ HTTP.
+      // Không await: prefetch chậm hơn làn gửi cũng vô hại (toàn cache hit), nhanh hơn thì làn gửi bứt tốc.
       runPool(batch, async (c) => {
         if (state.stopRequested) return;
-        try {
-          await ensureConvCtx(c, { force: true });
-          // v1.106.0: KHÔNG upload ảnh trước ở pipeline nạp nền nữa. Pipeline này chạy trước
-          // làn bắn rất xa — trong lượt lớn, fbId (is_reusable=false) tạo xong nằm chờ nhiều
-          // phút mới tới lượt bắn thì bị FB từ chối riêng PHẦN ẢNH trong khung (phần chữ vẫn
-          // đi) → phải cứu lại bằng upload mới + bắn riêng ảnh, mà khâu cứu chỉ chạy khi ACK
-          // nền về (về muộn khi tải lớn) → ảnh tới sau chữ cả chục phút; đúng mẫu "ban đầu
-          // ok, về sau mới bị". Upload để ĐÚNG LÚC BẮN: prepareDirectCtx vốn đã upload song
-          // song với dò global_id ngay trước khi publish — fbId luôn tươi, tổng số upload
-          // không đổi, chỉ bỏ phần tạo sớm vô ích. (prefetchPhotoFbId không còn ai nạp.)
-        } catch (e) { /* ignore */ }
-      }, 96).catch(() => {}); // v1.102.0: 96 worker nạp nền — đúng số v1.80.0
+        try { await ensureConvCtx(c, { force: true }); } catch (e) { /* ignore */ }
+      }, 96).catch(() => {}); // v1.80.0: 48→96 — ở lô 34k, 48 worker × ~0,75s/GET ≈ 64 chat/s, khớp đúng tốc độ đo được → đây là nút thắt
 
       const extWorkers = [];
       const nExtWorkers = Math.min(EXT_BACKLOG_WORKERS, Math.max(1, batch.length));
@@ -5863,13 +5472,8 @@
       logLine('⚠ Gửi lỗi giữa chừng (' + (e && e.message || e) + ') — vẫn xóa câu đã gửi + bỏ chọn để không gửi trùng.');
     }
 
-    batchStats.loopFinished = true;
-    // v1.101.0: bù nền (scheduleBuRetry) đã chạy chồng lên đợt chính như bản v1.80/v1.89 —
-    // không còn pha bù riêng ở cuối lượt; TỔNG HỢP tự chốt khi mọi xác nhận nền settle xong.
-    buPhaseActive = false;
-    buBatchMode = false;
-    Object.keys(buBatchQueuedIds).forEach((k) => { delete buBatchQueuedIds[k]; });
     state.sending = false;
+    batchStats.loopFinished = true;
     if (state.stopRequested && done < totalAll) {
       logLine('⏸ Đã dừng sớm sau ' + done + '/' + totalAll + ' chat.');
     }
@@ -5909,7 +5513,6 @@
       const ids = Array.from(consumeIds);
       const delNames = state.savedLists.filter((l) => ids.indexOf(l.id) > -1).map((l) => l.name);
       state.savedLists = state.savedLists.filter((l) => ids.indexOf(l.id) === -1);
-      ids.forEach((id) => goneListIds.add(id)); // v1.93.0: đã tiêu thụ — tab khác không được hồi sinh câu này
       state.listSel = new Set();
       state.loadedName = null;
       persistSavedLists();
@@ -6175,7 +5778,7 @@
       </style>
       <div class="wrap" id="ssb-wrap">
         <div class="head" id="ssb-head">
-          <span class="title"><svg class="logo" viewBox="0 0 50 52" width="17" height="17" xmlns="http://www.w3.org/2000/svg"><path d="M10 2 L14 11" stroke="#5865F2" stroke-width="5" stroke-linecap="round" fill="none"/><path d="M40 2 L36 11" stroke="#5865F2" stroke-width="5" stroke-linecap="round" fill="none"/><rect x="0" y="12" width="50" height="40" rx="6" fill="#5865F2"/><rect x="12" y="31" width="12" height="4" rx="2" fill="#fff"/><rect x="26" y="31" width="12" height="4" rx="2" fill="#fff"/></svg>BOTFAKE <span id="ssb-ver" style="color:#64748b;font-weight:400;font-size:11px">v?</span></span>
+          <span class="title"><svg class="logo" viewBox="0 0 50 52" width="17" height="17" xmlns="http://www.w3.org/2000/svg"><path d="M10 2 L14 11" stroke="#5865F2" stroke-width="5" stroke-linecap="round" fill="none"/><path d="M40 2 L36 11" stroke="#5865F2" stroke-width="5" stroke-linecap="round" fill="none"/><rect x="0" y="12" width="50" height="40" rx="6" fill="#5865F2"/><rect x="12" y="31" width="12" height="4" rx="2" fill="#fff"/><rect x="26" y="31" width="12" height="4" rx="2" fill="#fff"/></svg>BOTFAKE <span style="color:#64748b;font-weight:400;font-size:11px">v1.60.0</span></span>
           <button class="badge on" id="ssb-toggle" title="Bật/tắt tính năng">BẬT</button>
           <button class="minibtn" id="ssb-close" title="Tắt panel (F5 hoặc Alt+Shift+B để hiện lại)">✕</button>
           <button class="minibtn" id="ssb-min" title="Thu nhỏ">—</button>
@@ -6203,20 +5806,17 @@
             <div class="label">2) Câu cần gửi</div>
             <textarea id="ssb-msg" placeholder="Nhập 1 câu sẽ gửi cho tất cả đoạn chat ở trên…"></textarea>
             <div class="row" style="align-items:center">
-              <input type="file" id="ssb-img" accept="image/*" style="display:none">
-              <button class="b b-gray" id="ssb-img-pick">📷 Chọn ảnh (tùy chọn)</button>
-              <span class="hint" id="ssb-img-info">Chưa chọn — copy ảnh rồi Ctrl+V để dán</span>
+              <button class="b b-gray" id="ssb-img-pick" title="Bấm nút này rồi CLICK vào 1 ảnh bất kỳ trên giao diện Pancake (ảnh trong chat, ảnh mẫu…) — ảnh đó sẽ được dùng làm ảnh gửi">🖼 Chọn ảnh trên trang</button>
+              <span class="hint" id="ssb-img-info">Chưa chọn — bấm nút rồi click 1 ảnh trên giao diện (hoặc Ctrl+V dán ảnh)</span>
               <button class="b b-gray" id="ssb-img-clear" style="display:none">✕ Bỏ ảnh</button>
             </div>
+            <div id="ssb-img-preview-wrap" style="display:none;margin:2px 0 4px"><img id="ssb-img-preview" style="width:56px;height:56px;object-fit:cover;border-radius:8px;border:1px solid #475569;display:block" title="Ảnh đang chọn để gửi"></div>
             <div class="row" style="align-items:center">
-              <button class="b b-gray" id="ssb-qr-load" title="Nạp danh sách câu nhanh Pancake của page này (đúng cơ chế gõ / trong khung chat)">⚡ Nạp câu nhanh</button>
               <button class="b b-gray" id="ssb-qr-capture" title="Bắt câu như gửi tay: bấm nút này (hoặc Alt+Q) rồi gõ / trong khung chat Pancake, click vào 1 câu — BOTFAKE bắt câu đó (cả ảnh) làm câu gửi, KHÔNG gửi vào chat đang mở">🎯 Bắt câu (Alt+Q)</button>
-              <select id="ssb-qr" style="flex:1;min-width:140px" title="Chọn 1 câu nhanh — chữ và ảnh của câu sẽ dùng cho cả lượt gửi">
-                <option value="">— câu nhanh (chữ + ảnh) —</option>
-              </select>
+              <span class="hint" id="ssb-qr-info">Câu nhanh: chưa chọn — gõ tay như cũ</span>
               <button class="b b-gray" id="ssb-qr-clear" style="display:none" title="Bỏ chọn câu nhanh">✕</button>
             </div>
-            <span class="hint" id="ssb-qr-info">Câu nhanh: chưa chọn — gõ tay như cũ</span>
+            <div id="ssb-qr-photos" style="display:none;margin:2px 0 4px;gap:6px;flex-wrap:wrap;align-items:center" title="Ảnh của câu nhanh đang chọn — bấm vào ảnh để mở lớn"></div>
             <div class="row" style="align-items:center">
               <span class="hint">Mỗi lượt:</span>
               <input type="number" id="ssb-wave" value="30000" min="1" max="100000" step="500" style="width:72px" title="Số tin mỗi lượt (tối đa 100.000)">
@@ -6307,23 +5907,34 @@
       const host = document.getElementById(PANEL_ID);
       if (host) host.style.display = 'none'; // F5 hoặc Alt+Shift+B để hiện lại
     });
-    // chọn ảnh kèm theo
-    const imgInput = root.getElementById('ssb-img');
+    // chọn ảnh kèm theo: CLICK VÀO 1 ẢNH TRÊN GIAO DIỆN (không mở hộp chọn file nữa)
     const imgInfo = root.getElementById('ssb-img-info');
     const imgClearBtn = root.getElementById('ssb-img-clear');
-    const setImg = (file) => {
-      if (file && state.quickReply) {
-        // chọn ảnh tay → bỏ câu nhanh (tránh lẫn 2 nguồn ảnh)
-        state.quickReply = null;
-        try { localStorage.removeItem('ssb_qr_v1'); } catch (e) { /* ignore */ }
-        const qi = root.getElementById('ssb-qr-info');
-        if (qi) qi.textContent = 'Câu nhanh: đã bỏ — đang dùng ảnh chọn tay';
-        const qs = root.getElementById('ssb-qr');
-        if (qs) qs.value = '';
-        const qc = root.getElementById('ssb-qr-clear');
-        if (qc) qc.style.display = 'none';
+    const imgPreviewWrap = root.getElementById('ssb-img-preview-wrap');
+    const imgPreview = root.getElementById('ssb-img-preview');
+    const clearQrSelection = () => {
+      if (!state.quickReply) return;
+      // chọn ảnh tay → bỏ câu nhanh đang chọn (2 nguồn ảnh không dùng chung 1 lượt)
+      state.quickReply = null;
+      try { localStorage.removeItem('ssb_qr_v1'); } catch (e) { /* ignore */ }
+      const qi = root.getElementById('ssb-qr-info');
+      if (qi) qi.textContent = 'Câu nhanh: chưa chọn — gõ tay như cũ';
+      const qc = root.getElementById('ssb-qr-clear');
+      if (qc) qc.style.display = 'none';
+      const qp = root.getElementById('ssb-qr-photos');
+      if (qp) { qp.style.display = 'none'; qp.innerHTML = ''; }
+    };
+    const updateImgPreview = () => {
+      const im = state.image;
+      if (imgPreview && imgPreviewWrap) {
+        if (im && im.url) { imgPreview.src = im.url; imgPreviewWrap.style.display = ''; }
+        else { imgPreview.removeAttribute('src'); imgPreviewWrap.style.display = 'none'; }
       }
-      if (state.image && state.image.url) { try { URL.revokeObjectURL(state.image.url); } catch (e) { /* ignore */ } }
+      if (imgClearBtn) imgClearBtn.style.display = im ? '' : 'none';
+    };
+    const setImg = (file) => {
+      if (file) clearQrSelection();
+      if (state.image && state.image.file && state.image.url) { try { URL.revokeObjectURL(state.image.url); } catch (e) { /* ignore */ } }
       state.image = file ? { file, name: file.name || 'ảnh', url: URL.createObjectURL(file), w: 0, h: 0 } : null;
       // đọc kích thước ảnh — request thật của app gửi kèm width/height
       if (file && state.image && typeof createImageBitmap === 'function') {
@@ -6335,21 +5946,119 @@
       if (imgInfo) {
         imgInfo.textContent = file
           ? '📷 ' + (file.name || 'ảnh') + ' (' + Math.round((file.size || 0) / 1024) + ' KB)'
-          : 'Chưa chọn ảnh';
+          : 'Chưa chọn — bấm “Chọn ảnh trên trang” rồi click 1 ảnh trên giao diện';
       }
-      if (imgClearBtn) imgClearBtn.style.display = file ? '' : 'none';
+      updateImgPreview();
     };
-    on('ssb-img-pick', 'click', () => { if (imgInput) imgInput.click(); });
-    if (imgInput) {
-      imgInput.addEventListener('change', () => {
-        setImg((imgInput.files && imgInput.files[0]) || null);
-      });
-    }
-    // ===== CÂU NHANH PANCAKE: chọn 1 câu "/" → chữ điền vào ô câu, ảnh (content_id) gắn cho lượt gửi =====
-    const qrSelEl = root.getElementById('ssb-qr');
+    // URL ảnh trên trang hay là bản thu nhỏ (_thumb) → gỡ hậu tố về ảnh GỐC
+    const originalImgUrl = (u) => String(u || '').split('?')[0].replace(/_thumb(\.[a-z0-9]+)$/i, '$1');
+    const setImgUrl = (url, name) => {
+      const clean = originalImgUrl(url);
+      if (!clean) return;
+      clearQrSelection();
+      if (state.image && state.image.file && state.image.url) { try { URL.revokeObjectURL(state.image.url); } catch (e) { /* ignore */ } }
+      state.image = { file: null, url: clean, name: name || 'ảnh trên trang', w: 0, h: 0, web: true };
+      const probe = new Image();
+      probe.onload = () => {
+        if (state.image && state.image.url === clean) { state.image.w = probe.naturalWidth || 0; state.image.h = probe.naturalHeight || 0; }
+      };
+      probe.src = clean;
+      if (imgInfo) imgInfo.textContent = '🖼 Đã chọn ảnh trên trang: ' + (name || clean.split('/').pop() || 'ảnh');
+      updateImgPreview();
+      logLine('🖼 Đã chọn 1 ảnh trên giao diện để gửi: ' + (name || clean));
+    };
+    // ===== CHẾ ĐỘ CHỌN ẢNH TRÊN TRANG: bấm nút → rê chuột thấy ảnh nào viền tím, click là chọn =====
+    const IMG_PICK_BADGE_ID = 'ssb-img-pick-badge';
+    let imgPickHover = null;
+    const clearImgPickHover = () => {
+      if (imgPickHover) { try { imgPickHover.style.outline = ''; imgPickHover.style.cursor = ''; } catch (e) { /* ignore */ } imgPickHover = null; }
+    };
+    const setImgPickBadge = (on2) => {
+      let b = document.getElementById(IMG_PICK_BADGE_ID);
+      if (on2) {
+        if (!b) {
+          b = document.createElement('div');
+          b.id = IMG_PICK_BADGE_ID;
+          b.textContent = '🖼 BOTFAKE ĐANG CHỌN ẢNH: click vào 1 ẢNH bất kỳ trên giao diện để dùng ảnh đó gửi đi (Esc để hủy)';
+          Object.assign(b.style, {
+            position: 'fixed', top: '10px', left: '50%', transform: 'translateX(-50%)',
+            zIndex: 2147483647, background: '#5865F2', color: '#fff', padding: '8px 14px',
+            borderRadius: '8px', font: '600 13px system-ui, sans-serif',
+            boxShadow: '0 4px 18px rgba(0,0,0,.35)', pointerEvents: 'none', maxWidth: '92vw', textAlign: 'center',
+          });
+          document.body.appendChild(b);
+        }
+      } else if (b) b.remove();
+    };
+    const setImgPick = (on2, silent) => {
+      if (on2 && state.qrCapture && typeof window.__botfakeQrCapture__ === 'function') window.__botfakeQrCapture__(false);
+      state.imgPick = !!on2;
+      setImgPickBadge(state.imgPick);
+      const btn = root.getElementById('ssb-img-pick');
+      if (btn) {
+        btn.textContent = state.imgPick ? '🖼 Đang chọn ảnh… (Esc hủy)' : '🖼 Chọn ảnh trên trang';
+        btn.style.background = state.imgPick ? '#5865F2' : '';
+        btn.style.color = state.imgPick ? '#fff' : '';
+      }
+      if (!state.imgPick) clearImgPickHover();
+      if (state.imgPick && !silent) logLine('🖼 BẬT chọn ảnh: click vào 1 ảnh bất kỳ trên giao diện Pancake để dùng ảnh đó gửi đi. Esc để hủy.');
+    };
+    window.__botfakeImgPick__ = (on2) => setImgPick(on2 == null ? !state.imgPick : on2);
+    const findImgEl = (t) => {
+      if (!t || !t.closest) return null;
+      return t.closest('img') || (t.querySelector ? t.querySelector('img') : null);
+    };
+    const imgUrlFromElement = (t) => {
+      const img = findImgEl(t);
+      if (img) return img.currentSrc || img.src || img.getAttribute('data-src') || img.getAttribute('src') || '';
+      try {
+        const bg = window.getComputedStyle(t).backgroundImage;
+        const m = bg && bg.match(/url\(["']?(.*?)["']?\)/);
+        return m ? m[1] : '';
+      } catch (e) { return ''; }
+    };
+    const onImgPickHover = (e) => {
+      if (!state.imgPick) return;
+      const t = e.target;
+      if (!t || t.id === PANEL_ID) return; // hover trong panel BOTFAKE → bỏ qua
+      const img = findImgEl(t);
+      if (!img || img === imgPickHover) return;
+      clearImgPickHover();
+      imgPickHover = img;
+      try { img.style.outline = '3px solid #5865F2'; img.style.cursor = 'copy'; } catch (err) { /* ignore */ }
+    };
+    const onImgPickClick = (e) => {
+      if (!state.imgPick) return;
+      const t = e.target;
+      if (!t || t.id === PANEL_ID) return; // click trong panel BOTFAKE → để panel tự xử lý
+      const url = imgUrlFromElement(t);
+      if (!url) return; // click không trúng ảnh nào → giữ nguyên chế độ chờ
+      // Chặn TRƯỚC app: click này chỉ để CHỌN ảnh, không mở ảnh/không chèn vào chat
+      e.preventDefault();
+      e.stopPropagation();
+      if (e.stopImmediatePropagation) e.stopImmediatePropagation();
+      setImgPick(false, true);
+      const img = findImgEl(t);
+      setImgUrl(url, (img && (img.alt || img.title)) || '');
+    };
+    document.addEventListener('mouseover', onImgPickHover, true);
+    document.addEventListener('click', onImgPickClick, true);
+    // ===== CÂU NHANH: chọn/bỏ chọn + khôi phục sau F5 =====
     const qrInfo = root.getElementById('ssb-qr-info');
     const qrClearBtn = root.getElementById('ssb-qr-clear');
+    const qrPhotosEl = root.getElementById('ssb-qr-photos');
     const QR_STORE_KEY = 'ssb_qr_v1';
+    // Hiển thị ẢNH của câu đang chọn ngay trên panel — nhìn là biết đã bắt ĐÚNG câu chưa
+    // (các câu sale thường mở đầu giống hệt nhau, chỉ khác ảnh/giá phía sau).
+    const renderQrPhotos = (qr) => {
+      if (!qrPhotosEl) return;
+      const items = (qr && Array.isArray(qr.items)) ? qr.items.filter((x) => x && x.url) : [];
+      if (!items.length) { qrPhotosEl.style.display = 'none'; qrPhotosEl.innerHTML = ''; return; }
+      qrPhotosEl.innerHTML = '<span class="hint">🖼 ' + items.length + ' ảnh:</span>' + items.map((x) =>
+        '<a href="' + esc(x.url) + '" target="_blank" rel="noopener"><img src="' + esc(x.url) + '" '
+        + 'style="width:44px;height:44px;object-fit:cover;border-radius:6px;border:1px solid #475569;display:block"></a>').join('');
+      qrPhotosEl.style.display = 'flex';
+    };
     const applyQr = (qr) => {
       state.quickReply = qr || null;
       try {
@@ -6360,18 +6069,16 @@
         ? '⚡ Câu nhanh "' + qr.shortcut + '" — ' + qr.items.length + ' ảnh (bind bằng content_id, nhanh như gửi tay)'
         : 'Câu nhanh: chưa chọn — gõ tay như cũ';
       if (qrClearBtn) qrClearBtn.style.display = qr ? '' : 'none';
+      renderQrPhotos(qr);
     };
     // ===== BẮT CÂU NHANH NHƯ GỬI TAY (Alt+Q): gõ "/" trong khung chat app → click 1 câu trong popup =====
     // Popup câu nhanh của app (HTML thật người dùng gửi): danh sách #qr_autocomplete, mỗi câu
     // là .suggestion-element, chữ nằm ở .suggestion-text, ảnh ở .suggestion-photos img — KHÔNG
-    // có .shortcut-tag nên không đối chiếu theo mã câu được. Khi chế độ bắt đang bật, BOTFAKE
-    // chặn click Ở PHA BẮT (capture) trước khi app kịp chèn câu vào composer → câu KHÔNG bị
-    // gửi/chèn vào chat đang mở; BOTFAKE đối chiếu với dữ liệu câu nhanh của đúng page đó
-    // (fetchQuickRepliesForPage) để lấy đủ CHỮ + ẢNH (content_id) rồi đặt làm câu gửi cho
-    // lượt hàng loạt — y như chọn bằng lệnh "/".
-    // v1.111.0: đối chiếu bằng CHẤM ĐIỂM (toàn văn dòng đã click + ảnh thumbnail + vị trí dòng)
-    // thay cho "khớp 40 ký tự đầu thắng" — hết cảnh các câu mở đầu giống hệt nhau (chỉ khác
-    // giá/ảnh phía sau) bấm dòng nào cũng trúng câu đầu tiên.
+    // có .shortcut-tag nên không đối chiếu theo mã câu được. Khi chế độ
+    // bắt đang bật, BOTFAKE chặn click Ở PHA BẮT (capture) trước khi app kịp chèn câu vào
+    // composer → câu KHÔNG bị gửi/chèn vào chat đang mở; BOTFAKE đối chiếu shortcut với dữ
+    // liệu câu nhanh của đúng page đó (fetchQuickRepliesForPage) để lấy đủ CHỮ + ẢNH
+    // (content_id) rồi đặt làm câu gửi cho lượt hàng loạt — y như chọn bằng lệnh "/".
     const QR_CAPTURE_BADGE_ID = 'ssb-qr-capture-badge';
     let qrCaptureTimer = null;
     const setQrCaptureBadge = (on2) => {
@@ -6392,6 +6099,7 @@
       } else if (b) b.remove();
     };
     const setQrCapture = (on2, silent) => {
+      if (on2 && state.imgPick && typeof window.__botfakeImgPick__ === 'function') window.__botfakeImgPick__(false);
       state.qrCapture = !!on2;
       if (qrCaptureTimer) { clearTimeout(qrCaptureTimer); qrCaptureTimer = null; }
       setQrCaptureBadge(state.qrCapture);
@@ -6445,8 +6153,6 @@
         const pid = currentPanelPageId();
         const recs = await fetchQuickRepliesForPage(pid);
         const list = recs.map(normalizeQuickReply).filter((q) => q.text || q.items.length);
-        state.qrList = list;
-        state.qrPageId = pid;
         const normT = (v) => String(v || '').normalize('NFC').replace(/\s+/g, ' ').trim().toLowerCase();
         const ct = normT(clickedText);
         const cKeys = clickedPhotos.map(photoKey).filter(Boolean);
@@ -6490,18 +6196,10 @@
             };
             q.parts = [{ text: q.text, items: q.items }];
             logLine('🎯 Không khớp được dữ liệu câu nhanh của app — dùng thẳng nội dung dòng ' + (clickIdx + 1) + ' vừa click (' + q.items.length + ' ảnh từ popup).');
-          } else {
-            q = null;
           }
         }
-        if (qrSelEl) {
-          qrSelEl.innerHTML = '<option value="">— chọn câu nhanh —</option>' + list.map((q2, i) =>
-            '<option value="' + i + '">' + esc(q2.shortcut) + ' · ' + esc(clip(q2.text, 42)) + (q2.items.length ? ' · 🖼' + q2.items.length : '') + (q2.parts && q2.parts.length > 1 ? ' · ' + q2.parts.length + ' đoạn' : '') + '</option>').join('');
-          const ix = q ? list.indexOf(q) : -1;
-          if (ix > -1) qrSelEl.value = String(ix);
-        }
         if (!q) {
-          logLine('⚠ Đã bắt được click nhưng không đọc được nội dung dòng đã chọn — bấm 🎯 Bắt câu rồi click lại, hoặc dùng ⚡ Nạp câu nhanh.');
+          logLine('⚠ Đã bắt được click nhưng không đọc được nội dung dòng đã chọn — bấm 🎯 Bắt câu rồi click lại.');
           return;
         }
         setImg(null); // bỏ ảnh chọn tay — dùng ảnh của câu vừa bắt
@@ -6522,34 +6220,7 @@
     };
     document.addEventListener('click', onQrCaptureClick, true);
     on('ssb-qr-capture', 'click', () => setQrCapture(!state.qrCapture));
-    on('ssb-qr-load', 'click', async () => {
-      const pid = currentPanelPageId();
-      if (!pid) { logLine('⚠ Chưa xác định được page — hãy mở 1 đoạn chat hoặc tải danh sách trước.'); return; }
-      logLine('⚡ Đang nạp câu nhanh của page ' + pid + '…');
-      const recs = await fetchQuickRepliesForPage(pid);
-      const list = recs.map(normalizeQuickReply).filter((q) => q.text || q.items.length);
-      state.qrList = list;
-      state.qrPageId = pid;
-      if (qrSelEl) {
-        qrSelEl.innerHTML = '<option value="">— chọn câu nhanh —</option>' + list.map((q, i) =>
-          '<option value="' + i + '">' + esc(q.shortcut) + ' · ' + esc(clip(q.text, 42)) + (q.items.length ? ' · 🖼' + q.items.length : '') + (q.parts && q.parts.length > 1 ? ' · ' + q.parts.length + ' đoạn' : '') + '</option>').join('');
-      }
-      logLine(list.length
-        ? '⚡ Nạp được ' + list.length + ' câu nhanh — chọn 1 câu ở ô bên cạnh rồi bấm Chạy'
-        : '⚠ Page này chưa có câu nhanh nào (hoặc app chưa tải dữ liệu câu nhanh — mở khung chat gõ "/" 1 lần rồi nạp lại)');
-    });
-    if (qrSelEl) {
-      qrSelEl.addEventListener('change', () => {
-        const q = state.qrList[parseInt(qrSelEl.value, 10)];
-        if (!q) return;
-        setImg(null); // bỏ ảnh chọn tay — dùng ảnh của câu nhanh
-        applyQr({ shortcut: q.shortcut, text: q.text, pageId: state.qrPageId || '', items: q.items, parts: q.parts });
-        const msgEl = root.getElementById('ssb-msg');
-        if (msgEl) msgEl.value = q.text;
-        logLine('⚡ Đã chọn câu nhanh "' + q.shortcut + '" (' + q.items.length + ' ảnh' + (q.parts && q.parts.length > 1 ? ', ' + q.parts.length + ' đoạn — sẽ gửi lần lượt theo thứ tự' : '') + ') — bấm Chạy để gửi cho danh sách đã chọn');
-      });
-    }
-    on('ssb-qr-clear', 'click', () => { applyQr(null); if (qrSelEl) qrSelEl.value = ''; });
+    on('ssb-qr-clear', 'click', () => { applyQr(null); });
     // khôi phục câu nhanh đã chọn từ lần trước (dữ liệu người dùng phải sống qua F5)
     try {
       const savedQr = JSON.parse(localStorage.getItem(QR_STORE_KEY) || 'null');
@@ -6557,10 +6228,12 @@
         state.quickReply = savedQr;
         if (qrInfo) qrInfo.textContent = '⚡ Câu nhanh "' + savedQr.shortcut + '" (' + savedQr.items.length + ' ảnh) — đã lưu từ trước, bấm Chạy là dùng';
         if (qrClearBtn) qrClearBtn.style.display = '';
+        renderQrPhotos(savedQr);
       }
     } catch (e) { /* ignore */ }
+    on('ssb-img-pick', 'click', () => setImgPick(!state.imgPick));
     on('ssb-img-clear', 'click', () => {
-      if (imgInput) imgInput.value = '';
+      setImgPick(false, true);
       setImg(null);
     });
     // Ctrl+V: copy ảnh (screenshot, ảnh trên web…) rồi dán thẳng vào trang
@@ -6669,7 +6342,6 @@
         id: 'l' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
         name,
         text: cauText, // CÂU CẦN GỬI đang gõ lúc tạo → gắn liền với câu này (sửa được bằng nút ✎)
-        updatedAt: Date.now(), // v1.93.0: hợp nhất đa tab lấy bản sửa mới hơn
         items: sel.map((m) => ({
           id: m.id,
           pageId: m.pageId || String(m.id).split('_')[0] || '',
@@ -6712,7 +6384,6 @@
             if (!confirm('Xóa câu “' + l.name + '” (' + l.items.length + ' chat)?')) return;
             const wasSel = state.listSel.has(l.id);
             state.savedLists = state.savedLists.filter((x) => x.id !== id);
-            goneListIds.add(id); // v1.93.0: đã xóa — tab khác không được hồi sinh câu này
             if (wasSel) { state.listSel.delete(id); rebuildFromLists(); }
             persistSavedLists();
             renderSavedLists();
@@ -6768,20 +6439,20 @@
     }
     // ===== KHÔI PHỤC SAU F5: câu đang tick + ô nội dung đang gõ + nhật ký — dữ liệu không mất =====
     try {
-      const ui = JSON.parse(localStorage.getItem(UI_TAB_KEY) || localStorage.getItem(UI_KEY) || 'null'); // v1.93.0: trạng thái gõ dở của chính tab này
+      const ui = JSON.parse(localStorage.getItem(UI_KEY) || 'null');
       if (ui && Array.isArray(ui.sel)) {
         const msgEl3 = root.getElementById('ssb-msg');
         if (msgEl3 && ui.msg) msgEl3.value = String(ui.msg); // khôi phục chữ đang gõ trước
         state.listSel = new Set(ui.sel.filter((id) => state.savedLists.some((l) => l.id === id)));
         if (state.listSel.size) rebuildFromLists(); // tích 1 câu → ô gõ nạp theo nội dung câu (đúng UX)
       }
-      const oldLog = JSON.parse(localStorage.getItem(LOG_TAB_KEY) || localStorage.getItem(LOG_KEY) || '[]'); // v1.93.0: nhật ký của chính tab này
+      const oldLog = JSON.parse(localStorage.getItem(LOG_KEY) || '[]');
       if (Array.isArray(oldLog) && oldLog.length) {
         state.log = oldLog.slice(-300);
         const elLog = root.getElementById('ssb-log');
         if (elLog) elLog.textContent = state.log.join('\n');
       }
-      const oldSum = localStorage.getItem(SUMMARY_TAB_KEY) || localStorage.getItem(SUMMARY_LS_KEY) || ''; // v1.93.0: ưu tiên bản của chính tab này
+      const oldSum = localStorage.getItem(SUMMARY_LS_KEY) || '';
       if (oldSum) {
         const elSum = root.getElementById('ssb-summary');
         if (elSum) { elSum.style.display = ''; elSum.innerHTML = oldSum; }
@@ -6948,7 +6619,7 @@
   let logFlushTimer = null;
   function flushLogUI() {
     logFlushTimer = null;
-    try { localStorage.setItem(LOG_TAB_KEY, JSON.stringify(state.log)); } catch (e) { /* ignore */ }
+    try { localStorage.setItem(LOG_KEY, JSON.stringify(state.log)); } catch (e) { /* ignore */ }
     const el = shadow && shadow.getElementById('ssb-log');
     if (el) {
       el.textContent = state.log.join('\n');
@@ -6964,7 +6635,7 @@
     if (state.log.length > 300) state.log.shift();
     const el = shadow && shadow.getElementById('ssb-log');
     if (!el) {
-      try { localStorage.setItem(LOG_TAB_KEY, JSON.stringify(state.log)); } catch (e) { /* ignore */ }
+      try { localStorage.setItem(LOG_KEY, JSON.stringify(state.log)); } catch (e) { /* ignore */ }
       console.log('[SSB]', s);
       return;
     }
@@ -6985,22 +6656,10 @@
 
   function render() {
     if (!shadow) return;
-    const ver = shadow.getElementById('ssb-ver');
-    if (ver) ver.textContent = 'v' + APP_VERSION;
     const tgl = shadow.getElementById('ssb-toggle');
     if (tgl) {
       tgl.textContent = state.enabled ? 'BẬT' : 'TẮT';
       tgl.className = 'badge ' + (state.enabled ? 'on' : 'off');
-    }
-    const pickBtn = shadow.getElementById('ssb-pick');
-    if (pickBtn) {
-      // Phản ánh trạng thái chế độ "Chọn chuỗi (2 nhấp)" để biết đang chờ nhấp dòng nào
-      pickBtn.className = 'b ' + (state.pickMode ? 'b-blue' : 'b-gray');
-      pickBtn.textContent = state.pickMode
-        ? (state.mode === 'range' && state.rangeStart && !state.rangeEnd
-          ? 'Chọn chuỗi: nhấp dòng CUỐI'
-          : 'Chọn chuỗi: nhấp dòng ĐẦU')
-        : 'Chọn chuỗi (2 nhấp)';
     }
     const tgt = shadow.getElementById('ssb-target');
     if (tgt) {
@@ -7082,6 +6741,9 @@
       }
     }
 
+    if (send) send.textContent = state.sending
+      ? (state.stopRequested ? '⏳ Đang dừng…' : '⏳ Đang gửi…')
+      : (state.sentIds && state.sentIds.size > 0 ? '▶ Chạy tiếp' : '▶ Chạy');
 
     const el = shadow.getElementById('ssb-log');
     if (el) {
@@ -7098,21 +6760,21 @@
     const item = e.target && e.target.closest && e.target.closest('.conversation-list-item');
     if (!item) return;
     const isAlt = e.altKey;
-    // Click thường (không Alt, không bật chế độ "Chọn chuỗi (2 nhấp)") = để Pancake mở chat
-    // như bình thường — KHÔNG can thiệp.
-    // Lý do: listener này đăng ký ở CAPTURE phase (document.addEventListener('click', onDocClick, true)),
-    // nên preventDefault/stopPropagation ở đây sẽ chặn ĐỨT sự kiện trước khi Pancake kịp xử lý
-    // → click vào đoạn chat không mở được chat, không chọn được snippet.
-    // Chỉ can thiệp khi Alt+click hoặc đang bật chế độ chọn chuỗi (state.pickMode).
-    if (!isAlt && !state.pickMode) return;
+    // Guard theo đúng bản người dùng đang chạy (v1.80.4): chỉ can thiệp khi Alt+click HOẶC đang
+    // bật chế độ "Chọn chuỗi (2 nhấp)" (state.pickMode). Guard phải đứng TRƯỚC preventDefault
+    // và TRƯỚC khi tắt pickMode — nếu không: click thường bị chặn (không mở được chat) và nút
+    // 2 nhấp bị chết vì pickMode bị xóa trước khi kịp dùng.
+    if (!isAlt && !state.pickMode) return; // click thường = mở chat như bình thường
     const info = rowInfo(item);
     if (!info) return;
+    state.pickMode = false;
+
     e.preventDefault();
     e.stopPropagation();
 
     // Alt + click cùng 1 đoạn 2 lần → chọn từ đoạn này xuống hết cuối danh sách (tùy chọn A)
     const now = Date.now();
-    if (isAlt && state.lastAltClickId === info.id && now - state.lastAltClickTime < 800) {
+    if (state.lastAltClickId === info.id && now - state.lastAltClickTime < 800) {
       state.lastAltClickId = null;
       state.lastAltClickTime = 0;
       state.mode = 'range';
@@ -7135,27 +6797,24 @@
       return;
     }
 
-    if (isAlt) {
-      state.lastAltClickId = info.id;
-      state.lastAltClickTime = now;
-    }
-    // Click lần 1 = đầu chuỗi, lần 2 = cuối chuỗi → chọn tất cả ở giữa; lần 3 = bắt đầu chuỗi mới
-    // (Alt+Click hoặc click thường khi đang bật chế độ "Chọn chuỗi (2 nhấp)")
-    const completing = state.mode === 'range' && !!state.rangeStart && !state.rangeEnd;
-    if (completing) {
+    state.lastAltClickId = info.id;
+    state.lastAltClickTime = now;
+    // Alt+Click lần 1 = đầu chuỗi, lần 2 = cuối chuỗi → chọn tất cả ở giữa; lần 3 = bắt đầu chuỗi mới
+    if (state.mode === 'range' && state.rangeStart && !state.rangeEnd) {
       completeRange(info).catch((err) => logLine('⚠ Lỗi khi tạo chuỗi: ' + err));
-      // Đủ 2 đầu chuỗi → tắt chế độ "2 nhấp": click thường lại mở chat như bình thường.
-      state.pickMode = false;
     } else {
       setRangeStart(info);
-      // Đang ở chế độ "2 nhấp": GIỮ chế độ bật sau nhấp ĐẦU để nhấp thường kế tiếp
-      // (dòng CUỐI chuỗi) vẫn được script xử lý, không bị Pancake mở chat mất.
-      if (isAlt) state.pickMode = false;
     }
     render();
+    return;
   }
 
   function onKeydown(e) {
+    if (e.key === 'Escape' && state.imgPick) {
+      if (typeof window.__botfakeImgPick__ === 'function') window.__botfakeImgPick__(false);
+      logLine('🖼 Đã hủy chọn ảnh');
+      return;
+    }
     // Alt+Q: bật/tắt chế độ BẮT CÂU NHANH (chờ click vào popup "/" của app)
     if (e.altKey && !e.ctrlKey && !e.metaKey && (e.key === 'q' || e.key === 'Q')) {
       e.preventDefault();

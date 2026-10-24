@@ -242,6 +242,17 @@ qua kênh chưa thử**, không bao giờ "báo gửi" rồi im lặng.
 - **Bộ tổng hợp số tin đã gửi thành công thật sự (v1.52.0) & bản lưu dự phòng v1.51.0**:
   - Thanh **`#ssb-summary`** nằm ngay dưới thanh tiến trình (trên khung LOG), đếm **real-time** số tin đã được server/Extension/Socket **xác nhận đến nơi thật sự** (không đếm nhầm tin mới bắn `fired` chưa xác nhận), tách rõ từng kênh (`[API: X · Ext: Y · Socket: Z]`), số tin đang xử lý nền (`⏳ Đang xử lý`), số tin lỗi (`❌ Lỗi`), không rõ (`⚠ Không rõ`), bỏ qua do tag/SĐT (`🧹 Bỏ qua`), và thời gian chạy (`⏱ Ns`). Khi toàn bộ tin bắn nền & bù ngầm hoàn tất (`pending === 0`), tự động chốt trạng thái `🏁 TỔNG HỢP` (lưu giữ qua F5) và in dòng `📊 TỔNG HỢP CHỐT LƯỢT GỬI: ✅ Đã gửi thành công X/Y tin (%) ...` vào LOG.
   - Bản copy nguyên trạng trước khi thêm tổng hợp được lưu tại **`scripts/pancake-send-by-snippet.v1.51.0-backup.user.js`** để có thể quay lại dùng hoặc sửa bất cứ lúc nào nếu thấy không cần.
+- **↩️ QUAY VỀ DÒNG BẢN v1.80 THEO YÊU CẦU NGƯỜI DÙNG (v1.80.6)**: bỏ dòng bản v1.110/v1.111, file chính
+  `pancake-send-by-snippet.user.js` nay là **bản v1.80 fastlist** (nội dung = bản v1.80.4 người dùng đang
+  chạy, lấy từ `pancake-send-by-snippet.v1.80-fastlist.user.js` trong repo — đã có đủ: bắt câu nhanh Alt+Q
+  chấm điểm toàn văn + ảnh + vị trí dòng kèm fallback dòng đã click, preview ảnh câu nhanh `#ssb-qr-photos`,
+  chọn ảnh trên trang/Ctrl+V, LIST CÂU GỬI, GID prefetch, Cluster-Skip, bắn-nhả Socket…). Vá thêm đúng 1 chỗ
+  bản backup bị lệch so với bản người dùng chạy: guard `onDocClick` sửa thành
+  `if (!isAlt && !state.pickMode) return;` đặt TRƯỚC `preventDefault()` và trước khi tắt `pickMode`
+  (bản backup cũ `if (!isAlt) return` đặt sau `state.pickMode = false` → nút "Chọn chuỗi (2 nhấp)" chết).
+  Giữ nguyên tính năng Alt+click×2 cùng dòng = chọn tới cuối (có trong backup). Verify jsdom: 5/5 ca bắt
+  câu nhanh + 5/5 ca click (click thường không bị chặn, Alt+click 2 đầu, pickMode 2 nhấp) ĐẠT.
+  Các bản v1.110.x/v1.111.0 vẫn xem được trong lịch sử git nếu cần lấy lại.
 - **🎯 Sửa BẮT CÂU NHANH (Alt+Q) bấm dòng nào cũng trúng câu đầu tiên (v1.111.0)**: popup `/` của app
   (HTML thật người dùng gửi: `#qr_autocomplete` > `.suggestion-element` > `.suggestion-text` +
   `.suggestion-photos img`) **không có `.shortcut-tag`**, và các câu sale thường **mở đầu giống hệt nhau**
