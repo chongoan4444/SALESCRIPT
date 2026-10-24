@@ -242,6 +242,22 @@ qua kênh chưa thử**, không bao giờ "báo gửi" rồi im lặng.
 - **Bộ tổng hợp số tin đã gửi thành công thật sự (v1.52.0) & bản lưu dự phòng v1.51.0**:
   - Thanh **`#ssb-summary`** nằm ngay dưới thanh tiến trình (trên khung LOG), đếm **real-time** số tin đã được server/Extension/Socket **xác nhận đến nơi thật sự** (không đếm nhầm tin mới bắn `fired` chưa xác nhận), tách rõ từng kênh (`[API: X · Ext: Y · Socket: Z]`), số tin đang xử lý nền (`⏳ Đang xử lý`), số tin lỗi (`❌ Lỗi`), không rõ (`⚠ Không rõ`), bỏ qua do tag/SĐT (`🧹 Bỏ qua`), và thời gian chạy (`⏱ Ns`). Khi toàn bộ tin bắn nền & bù ngầm hoàn tất (`pending === 0`), tự động chốt trạng thái `🏁 TỔNG HỢP` (lưu giữ qua F5) và in dòng `📊 TỔNG HỢP CHỐT LƯỢT GỬI: ✅ Đã gửi thành công X/Y tin (%) ...` vào LOG.
   - Bản copy nguyên trạng trước khi thêm tổng hợp được lưu tại **`scripts/pancake-send-by-snippet.v1.51.0-backup.user.js`** để có thể quay lại dùng hoặc sửa bất cứ lúc nào nếu thấy không cần.
+- **🎯 Sửa BẮT CÂU NHANH (Alt+Q) bấm dòng nào cũng trúng câu đầu tiên (v1.111.0)**: popup `/` của app
+  (HTML thật người dùng gửi: `#qr_autocomplete` > `.suggestion-element` > `.suggestion-text` +
+  `.suggestion-photos img`) **không có `.shortcut-tag`**, và các câu sale thường **mở đầu giống hệt nhau**
+  (chỉ khác giá/ảnh ở phía sau) → logic cũ đối chiếu bằng **40 ký tự đầu** nên câu nào khớp trước thắng,
+  bấm dòng 2/3/4… vẫn luôn bắt nhầm câu dòng 1. Cách sửa trong `onQrCaptureClick`: **chấm điểm từng câu**
+  trong dữ liệu page thay vì "khớp trước thắng" — (1) lấy **toàn văn dòng đã click** từ `.suggestion-text`
+  (clone node rồi gỡ `.suggestion-header-section`/`style`/`svg` để không dính icon), chuẩn hóa
+  `normalize('NFC')` + lowercase; so với từng câu: bằng nhau +5000 điểm, không thì cộng **độ dài tiền tố
+  chung** (chính phần giá/đuôi khác nhau quyết định thắng thua); (2) so **ảnh thumbnail** trong dòng với
+  ảnh của câu theo tên file (gỡ hậu tố `_thumb` + query string): mỗi ảnh trùng +3000; (3) `.shortcut-tag`
+  nếu có vẫn ăn +10000; (4) điểm suýt soát nhau (±30 — các câu gần giống hệt) thì tin **vị trí dòng** đã
+  click trong popup. Nếu vẫn không khớp được dữ liệu app (điểm < 10) thì **fallback dùng thẳng nội dung
+  dòng đã click** (chữ + ảnh lấy từ popup, ảnh gỡ `_thumb` về ảnh gốc) — gửi bằng bind `urls` (chậm hơn
+  `content_ids` nhưng đúng ảnh) thay vì gửi nhầm câu khác. Đã verify bằng jsdom: 3 câu cùng mở đầu 62 ký
+  tự chỉ khác giá/ảnh → click dòng nào trúng đúng dòng đó; dòng lạ ngoài dữ liệu app → fallback đúng chữ
+  + ảnh gốc. Dropdown "⚡ Nạp câu nhanh" và nút 🎯 vẫn hoạt động như cũ.
 - **🐭 Sửa “click vào đoạn chat không mở được” + sửa nút “Chọn chuỗi (2 nhấp)” (v1.110.1)**: `onDocClick`
   được đăng ký ở **pha bắt** (`document.addEventListener('click', onDocClick, true)`) nhưng lại gọi
   `preventDefault()`/`stopPropagation()` cho **mọi** click vào `.conversation-list-item` → sự kiện bị chặn
