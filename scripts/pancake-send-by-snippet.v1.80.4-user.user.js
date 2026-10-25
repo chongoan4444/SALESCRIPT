@@ -44,6 +44,7 @@
   /* ============================ HẰNG SỐ ============================ */
 
   const PANEL_ID = 'ssb-root';          // ssb = SaleScript Bulk — không đụng pk-*/adj-*/pancake-* của script khác
+  const APP_VERSION = '1.80.4';        // hiện ở tiêu đề panel — đối chiếu với @version trong header
   const STYLE_ID = 'ssb-style';
 
   const MAX_NAME_LIST = 12;             // số tên hiển thị khi xác nhận
@@ -75,6 +76,8 @@
     listIncomplete: false,  // danh sách tải CHƯA đầy đủ → CHẶN GỬI (tải sai là gửi sai)
     quickReply: null,       // câu nhanh Pancake bắt bằng Alt+Q { shortcut, text, pageId, items:[{id,url,w,h}], parts:[{text,items}] }
     qrCapture: false,       // đang bật chế độ BẮT CÂU bằng Alt+Q (chờ click vào popup "/" của app)
+    lastSent: null,         // ẢNH CHỤP lượt gửi gần nhất { at, typedText, items:[chat…], lists:[{id,name,text}] }
+                            // để nút "↺ Chọn lại list vừa gửi" chọn lại y nguyên mà KHÔNG phải tải danh sách
   };
   state.savedLists = loadSavedLists();
   // Khôi phục danh sách chat đã gửi (sentIds) từ localStorage — F5 không mất tiến độ gửi
@@ -418,6 +421,8 @@
   const LOG_KEY = 'ssb_log';           // nhật ký gửi — giữ qua F5
   const UI_KEY = 'ssb_ui_state';       // tick câu + ô nội dung đang gõ — giữ qua F5
   const SL_BAK = SL_KEY + '_bak';      // bản dự phòng câu — chống mất dữ liệu
+  const LAST_SENT_KEY = 'ssb_last_sent_v1'; // ảnh chụp lượt gửi gần nhất — "↺ Chọn lại list vừa gửi"
+  const LAST_SENT_MAX_ITEMS = 8000;    // trần số chat ghi xuống localStorage (chống tràn quota ~5MB)
 
   function loadSavedLists() {
     try {
@@ -572,6 +577,130 @@
       + copy.items.length + ' chat' + (copy.text ? ', có nội dung' : ', chưa có nội dung')
       + ') — bản sao chưa được tích');
     return copy;
+  }
+
+  /* ============ ẢNH CHỤP LƯỢT GỬI GẦN NHẤT — "↺ Chọn lại list vừa gửi" ============ */
+  // Vì sao cần: sau mỗi lượt gửi, code tự BỎ CHỌN chat + tự XÓA các câu đã dùng (chống gửi trùng).
+  // Muốn gửi lại đúng nhóm đó thì phải bấm "⚡ Tải danh sách" rồi chọn lại từ đầu. Ảnh chụp dưới
+  // đây giữ nguyên DANH SÁCH CHAT + NỘI DUNG CÂU của lượt vừa gửi (đúng các trường mà
+  // convApiRow()/ssb-sl-new đã dùng để gửi) nên chọn lại được ở 0ms, không cần quét lại trang.
+  function pickReplayItem(m) {
+    return {
+      id: String(m.id || ''),
+      pageId: m.pageId || String(m.id || '').split('_')[0] || '',
+      name: m.name || '', snippet: m.snippet || '', snippetRaw: m.snippetRaw || '',
+      time: m.time || '', type: m.type || '', platform: m.platform || '',
+      lastAt: m.lastAt || '', fromPsid: m.fromPsid || '',
+      threadId: m.threadId || '', threadKey: m.threadKey || '',
+      customerName: m.customerName || '', updatedAt: m.updatedAt || '',
+      customerId: m.customerId || (m.customers && m.customers[0] && m.customers[0].id) || '',
+      globalId: m.globalId || (m.customers && m.customers[0] && m.customers[0].global_id) || '',
+      customers: Array.isArray(m.customers) ? m.customers : undefined,
+      hasPhone: m.hasPhone === true,
+      listId: m.listId || '',
+    };
+  }
+
+  function loadLastSent() {
+    try {
+      const raw = JSON.parse(localStorage.getItem(LAST_SENT_KEY) || 'null');
+      if (raw && Array.isArray(raw.items) && raw.items.length) return raw;
+    } catch (e) { /* ignore */ }
+    return null;
+  }
+
+  function getLastSent() {
+    if (!state.lastSent) state.lastSent = loadLastSent(); // nạp trễ: tránh đọc KEY trước khi khai báo const
+    return state.lastSent;
+  }
+
+  // lists: CHỈ lưu { id, name, text } — danh sách chat của từng câu suy lại từ items[].listId
+  // (không nhân đôi dữ liệu → lô 20.000–30.000 chat vẫn ghi được localStorage).
+  function saveLastSent(targets, typedText) {
+    try {
+      const items = (targets || []).map(pickReplayItem);
+      if (!items.length) return;
+      const selIds = new Set(state.listSel || []);
+      const lists = state.savedLists
+        .filter((l) => selIds.has(l.id))
+        .map((l) => ({ id: l.id, name: l.name, text: String(l.text || '') }));
+      const snap = { at: Date.now(), typedText: String(typedText || ''), items, lists };
+      state.lastSent = snap; // RAM luôn có — F5 vẫn còn nếu ghi được localStorage
+      if (items.length > LAST_SENT_MAX_ITEMS) {
+        logLine('↺ Lượt gửi này có ' + items.length + ' chat — chỉ giữ trong RAM (quá lớn để lưu localStorage); F5 sẽ mất.');
+        return;
+      }
+      try { localStorage.setItem(LAST_SENT_KEY, JSON.stringify(snap)); } catch (e) {
+        logLine('⚠ Không lưu được ảnh chụp lượt gửi vào localStorage (' + (e && e.name || e) + ') — vẫn dùng được tới khi F5.');
+      }
+    } catch (e) { /* ảnh chụp là việc phụ — không được làm hỏng lượt gửi */ }
+  }
+
+  // Chọn lại y nguyên lượt gửi gần nhất: dựng lại câu (nếu đã bị tự xóa) + tích lại + nạp lại
+  // danh sách chat trong RAM. KHÔNG quét trang, KHÔNG tải lại danh sách.
+  function restoreLastSent() {
+    if (state.sending) { logLine('⏳ Đang gửi — chờ xong rồi chọn lại.'); return; }
+    const snap = getLastSent();
+    if (!snap || !Array.isArray(snap.items) || !snap.items.length) {
+      logLine('↺ Chưa có lượt gửi nào để chọn lại.');
+      alert('Chưa có lượt gửi nào để chọn lại.\nSau khi bấm ▶ Chạy lần đầu, nút này sẽ giữ lại đúng danh sách vừa gửi.');
+      return;
+    }
+    const items = snap.items.map(pickReplayItem).filter((it) => it.id);
+    // 1) Dựng lại các câu đã bị tự xóa sau lượt gửi — GIỮ NGUYÊN id để chat vẫn gắn đúng listId
+    const byId = new Map(state.savedLists.map((l) => [l.id, l]));
+    let recreated = 0;
+    (snap.lists || []).forEach((sl) => {
+      if (byId.has(sl.id)) return;
+      const l = {
+        id: sl.id,
+        name: sl.name || 'Câu đã gửi',
+        text: String(sl.text || ''),
+        items: items.filter((it) => it.listId === sl.id).map(pickReplayItem),
+      };
+      state.savedLists.push(l);
+      byId.set(l.id, l);
+      recreated++;
+    });
+    if (recreated) { persistSavedLists(); renderSavedLists(); }
+    // 2) Tích lại đúng các câu của lượt vừa gửi
+    state.listSel = new Set((snap.lists || []).map((l) => l.id).filter((id) => byId.has(id)));
+    // 3) Nạp lại danh sách chat — dùng thẳng items trong RAM, không cần state.allRows
+    state.matches = items.map((it) => ({ ...it, checked: true, isTarget: false, mark: '' }));
+    state.mode = 'saved';
+    state.target = null;
+    state.rangeStart = null;
+    state.rangeEnd = null;
+    state.loadedName = '↺ List vừa gửi (' + state.matches.length + ' chat)';
+    state.stopRequested = false;
+    // 4) Không phụ thuộc danh sách tải trên trang → bỏ cờ chặn gửi (cờ này chỉ nói về lần quét trang)
+    state.listIncomplete = false;
+    // 5) Lượt gửi lại là CỐ Ý → xóa dấu "đã gửi" để bộ lọc sentIds không bỏ qua chính các chat này
+    if (state.sentIds && state.sentIds.size) {
+      state.sentIds.clear();
+      saveSentIds();
+    }
+    // 6) Trả lại nội dung câu vào ô gửi (1 câu → đúng chữ của câu đó; nhiều câu → giữ theo từng câu)
+    const msgEl = shadow && shadow.getElementById('ssb-msg');
+    if (msgEl) {
+      if (state.listSel.size === 1) {
+        const only = byId.get(Array.from(state.listSel)[0]);
+        if (only) msgEl.value = String(only.text || '');
+      } else if (!msgEl.value && snap.typedText) {
+        msgEl.value = String(snap.typedText);
+      }
+    }
+    persistUiState();
+    renderSavedLists();
+    highlightRows();
+    render();
+    const when = snap.at ? new Date(snap.at) : null;
+    const p2 = (n) => String(n).padStart(2, '0');
+    logLine('↺ Đã chọn lại lượt gửi' + (when ? ' lúc ' + p2(when.getHours()) + ':' + p2(when.getMinutes()) : '')
+      + ' — ' + state.matches.length + ' chat'
+      + (state.listSel.size ? ' · ' + state.listSel.size + ' câu' : '')
+      + (recreated ? ' (+' + recreated + ' câu dựng lại)' : '')
+      + ' — sẵn sàng bấm ▶ Chạy, KHÔNG cần tải lại danh sách.');
   }
 
   // Sửa 1 câu: đổi TÊN + đổi NỘI DUNG (ô nhiều dòng — prompt() của trình duyệt không làm được)
@@ -4942,11 +5071,18 @@
 
   async function sendToAll() {
     if (state.sending) return; // chặn bấm đúp / gọi đúp → gửi TRÙNG
-    if (state.listIncomplete) {
+    // Cờ listIncomplete CHỈ nói về lần QUÉT DANH SÁCH TRÊN TRANG (scanFullList: API trả thiếu
+    // so với màn hình). Chat của "câu đã lưu" / "list vừa gửi" là dữ liệu tự thân (items) →
+    // không phụ thuộc lần quét trang, nên không chặn oan (trước đây bị chặn → phải tải lại).
+    if (state.listIncomplete && !(state.mode === 'saved' && state.matches.length)) {
       // Danh sách tải chưa đầy đủ lần gần nhất → gửi lúc này chắc chắn sai (thiếu chat)
       alert('Danh sách tải CHƯA ĐẦY ĐỦ nên chưa thể gửi.\nHãy bấm “⚡ Tải danh sách” để tải lại cho đủ rồi mới gửi.');
       logLine('⛔ Chặn gửi: danh sách tải chưa đầy đủ — bấm ⚡ Tải danh sách để tải lại.');
       return;
+    }
+    if (state.listIncomplete && state.mode === 'saved' && state.matches.length) {
+      logLine('✅ Danh sách trên trang lần trước tải chưa đủ — nhưng đang gửi theo câu đã lưu/'
+        + state.matches.length + ' chat có sẵn nên không cần tải lại.');
     }
     // LƯU Ý: panel nằm trong shadow DOM → phải lấy phần tử qua shadow.getElementById,
     // document.querySelector sẽ không thấy (đây là nguyên nhân lỗi "Hãy nhập nội dung câu cần gửi")
@@ -5060,6 +5196,10 @@
         return;
       }
     }
+
+    // CHỤP LẠI LƯỢT GỬI NÀY (đúng nhóm chat + đúng câu sẽ dùng) để nút "↺ Chọn lại list vừa gửi"
+    // chọn lại được ở 0ms — không phải bấm "⚡ Tải danh sách" và chọn lại từ đầu.
+    saveLastSent(targets, typedText);
 
     // CHỐT danh sách câu sẽ TIÊU THỤ ngay từ đầu lượt: gửi xong (kể cả lỗi giữa chừng) sẽ xóa
     // ĐÚNG các câu này — không phụ lệch việc giữa chừng bấm tích/bỏ tích câu khác.
@@ -5811,7 +5951,7 @@
       </style>
       <div class="wrap" id="ssb-wrap">
         <div class="head" id="ssb-head">
-          <span class="title"><svg class="logo" viewBox="0 0 50 52" width="17" height="17" xmlns="http://www.w3.org/2000/svg"><path d="M10 2 L14 11" stroke="#5865F2" stroke-width="5" stroke-linecap="round" fill="none"/><path d="M40 2 L36 11" stroke="#5865F2" stroke-width="5" stroke-linecap="round" fill="none"/><rect x="0" y="12" width="50" height="40" rx="6" fill="#5865F2"/><rect x="12" y="31" width="12" height="4" rx="2" fill="#fff"/><rect x="26" y="31" width="12" height="4" rx="2" fill="#fff"/></svg>BOTFAKE <span style="color:#64748b;font-weight:400;font-size:11px">v1.60.0</span></span>
+          <span class="title"><svg class="logo" viewBox="0 0 50 52" width="17" height="17" xmlns="http://www.w3.org/2000/svg"><path d="M10 2 L14 11" stroke="#5865F2" stroke-width="5" stroke-linecap="round" fill="none"/><path d="M40 2 L36 11" stroke="#5865F2" stroke-width="5" stroke-linecap="round" fill="none"/><rect x="0" y="12" width="50" height="40" rx="6" fill="#5865F2"/><rect x="12" y="31" width="12" height="4" rx="2" fill="#fff"/><rect x="26" y="31" width="12" height="4" rx="2" fill="#fff"/></svg>BOTFAKE <span style="color:#64748b;font-weight:400;font-size:11px">v${APP_VERSION}</span></span>
           <button class="badge on" id="ssb-toggle" title="Bật/tắt tính năng">BẬT</button>
           <button class="minibtn" id="ssb-close" title="Tắt panel (F5 hoặc Alt+Shift+B để hiện lại)">✕</button>
           <button class="minibtn" id="ssb-min" title="Thu nhỏ">—</button>
@@ -5833,6 +5973,7 @@
           </div>
           <div class="row" style="margin:2px 0 4px;align-items:center">
             <button class="b b-gray" id="ssb-scan">⚡ Tải danh sách</button>
+            <button class="b b-blue" id="ssb-replay" disabled title="Chọn lại ĐÚNG danh sách chat + câu của lượt gửi gần nhất — không phải tải lại danh sách">↺ Chọn lại list vừa gửi</button>
             <span class="hint">đã chọn: <span class="count" id="ssb-count">0</span></span>
           </div>
           <div>
@@ -6360,6 +6501,11 @@
       btn.disabled = false;
       render();
     });
+    // Nhóm chat của lượt gửi gần nhất — chọn lại tại chỗ, không quét lại danh sách
+    on('ssb-replay', 'click', () => {
+      restoreLastSent();
+      render();
+    });
     // ===== LIST CÂU GỬI =====
     on('ssb-sl-new', 'click', () => {
       const sel = state.matches.filter((m) => m.checked);
@@ -6718,6 +6864,18 @@
     }
     const cnt = shadow.getElementById('ssb-count');
     if (cnt) cnt.textContent = String(state.matches.length);
+
+    // Nút "↺ Chọn lại list vừa gửi": bật khi đã có ảnh chụp lượt gửi; hiện luôn số chat của lượt đó
+    const replay = shadow.getElementById('ssb-replay');
+    if (replay) {
+      const snap = getLastSent();
+      const n = (snap && Array.isArray(snap.items)) ? snap.items.length : 0;
+      replay.disabled = state.sending || !n;
+      replay.textContent = n ? ('↺ Chọn lại list vừa gửi (' + n + ')') : '↺ Chọn lại list vừa gửi';
+      replay.title = n
+        ? 'Chọn lại đúng ' + n + ' chat + câu của lượt gửi gần nhất (không tải lại danh sách)'
+        : 'Sau lượt gửi đầu tiên, nút này giữ lại đúng danh sách vừa gửi để chọn lại';
+    }
 
     const list = shadow.getElementById('ssb-list');
     if (list) {
