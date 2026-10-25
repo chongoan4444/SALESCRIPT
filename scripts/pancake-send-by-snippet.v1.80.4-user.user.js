@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE
 // @namespace    salescript
-// @version      1.82.2
+// @version      1.82.3
 // @description  BOTFAKE — chọn chuỗi chat (Alt+Click 2 đầu) hoặc theo snippet trong Pancake rồi gửi cùng 1 câu (kèm 1 hoặc nhiều ảnh nếu muốn) cho tất cả.
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -44,7 +44,7 @@
   /* ============================ HẰNG SỐ ============================ */
 
   const PANEL_ID = 'ssb-root';          // ssb = SaleScript Bulk — không đụng pk-*/adj-*/pancake-* của script khác
-  const APP_VERSION = '1.82.2';        // hiện ở tiêu đề panel — đối chiếu với @version trong header
+  const APP_VERSION = '1.82.3';        // hiện ở tiêu đề panel — đối chiếu với @version trong header
   const STYLE_ID = 'ssb-style';
 
   const MAX_NAME_LIST = 12;             // số tên hiển thị khi xác nhận
@@ -1240,6 +1240,13 @@
     }
     // FORCE lọc theo tag (dùng khi kiểm tra tag "chốt"/"chặn" lúc gửi):
     // server nhận tags=[id…] và tự trả đúng các chat dính 1 trong các tag đó (mode=OR)
+    // v1.82.3: đọc TOÀN BỘ chat bất kể app đang lọc theo tag nào (tags="ALL" — đúng cách app gọi
+    // khi không lọc tag: loaddanhsach.har `mode=OR&tags=%22ALL%22`). Dùng khi đồng bộ tag/số điện
+    // thoại cho list câu: nếu app đang lọc 1 tag thì chat vừa "chốt" có thể rơi khỏi danh sách lọc.
+    if (opts && opts.forceAllTags) {
+      tagsVal = 'ALL';
+      exceptIds = [];
+    }
     if (opts && Array.isArray(opts.forceTags) && opts.forceTags.length) {
       // id tag GIỮ DẠNG SỐ y như app (tags=[387] chứ KHÔNG ["387"]) — id chuỗi bị server bỏ qua
       tagsVal = opts.forceTags.map((x) => (/^\d+$/.test(String(x)) ? Number(x) : String(x)));
@@ -1976,12 +1983,15 @@
     const opts = { forceTags: banGuard.tagIds.slice(), maxPages: 300 };
     if (pid) opts.singlePageId = String(pid);
     let res = null;
+    const prevStop = state.scanStopRequested;
+    state.scanStopRequested = false;
     try {
       res = await Promise.race([
         loadListViaApi(null, opts),
         sleep(25000).then(() => ({ ok: false, error: 'quá 25s' })),
       ]);
     } catch (e) { res = { ok: false, error: String((e && e.message) || e) }; }
+    finally { state.scanStopRequested = prevStop; }
     if (!res || !res.ok || res.incomplete) {
       banGuard.failedPages.add(key);
       return { added: 0, nameOf: {}, ok: false, rows: 0 };
@@ -2062,6 +2072,93 @@
   // hoàn toàn ở bản cũ). Trả tên tag cấm hoặc null. Chỉ chờ quét nền khi page của chat CHƯA được
   // kiểm tra xong (chờ 1 lần, tối đa 20s) — không làm chậm các chat đã kiểm tra.
   const banWaitLogged = {};
+
+  // 🔄 ĐỒNG BỘ TAG/SỐ ĐIỆN THOẠI MỚI NHẤT (v1.82.3) — vá đúng tình huống "cùng 1 list câu gửi nhiều
+  // lượt cách nhau ~30 phút": danh sách chat lưu trong list câu là ẢNH CHỤP lúc tạo (tags/has_phone),
+  // trong 30 phút đó khách có thể đã được gắn tag "chốt"/"chặn" hoặc sale đã lưu số điện thoại.
+  // Nay MỖI LƯỢT GỬI (và cả giữa lượt gửi dài) đọc lại danh sách chat từ API — đúng request app
+  // dùng khi mở danh sách, trả `tags` + `has_phone` + `recent_phone_numbers` cho từng dòng
+  // (loaddanhsach.har) — rồi CẬP NHẬT tags/has_phone của từng chat trước khi lọc. Nhờ vậy chốt
+  // chặn luôn xét tag HIỆN TẠI chứ không phải tag lúc tạo list.
+  const guardRefresh = { at: 0, map: null, running: false, lastErr: '' };
+  const GUARD_FRESH_MS = 120000;      // vừa đồng bộ xong <2 phút → dùng lại (bấm gửi 2 list liền nhau)
+  const GUARD_MID_MS = 15 * 60000;    // lượt gửi dài: đồng bộ lại sau mỗi 15 phút
+
+  async function refreshGuardRows(targets, opts) {
+    const silent = !!(opts && opts.silent);
+    if (guardRefresh.running) return { ok: false, busy: true };
+    if (!(opts && opts.force) && guardRefresh.map && Date.now() - guardRefresh.at < GUARD_FRESH_MS) {
+      return { ok: true, cached: true, updated: 0, total: 0, missing: 0, tagged: 0, phone: 0 };
+    }
+    guardRefresh.running = true;
+    // cờ "dừng tải" của nút ⚡ có thể còn true từ lần trước → loadListViaApi() sẽ thoát ngay.
+    // Tạm hạ xuống false trong lúc tự đồng bộ rồi trả lại như cũ.
+    const prevStop = state.scanStopRequested;
+    state.scanStopRequested = false;
+    try {
+      const loadFresh = (extra) => Promise.race([
+        loadListViaApi(null, Object.assign({ maxPages: 300 }, extra || {})),
+        sleep(90000).then(() => ({ ok: false, error: 'quá 90s' })),
+      ]);
+      const res = await loadFresh(null);
+      if (!res || !res.ok) {
+        guardRefresh.lastErr = (res && res.error) || 'lỗi';
+        if (!silent) logLine('⚠ Không đọc lại được danh sách chat từ API (' + guardRefresh.lastErr
+          + ') — vẫn kiểm tra bằng tag đang hiển thị/app + quét theo tag cấm.');
+        return { ok: false, error: guardRefresh.lastErr };
+      }
+      const map = new Map();
+      (res.rows || []).forEach((r) => { if (r && r.id) map.set(String(r.id), r); });
+      // Chat trong list không còn thấy ở lượt đọc theo bộ lọc của app (app đang lọc tag/người phụ
+      // trách…) → đọc lại 1 lượt với tags="ALL" để không bỏ sót chat vừa được gắn tag "chốt".
+      const miss0 = (targets || []).filter((m) => m && m.id && !map.has(String(m.id))).length;
+      if (miss0 > 0) {
+        const res2 = await loadFresh({ forceAllTags: true });
+        if (res2 && res2.ok) (res2.rows || []).forEach((r) => { if (r && r.id && !map.has(String(r.id))) map.set(String(r.id), r); });
+      }
+      guardRefresh.map = map;
+      guardRefresh.at = Date.now();
+      let updated = 0, missing = 0, tagged = 0, phone = 0, tagNew = 0;
+      (targets || []).forEach((m) => {
+        if (!m || !m.id) return;
+        const f = map.get(String(m.id));
+        if (!f) { missing++; return; }
+        updated++;
+        // tags: dữ liệu API mới là CHUẨN (tag có thể vừa được gắn / vừa được gỡ)
+        if (Array.isArray(f.tags)) {
+          const had = (m.tags || []).map(String).sort().join(',');
+          m.tags = f.tags.slice();
+          if (had && had !== m.tags.map(String).sort().join(',')) tagNew++;
+        }
+        if (f.pageId) m.pageId = f.pageId;
+        // số điện thoại: chỉ NÂNG lên true (không hạ true cũ xuống — an toàn khi dữ liệu thiếu)
+        if (f.hasPhone === true && m.hasPhone !== true) { m.hasPhone = true; phone++; }
+        if (f.recentPhone) {
+          m.recentPhone = f.recentPhone;
+          if (m.hasPhone !== true) { m.hasPhone = true; phone++; }
+        }
+        // dòng mới dính tag cấm → nạp thẳng vào tập chặn (lớp chắc nhất, không cần sweep)
+        if (banGuard.nameById && Array.isArray(f.tags)) {
+          const hit = f.tags.map(String).find((t) => banGuard.nameById[t]);
+          if (hit) {
+            tagged++;
+            if (!banGuard.convIds.has(m.id)) banGuard.convIds.add(m.id);
+          }
+        }
+      });
+      if (!silent) {
+        logLine('🔄 Đã đọc lại ' + map.size + ' chat từ API · cập nhật ' + updated + '/' + (targets || []).length
+          + ' chat trong list' + (tagNew ? ' · ' + tagNew + ' chat ĐỔI TAG so với lúc tạo list' : '')
+          + (tagged ? ' · ' + tagged + ' chat đang dính tag cấm' : '')
+          + (phone ? ' · ' + phone + ' chat có số điện thoại' : '')
+          + (missing ? ' · ' + missing + ' chat KHÔNG thấy trong API (giữ dữ liệu cũ + kiểm tra từng tin)' : ''));
+      }
+      return { ok: true, updated, total: (targets || []).length, missing, tagged, phone, tagNew, rows: map.size, incomplete: !!res.incomplete };
+    } catch (e) {
+      guardRefresh.lastErr = String((e && e.message) || e);
+      return { ok: false, error: guardRefresh.lastErr };
+    } finally { guardRefresh.running = false; state.scanStopRequested = prevStop; }
+  }
   async function banGateCheck(c) {
     const pid = c.pageId || String(c.id || '').split('_')[0];
     const quick = () => (banGuard.convIds.has(c.id) ? 'tag cấm (API)' : null)
@@ -2139,6 +2236,12 @@
       } else {
         logLine('⚠ Trang KHÔNG có tag nào tên "chốt"/"chặn" — chỉ còn chốt chặn icon điện thoại.');
       }
+      // 🔄 ĐỒNG BỘ MỚI NHẤT trước khi lọc: list câu giữ ảnh chụp tags/has_phone lúc TẠO, mà bạn
+      // gửi cùng 1 list nhiều lượt cách nhau ~30 phút → trong khoảng đó khách có thể đã "chốt"/
+      // "chặn" hoặc đã có số điện thoại. Đọc lại từ API để chốt chặn xét tag HIỆN TẠI.
+      logLine('🔄 Đang đọc lại danh sách chat từ API để lấy tag/số điện thoại MỚI NHẤT ('
+        + targets.length + ' chat trong list — dữ liệu lúc tạo list có thể đã cũ)…');
+      await refreshGuardRows(targets, { force: true });
       const tagOf = {}; // convId → TÊN tag cấm mà nó mang (để log cho user soi)
       // Quét nền: MỖI PAGE 1 lượt lọc theo tag (server tự lọc) — chốt chặn trước từng tin chờ
       // promise này khi page của chat chưa quét xong.
@@ -5902,6 +6005,16 @@
         const fmtDur = (sec) => sec >= 3600 ? (sec / 3600).toFixed(1) + ' giờ' : Math.max(1, Math.round(sec / 60)) + ' phút';
         logLine('📊 Đã xử lý ' + done + '/' + totalAll + ' · tốc độ ' + (rate * 60).toFixed(0) + ' tin/phút'
           + ' · dự kiến còn ~' + fmtDur(remainS) + ' nữa');
+        // 🔄 Lượt gửi dài (hàng chục phút): đọc lại tags/has_phone mới nhất từ API mỗi ~15 phút,
+        // chạy NỀN không chặn làn gửi — chat vừa được "chốt" giữa lượt sẽ vào tập chặn ngay.
+        if (Date.now() - (guardRefresh.at || 0) >= GUARD_MID_MS) {
+          refreshGuardRows(targets, { force: true }).then((rf) => {
+            if (rf && rf.ok && (rf.tagged || rf.phone || rf.tagNew)) {
+              logLine('🔄 Đồng bộ giữa lượt: ' + (rf.tagged || 0) + ' chat đang dính tag cấm · '
+                + (rf.tagNew || 0) + ' chat đổi tag · ' + (rf.phone || 0) + ' chat có số ĐT — chặn từ đây.');
+            }
+          }).catch(() => {});
+        }
         // 🛡 Quét lại tag cấm giữa lượt (mỗi 3.000 tin, chạy nền không chặn gửi):
         // bắt các chat VỪA bị gắn tag "chốt"/"chặn" trong lúc lượt gửi đang chạy
         if (banGuard.tagIds.length && done - lastBanSweepDone >= 3000) {
