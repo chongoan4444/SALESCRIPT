@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE
 // @namespace    salescript
-// @version      1.82.0
+// @version      1.82.1
 // @description  BOTFAKE — chọn chuỗi chat (Alt+Click 2 đầu) hoặc theo snippet trong Pancake rồi gửi cùng 1 câu (kèm 1 hoặc nhiều ảnh nếu muốn) cho tất cả.
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -44,7 +44,7 @@
   /* ============================ HẰNG SỐ ============================ */
 
   const PANEL_ID = 'ssb-root';          // ssb = SaleScript Bulk — không đụng pk-*/adj-*/pancake-* của script khác
-  const APP_VERSION = '1.82.0';        // hiện ở tiêu đề panel — đối chiếu với @version trong header
+  const APP_VERSION = '1.82.1';        // hiện ở tiêu đề panel — đối chiếu với @version trong header
   const STYLE_ID = 'ssb-style';
 
   const MAX_NAME_LIST = 12;             // số tên hiển thị khi xác nhận
@@ -6178,8 +6178,12 @@
         .sl-row:last-child { border-bottom: none; }
         .sl-row:hover { background: #132033; }
         .sl-row.active { background: #173052; }
-        .sl-row.dragging { opacity: .45; }
-        .sl-handle { cursor: grab; color: #64748b; user-select: none; font-size: 13px; line-height: 1; }
+        .sl-row.dragging { opacity: .55; background: #1e3a5f !important; outline: 1px dashed #38bdf8; outline-offset: -1px; }
+        .saved-lists.dragging-mode { cursor: grabbing; user-select: none; -webkit-user-select: none; }
+        .sl-handle { cursor: grab; color: #64748b; user-select: none; font-size: 13px; line-height: 1;
+                     touch-action: none; padding: 2px 3px; border-radius: 4px; }
+        .sl-handle:hover { color: #7dd3fc; }
+        .sl-handle:active { cursor: grabbing; }
         .sl-handle:hover { color: #7dd3fc; }
         .sl-name { flex: 1; color: #f8fafc; font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
         .sl-n { color: #64748b; }
@@ -6844,7 +6848,6 @@ Click CHUỘT THƯỜNG luôn mở chat bình thường, không phụ thuộc ô
     });
     const slBox = root.getElementById('ssb-sl-box');
     if (slBox) {
-      let slDragId = null;
       slBox.addEventListener('click', (e) => {
         const row = e.target.closest && e.target.closest('.sl-row');
         if (!row) return;
@@ -6878,44 +6881,108 @@ Click CHUỘT THƯỜNG luôn mở chat bình thường, không phụ thuộc ô
         rebuildFromLists();
         renderSavedLists();
       });
-      slBox.addEventListener('mousedown', (e) => {
-        const h = e.target.closest && e.target.closest('.sl-handle');
-        if (h) e.preventDefault(); // kéo handle không bị chọn chữ
-      });
-      slBox.addEventListener('dragstart', (e) => {
-        const h = e.target.closest && e.target.closest('.sl-handle');
-        const row = h && h.closest('.sl-row');
-        if (!row) return;
-        slDragId = row.getAttribute('data-id');
-        row.classList.add('dragging');
-        e.dataTransfer.effectAllowed = 'move';
-        try { e.dataTransfer.setData('text/plain', slDragId); } catch (err) { /* ignore */ }
-      });
-      slBox.addEventListener('dragover', (e) => {
-        if (!slDragId) return;
+      /* ---- KÉO THẢ SẮP XẾP CÂU (pointer-based) ----
+       * Bản cũ dùng HTML5 Drag & Drop (draggable + dragstart) và KHÔNG chạy được vì:
+       *   1) ngay cạnh đó có `mousedown → e.preventDefault()` để chống bôi đen chữ;
+       *      Chrome huỷ mousedown là huỷ luôn việc khởi động drag → dragstart không bao giờ bắn.
+       *   2) DnD của HTML5 rất hay bị chặn khi phần tử nằm trong Shadow DOM (panel này là shadow root).
+       * Nay: bắt pointerdown trên tay nắm ⠿ rồi tự di chuyển dòng theo pointermove (không phụ thuộc
+       * draggable/dataTransfer, chạy cả trên màn hình cảm ứng nhờ touch-action: none).
+       */
+      let slDragId = null;        // id câu đang kéo
+      let slDragRow = null;       // phần tử dòng đang kéo
+      let slDragY0 = 0;           // toạ độ Y lúc bắt đầu (để phân biệt bấm vs kéo)
+      let slDragMoved = false;    // đã vượt ngưỡng 4px chưa
+      let slDragPointer = null;   // pointerId đang theo dõi
+
+      const slRows = () => Array.from(slBox.querySelectorAll('.sl-row'));
+
+      function dragCleanup() {
+        if (slDragRow) slDragRow.classList.remove('dragging');
+        slBox.classList.remove('dragging-mode');
+        window.removeEventListener('pointermove', onSlPointerMove, true);
+        window.removeEventListener('pointerup', onSlPointerUp, true);
+        window.removeEventListener('pointercancel', onSlPointerCancel, true);
+        slDragId = null; slDragRow = null; slDragMoved = false; slDragPointer = null;
+      }
+
+      function onSlPointerMove(e) {
+        if (!slDragRow) return;
+        if (slDragPointer !== null && e.pointerId !== undefined && e.pointerId !== slDragPointer) return;
+        if (!slDragMoved && Math.abs(e.clientY - slDragY0) < 4) return; // chưa đủ xa → coi như bấm
+        if (!slDragMoved) {
+          slDragMoved = true;
+          slDragRow.classList.add('dragging');
+          slBox.classList.add('dragging-mode');
+        }
         e.preventDefault();
-        const row = e.target.closest && e.target.closest('.sl-row');
-        const dragging = slBox.querySelector('.sl-row.dragging');
-        if (!row || !dragging || row === dragging) return;
-        const rect = row.getBoundingClientRect();
-        const after = (e.clientY - rect.top) > rect.height / 2;
-        slBox.insertBefore(dragging, after ? row.nextSibling : row);
-      });
-      slBox.addEventListener('drop', (e) => { if (slDragId) e.preventDefault(); });
-      slBox.addEventListener('dragend', () => {
-        if (!slDragId) return;
-        slDragId = null;
-        // chốt thứ tự theo DOM sau khi kéo
+        // tự cuộn khi kéo tới sát mép trên/dưới của khung
+        const boxRect = slBox.getBoundingClientRect();
+        if (e.clientY < boxRect.top + 14) slBox.scrollTop -= 10;
+        else if (e.clientY > boxRect.bottom - 14) slBox.scrollTop += 10;
+        // chèn dòng đang kéo vào đúng vị trí theo con trỏ
+        const others = slRows().filter((r) => r !== slDragRow);
+        let placed = false;
+        for (let i = 0; i < others.length; i++) {
+          const rect = others[i].getBoundingClientRect();
+          if (e.clientY < rect.top + rect.height / 2) {
+            slBox.insertBefore(slDragRow, others[i]);
+            placed = true;
+            break;
+          }
+        }
+        if (!placed) slBox.appendChild(slDragRow);
+      }
+
+      function onSlPointerUp(e) {
+        if (!slDragRow) return;
+        if (slDragPointer !== null && e.pointerId !== undefined && e.pointerId !== slDragPointer) return;
+        const moved = slDragMoved;
+        const movedId = slDragId;
+        dragCleanup();
+        if (!moved) return; // chỉ bấm vào tay nắm → không đổi thứ tự, cũng không tích câu
+        // CHỐT thứ tự theo DOM sau khi kéo
         const byId = new Map(state.savedLists.map((l) => [l.id, l]));
         const order = [];
-        slBox.querySelectorAll('.sl-row').forEach((r) => {
+        slRows().forEach((r) => {
           const l = byId.get(r.getAttribute('data-id'));
           if (l && order.indexOf(l) === -1) order.push(l);
         });
         state.savedLists.forEach((l) => { if (order.indexOf(l) === -1) order.push(l); });
+        const before = state.savedLists.map((l) => l.id).join(',');
         state.savedLists = order;
         persistSavedLists();
         renderSavedLists();
+        if (before !== order.map((l) => l.id).join(',')) {
+          const pos = order.findIndex((l) => l.id === movedId) + 1;
+          logLine('↕ Đã đổi thứ tự câu — "' + ((byId.get(movedId) || {}).name || movedId) + '" giờ ở vị trí ' + pos + '/' + order.length + '.');
+        }
+      }
+
+      function onSlPointerCancel() { dragCleanup(); }
+
+      slBox.addEventListener('pointerdown', (e) => {
+        const t = e.target;
+        if (!t || !t.closest) return;
+        // Bấm nút (⧉ ✎ ✕) hoặc ô tích → để handler click xử lý, KHÔNG kéo
+        if (t.closest('.sl-btn') || t.closest('.sl-cb') || (t.tagName === 'INPUT')) return;
+        const h = t.closest('.sl-handle');
+        const row = t.closest('.sl-row');
+        if (!row) return;
+        // Cảm ứng: chỉ kéo từ tay nắm ⠿ (kéo ở thân dòng sẽ giành mất thao tác cuộn)
+        const isTouch = (e.pointerType === 'touch' || e.pointerType === 'pen');
+        if (isTouch && !h) return;
+        if (h) e.preventDefault();   // tay nắm: không bôi đen chữ / không kéo bóng ảnh
+        e.stopPropagation();
+        slDragId = row.getAttribute('data-id');
+        slDragRow = row;
+        slDragY0 = e.clientY;
+        slDragMoved = false;
+        slDragPointer = (e.pointerId !== undefined) ? e.pointerId : null;
+        // nghe ở window (capture) để vẫn nhận sự kiện khi con trỏ ra ngoài khung
+        window.addEventListener('pointermove', onSlPointerMove, true);
+        window.addEventListener('pointerup', onSlPointerUp, true);
+        window.addEventListener('pointercancel', onSlPointerCancel, true);
       });
     }
     // ===== KHÔI PHỤC SAU F5: câu đang tick + ô nội dung đang gõ + nhật ký — dữ liệu không mất =====
