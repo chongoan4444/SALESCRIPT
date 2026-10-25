@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE
 // @namespace    salescript
-// @version      1.81.3
+// @version      1.81.4
 // @description  BOTFAKE — chọn chuỗi chat (Alt+Click 2 đầu) hoặc theo snippet trong Pancake rồi gửi cùng 1 câu (kèm 1 hoặc nhiều ảnh nếu muốn) cho tất cả.
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -44,7 +44,7 @@
   /* ============================ HẰNG SỐ ============================ */
 
   const PANEL_ID = 'ssb-root';          // ssb = SaleScript Bulk — không đụng pk-*/adj-*/pancake-* của script khác
-  const APP_VERSION = '1.81.3';        // hiện ở tiêu đề panel — đối chiếu với @version trong header
+  const APP_VERSION = '1.81.4';        // hiện ở tiêu đề panel — đối chiếu với @version trong header
   const STYLE_ID = 'ssb-style';
 
   const MAX_NAME_LIST = 12;             // số tên hiển thị khi xác nhận
@@ -6155,6 +6155,8 @@ Click CHUỘT THƯỜNG luôn mở chat bình thường, không phụ thuộc ô
             <div class="row" style="margin:4px 0;align-items:center">
               <button class="b b-gray" id="ssb-sl-new" title="Lưu CÂU CẦN GỬI đang gõ + các chat đã chọn thành 1 câu — gửi xong tự xóa">＋ Tạo câu gửi</button>
               <button class="b b-gray" id="ssb-sl-restore" title="Khôi phục câu từ bản dự phòng (dùng khi danh sách câu bị mất sau F5)">🗂 Khôi phục</button>
+              <button class="b b-gray" id="ssb-sl-selall" title="Tích tất cả câu (bấm lần nữa để bỏ tích tất cả)">☑ Chọn tất cả</button>
+              <button class="b b-red" id="ssb-sl-delall" title="Xóa TẤT CẢ câu đã lưu (có xác nhận + vẫn khôi phục được từ bản dự phòng)">🗑 Xóa tất cả</button>
               <span class="hint" id="ssb-sl-info">0 câu</span>
             </div>
             <div class="saved-lists" id="ssb-sl-box"><div class="empty">Chưa có list nào — chọn chat ở mục 1–2 rồi bấm “＋ Tạo list”</div></div>
@@ -6669,6 +6671,45 @@ Click CHUỘT THƯỜNG luôn mở chat bình thường, không phụ thuộc ô
     on('ssb-sl-restore', 'click', () => {
       restoreListsFromBackup();
       render();
+    });
+    // CHỌN TẤT CẢ: đang tích hết thì bỏ tích hết, còn lại thì tích hết (kể cả câu đang tick dở)
+    on('ssb-sl-selall', 'click', () => {
+      if (!state.savedLists.length) { logLine('☑ Chưa có câu nào để chọn.'); return; }
+      const allOn = state.savedLists.every((l) => state.listSel.has(l.id));
+      if (allOn) {
+        state.listSel = new Set();
+        rebuildFromLists();
+        logLine('☑ Đã BỎ tích tất cả ' + state.savedLists.length + ' câu.');
+      } else {
+        state.listSel = new Set(state.savedLists.map((l) => l.id));
+        rebuildFromLists();
+        const nChat = state.matches.length;
+        logLine('☑ Đã tích TẤT CẢ ' + state.savedLists.length + ' câu — tổng ' + nChat + ' chat sẵn sàng gửi.');
+        if (state.savedLists.length > 1) {
+          logLine('ℹ️ Nhiều câu được tích: mỗi chat nhận ĐÚNG nội dung của câu chứa nó. '
+            + 'Chat trùng ở nhiều câu chỉ gửi 1 lần (theo câu tích trước).');
+        }
+      }
+      renderSavedLists();
+      render();
+    });
+    // XÓA TẤT CẢ: xác nhận rõ ràng; bản dự phòng vẫn còn nên khôi phục lại được
+    on('ssb-sl-delall', 'click', () => {
+      if (!state.savedLists.length) { logLine('🗑 Chưa có câu nào để xóa.'); return; }
+      if (state.sending) { logLine('⏳ Đang gửi — không xóa để tránh lệch lượt gửi.'); return; }
+      const nChat = state.savedLists.reduce((n, l) => n + (l.items ? l.items.length : 0), 0);
+      const names = state.savedLists.slice(0, 12).map((l) => '• ' + l.name + ' (' + (l.items ? l.items.length : 0) + ' chat)').join('\n')
+        + (state.savedLists.length > 12 ? '\n… và ' + (state.savedLists.length - 12) + ' câu nữa' : '');
+      if (!confirm('XÓA TẤT CẢ ' + state.savedLists.length + ' câu (' + nChat + ' chat)?\n\n' + names
+        + '\n\nVẫn khôi phục lại được bằng nút 🗂 Khôi phục (bản dự phòng).')) return;
+      const nDel = state.savedLists.length;
+      state.savedLists = [];
+      state.listSel = new Set();
+      rebuildFromLists();      // bỏ chọn chat trên danh sách + xóa lựa chọn hiện tại
+      persistSavedLists();     // lưu ngay (bản cũ đã được đẩy vào dự phòng)
+      renderSavedLists();
+      render();
+      logLine('🗑 Đã xóa TẤT CẢ ' + nDel + ' câu (' + nChat + ' chat). Bấm 🗂 Khôi phục nếu cần lấy lại.');
     });
     on('ssb-sl-new', 'click', () => {
       const sel = state.matches.filter((m) => m.checked);
