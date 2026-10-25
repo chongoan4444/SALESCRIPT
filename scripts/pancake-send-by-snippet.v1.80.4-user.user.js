@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE
 // @namespace    salescript
-// @version      1.80.4
+// @version      1.81.0
 // @description  BOTFAKE — chọn chuỗi chat (Alt+Click 2 đầu) hoặc theo snippet trong Pancake rồi gửi cùng 1 câu (kèm 1 hoặc nhiều ảnh nếu muốn) cho tất cả.
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -44,7 +44,7 @@
   /* ============================ HẰNG SỐ ============================ */
 
   const PANEL_ID = 'ssb-root';          // ssb = SaleScript Bulk — không đụng pk-*/adj-*/pancake-* của script khác
-  const APP_VERSION = '1.80.4';        // hiện ở tiêu đề panel — đối chiếu với @version trong header
+  const APP_VERSION = '1.81.0';        // hiện ở tiêu đề panel — đối chiếu với @version trong header
   const STYLE_ID = 'ssb-style';
 
   const MAX_NAME_LIST = 12;             // số tên hiển thị khi xác nhận
@@ -5966,7 +5966,7 @@
             <div class="snippet-box" id="ssb-target">Chưa chọn — <b>Alt+Click 2 lần</b> (đầu → cuối chuỗi) hoặc lấy snippet từ chat đang chọn</div>
             <div class="row" style="margin-top:6px">
               <button class="b b-blue" id="ssb-use-selected">Lấy snippet từ chat đang chọn</button>
-              <button class="b b-gray" id="ssb-pick">Chọn chuỗi (2 nhấp)</button>
+              <button class="b b-gray" id="ssb-pick" title="Bật rồi nhấp 2 lần: dòng ĐẦU → dòng CUỐI (không cần giữ Alt, không mở chat)">Chọn chuỗi (2 nhấp)</button>
               <button class="b b-gray" id="ssb-to-end">⬇ Từ đây xuống cuối</button>
               <button class="b b-gray" id="ssb-clear">Xóa</button>
             </div>
@@ -6865,6 +6865,13 @@
     const cnt = shadow.getElementById('ssb-count');
     if (cnt) cnt.textContent = String(state.matches.length);
 
+    // Nút "Chọn chuỗi (2 nhấp)": hiện rõ đang BẬT để người dùng biết nhấp dòng là chọn, không mở chat
+    const pickBtn = shadow.getElementById('ssb-pick');
+    if (pickBtn) {
+      pickBtn.textContent = state.pickMode ? '✅ Đang chọn chuỗi (nhấp đầu → cuối)' : 'Chọn chuỗi (2 nhấp)';
+      pickBtn.className = 'b ' + (state.pickMode ? 'b-green' : 'b-gray');
+    }
+
     // Nút "↺ Chọn lại list vừa gửi": bật khi đã có ảnh chụp lượt gửi; hiện luôn số chat của lượt đó
     const replay = shadow.getElementById('ssb-replay');
     if (replay) {
@@ -6949,6 +6956,56 @@
 
   /* ============================ SỰ KIỆN TOÀN CỤC ============================ */
 
+  /* ---- CHẶN APP MỞ CHAT KHI ĐANG CHỌN CHUỖI (Alt+Click · Ctrl+Click · "2 nhấp") ----
+   * Vấn đề: Alt+Click vẫn làm app nhảy vào chat. Nguyên nhân gồm 2 phần, cả hai đều KHÔNG
+   * nằm ở 'click':
+   *   1) App phản ứng với cả chuỗi pointer/mouse (pointerdown → mousedown → mouseup → click),
+   *      nên chỉ chặn 'click' là không đủ — nhiều hành vi mở chat xảy ra ở down/up.
+   *   2) Chặn bằng stopPropagation() ở document KHÔNG chặn được listener cùng node
+   *      (React gắn listener ở document/root) — phải dùng stopImmediatePropagation().
+   * Cách sửa: gắn listener ở CAPTURE của window (chạy trước document → trước app), chặn cả
+   * 6 loại event chuột khi có phím phụ (Alt/Ctrl/Cmd) hoặc đang bật chế độ "2 nhấp".
+   * Click THƯỜNG (không phím phụ) KHÔNG bị can thiệp → vẫn mở chat bình thường.
+   */
+  const ROW_GUARD_EVENTS = ['pointerdown', 'pointerup', 'mousedown', 'mouseup', 'auxclick', 'dblclick'];
+  const ROW_GESTURE_TTL = 1500; // ms — nhớ "vừa bấm chuột có Alt" để click về sau (đã nhả Alt) vẫn tính là Alt+Click
+  let rowGestureAltAt = 0;      // thời điểm bấm chuột có Alt trên 1 dòng chat
+  let rowGestureId = '';        // id dòng chat đó
+  let rowCtrlAt = 0;            // thời điểm bấm chuột có Ctrl/Cmd trên 1 dòng chat
+
+  // Chặn event không cho app thấy. preventDefault riêng cho pointerdown/pointerup được BỎ QUA
+  // để trình duyệt vẫn phát sinh 'click' (nếu hủy pointerdown, một số trình duyệt nuốt luôn click).
+  function swallowRowEvent(e, keepClick) {
+    try { if (!keepClick && e.preventDefault) e.preventDefault(); } catch (err) { /* ignore */ }
+    try { e.stopPropagation(); } catch (err) { /* ignore */ }
+    try { if (e.stopImmediatePropagation) e.stopImmediatePropagation(); } catch (err) { /* ignore */ }
+  }
+
+  // Dòng chat dưới con trỏ (null nếu là panel BOTFAKE hoặc không phải dòng chat)
+  function convRowTarget(e) {
+    if (!state.enabled) return null;
+    const t = e && e.target;
+    if (!t || !t.closest) return null;
+    const host = document.getElementById(PANEL_ID);
+    if (host && (host === t || host.contains(t))) return null; // bấm trong panel → để panel tự xử lý
+    const item = t.closest('.conversation-list-item');
+    if (!item) return null;
+    return rowInfo(item);
+  }
+
+  // Chặn ở các event "down/up" của chuột — app không được mở chat khi đang chọn chuỗi
+  function onRowGesture(e) {
+    const info = convRowTarget(e);
+    if (!info) return;
+    const ctrl = !!(e.ctrlKey || e.metaKey);
+    const alt = !!(e.altKey || (rowGestureAltAt && Date.now() - rowGestureAltAt < ROW_GESTURE_TTL && rowGestureId === info.id));
+    if (!ctrl && !alt && !state.pickMode) return; // click thường → không can thiệp
+    if (ctrl) rowCtrlAt = Date.now();
+    if (alt) { rowGestureAltAt = Date.now(); rowGestureId = info.id; }
+    // Giữ 'click' sống (xem swallowRowEvent) để phần chọn chuỗi bên dưới vẫn chạy
+    swallowRowEvent(e, e.type === 'pointerdown' || e.type === 'pointerup');
+  }
+
   function onDocClick(e) {
     // Xử lý click trong panel BOTFAKE (#ssb-list): Ctrl+click chọn/bỏ chọn cùng snippet
     const listEl = shadow && shadow.getElementById('ssb-list');
@@ -6981,13 +7038,35 @@
     if (!state.enabled) return;
     const item = e.target && e.target.closest && e.target.closest('.conversation-list-item');
     if (!item) return;
-    const isAlt = e.altKey;
-    const isCtrl = e.ctrlKey || e.metaKey;
     const info = rowInfo(item);
     if (!info) return;
-    e.preventDefault();
-    e.stopPropagation();
-    state.pickMode = false;
+    const now = Date.now();
+    const isCtrl = !!(e.ctrlKey || e.metaKey
+      || (rowCtrlAt && now - rowCtrlAt < ROW_GESTURE_TTL));
+    // Alt+Click: nhận cả trường hợp click phát sinh SAU khi đã nhả Alt (người dùng bấm nhanh)
+    // → dựa vào mốc bấm chuột có Alt đã ghi ở onRowGesture.
+    const isAlt = !!(e.altKey || (rowGestureAltAt && now - rowGestureAltAt < ROW_GESTURE_TTL && rowGestureId === info.id));
+    const isPick = !!(state.pickMode && !isCtrl && !isAlt);
+
+    // Click THƯỜNG (không phím phụ, không ở chế độ chọn) = mở chat như bình thường — KHÔNG can thiệp
+    if (!isAlt && !isCtrl && !isPick) { render(); return; }
+
+    // Đang chọn chuỗi → CHẶN app mở chat (xem chú thích onRowGesture)
+    swallowRowEvent(e, false);
+    rowGestureAltAt = 0; rowGestureId = ''; rowCtrlAt = 0;
+
+    // Chế độ "Chọn chuỗi (2 nhấp)": nhấp 1 = đầu chuỗi, nhấp 2 = cuối chuỗi (không cần giữ Alt)
+    if (isPick) {
+      if (state.mode === 'range' && state.rangeStart && !state.rangeEnd) {
+        state.pickMode = false;
+        completeRange(info).catch((err) => logLine('⚠ Lỗi khi tạo chuỗi: ' + err));
+      } else {
+        setRangeStart(info);
+        logLine('👉 Đã đặt đầu chuỗi — nhấp tiếp dòng CUỐI chuỗi (Esc để hủy)');
+      }
+      render();
+      return;
+    }
 
     // Ctrl/Cmd + click: chọn/bỏ chọn TẤT CẢ đoạn cùng snippet trong danh sách hiện tại (toggle)
     if (isCtrl) {
@@ -7005,7 +7084,6 @@
     }
 
     // Alt + click cùng 1 đoạn 2 lần → chọn từ đoạn này xuống hết cuối danh sách (tùy chọn A)
-    const now = Date.now();
     if (isAlt && state.lastAltClickId === info.id && now - state.lastAltClickTime < 800) {
       state.lastAltClickId = null;
       state.lastAltClickTime = 0;
@@ -7042,7 +7120,6 @@
       return;
     }
 
-    // Click thường (không Alt, không Ctrl) = mở chat như bình thường — không can thiệp
     render();
   }
 
@@ -7099,11 +7176,19 @@
 
   hookNetwork();
 
+  // GẮN LISTENER CHUỘT NGAY TẠI ĐÂY (script chạy ở document-start → TRƯỚC khi JS của app
+  // gắn listener của nó). Đây là lý do phải gắn sớm: nếu app đăng ký listener capture trên
+  // window trước ta thì stopImmediatePropagation của ta vô hiệu (listener đăng ký trước chạy trước).
+  // Gắn ở CAPTURE của window (không phải document) để chạy trước cả listener ở document/root
+  // của app — nhờ vậy Alt+Click / Ctrl+Click KHÔNG còn mở chat, chỉ chọn chuỗi.
+  window.addEventListener('click', onDocClick, true);
+  ROW_GUARD_EVENTS.forEach((ev) => window.addEventListener(ev, onRowGesture, true));
+  window.addEventListener('keydown', onKeydown, true);
+
   function init() {
     buildPanel();
-    document.addEventListener('click', onDocClick, true);
-    document.addEventListener('keydown', onKeydown, true);
     logLine('Sẵn sàng. Alt+Click 2 lần (đầu → cuối chuỗi) để chọn chuỗi chat, hoặc dùng nút lấy snippet.');
+    logLine('🖱 Alt+Click / Ctrl+Click / "Chọn chuỗi (2 nhấp)" chỉ CHỌN — đã chặn app tự mở chat.');
   }
 
   if (document.readyState === 'loading') {
