@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE
 // @namespace    salescript
-// @version      1.81.0
+// @version      1.81.1
 // @description  BOTFAKE — chọn chuỗi chat (Alt+Click 2 đầu) hoặc theo snippet trong Pancake rồi gửi cùng 1 câu (kèm 1 hoặc nhiều ảnh nếu muốn) cho tất cả.
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -44,7 +44,7 @@
   /* ============================ HẰNG SỐ ============================ */
 
   const PANEL_ID = 'ssb-root';          // ssb = SaleScript Bulk — không đụng pk-*/adj-*/pancake-* của script khác
-  const APP_VERSION = '1.81.0';        // hiện ở tiêu đề panel — đối chiếu với @version trong header
+  const APP_VERSION = '1.81.1';        // hiện ở tiêu đề panel — đối chiếu với @version trong header
   const STYLE_ID = 'ssb-style';
 
   const MAX_NAME_LIST = 12;             // số tên hiển thị khi xác nhận
@@ -5976,6 +5976,13 @@
             <button class="b b-blue" id="ssb-replay" disabled title="Chọn lại ĐÚNG danh sách chat + câu của lượt gửi gần nhất — không phải tải lại danh sách">↺ Chọn lại list vừa gửi</button>
             <span class="hint">đã chọn: <span class="count" id="ssb-count">0</span></span>
           </div>
+          <div class="row" style="margin:0 0 4px;align-items:center;gap:6px">
+            <label class="hint" style="display:flex;align-items:center;gap:5px;cursor:pointer" title="BẬT: Alt+Click / Ctrl+Click chỉ CHỌN, không nhảy vào hội thoại.
+TẮT: chọn vẫn hoạt động nhưng app cũng mở chat (giống lúc chưa cài script).
+Click CHUỘT THƯỜNG luôn mở chat bình thường, không phụ thuộc ô này.">
+              <input type="checkbox" id="ssb-guard" checked> 🚫 Chặn mở chat khi Alt/Ctrl
+            </label>
+          </div>
           <div>
             <div class="label">2) Câu cần gửi</div>
             <textarea id="ssb-msg" placeholder="Nhập 1 câu sẽ gửi cho tất cả đoạn chat ở trên…"></textarea>
@@ -6501,6 +6508,19 @@
       btn.disabled = false;
       render();
     });
+    // Ô "Chặn mở chat": nhớ lựa chọn qua F5; tắt là chuột hoạt động y như app
+    {
+      const gEl = root.getElementById('ssb-guard');
+      if (gEl) {
+        gEl.checked = localStorage.getItem('ssb_guard_click') !== '0';
+        gEl.addEventListener('change', () => {
+          localStorage.setItem('ssb_guard_click', gEl.checked ? '1' : '0');
+          logLine(gEl.checked
+            ? '🚫 Đã BẬT chặn mở chat: Alt+Click / Ctrl+Click chỉ chọn chuỗi, không nhảy vào hội thoại.'
+            : '🖱 Đã TẮT chặn mở chat: app sẽ mở hội thoại cả khi bạn Alt+Click (chọn vẫn hoạt động).');
+        });
+      }
+    }
     // Nhóm chat của lượt gửi gần nhất — chọn lại tại chỗ, không quét lại danh sách
     on('ssb-replay', 'click', () => {
       restoreLastSent();
@@ -6956,29 +6976,44 @@
 
   /* ============================ SỰ KIỆN TOÀN CỤC ============================ */
 
-  /* ---- CHẶN APP MỞ CHAT KHI ĐANG CHỌN CHUỖI (Alt+Click · Ctrl+Click · "2 nhấp") ----
-   * Vấn đề: Alt+Click vẫn làm app nhảy vào chat. Nguyên nhân gồm 2 phần, cả hai đều KHÔNG
-   * nằm ở 'click':
-   *   1) App phản ứng với cả chuỗi pointer/mouse (pointerdown → mousedown → mouseup → click),
-   *      nên chỉ chặn 'click' là không đủ — nhiều hành vi mở chat xảy ra ở down/up.
-   *   2) Chặn bằng stopPropagation() ở document KHÔNG chặn được listener cùng node
-   *      (React gắn listener ở document/root) — phải dùng stopImmediatePropagation().
-   * Cách sửa: gắn listener ở CAPTURE của window (chạy trước document → trước app), chặn cả
-   * 6 loại event chuột khi có phím phụ (Alt/Ctrl/Cmd) hoặc đang bật chế độ "2 nhấp".
-   * Click THƯỜNG (không phím phụ) KHÔNG bị can thiệp → vẫn mở chat bình thường.
+  /* ---- KHÔNG CHO APP MỞ CHAT KHI ĐANG CHỌN CHUỖI (Alt+Click · Ctrl+Click · "2 nhấp") ----
+   * App Pancake mở hội thoại NGAY Ở chuỗi pointer/mouse (pointerdown → mousedown → mouseup),
+   * không phải ở 'click' — vì vậy chỉ chặn 'click' (bản cũ) thì Alt+Click vẫn nhảy vào chat.
+   * Nay ta chặn cả 6 event của chuột, nhưng CHỈ khi thật sự đang chọn:
+   *   - Alt hoặc Ctrl/Cmd đang được GIỮ (đọc trực tiếp từ event + theo dõi keydown/keyup),
+   *   - hoặc đang bật chế độ "Chọn chuỗi (2 nhấp)".
+   * CLICK THƯỜNG: thoát ngay ở dòng đầu, KHÔNG preventDefault / KHÔNG stop* / KHÔNG render →
+   * app mở chat, gõ tin, mọi thứ y như khi không cài script.
+   * Có ô "Chặn mở chat" trong panel (mặc định BẬT): bỏ tích là tắt hoàn toàn việc chặn.
    */
   const ROW_GUARD_EVENTS = ['pointerdown', 'pointerup', 'mousedown', 'mouseup', 'auxclick', 'dblclick'];
-  const ROW_GESTURE_TTL = 1500; // ms — nhớ "vừa bấm chuột có Alt" để click về sau (đã nhả Alt) vẫn tính là Alt+Click
-  let rowGestureAltAt = 0;      // thời điểm bấm chuột có Alt trên 1 dòng chat
-  let rowGestureId = '';        // id dòng chat đó
-  let rowCtrlAt = 0;            // thời điểm bấm chuột có Ctrl/Cmd trên 1 dòng chat
+  const MOD_FRESH_MS = 900;        // chỉ tin "phím đang giữ" trong 900ms gần nhất (keyup lỡ mất thì tự hết hạn)
+  const modState = { altAt: 0, ctrlAt: 0 };
 
-  // Chặn event không cho app thấy. preventDefault riêng cho pointerdown/pointerup được BỎ QUA
-  // để trình duyệt vẫn phát sinh 'click' (nếu hủy pointerdown, một số trình duyệt nuốt luôn click).
+  // Chặn event không cho app thấy. KHÔNG preventDefault cho pointerdown/pointerup để trình
+  // duyệt vẫn phát sinh 'click' (hủy pointerdown ở một số bản Chrome sẽ nuốt luôn click).
   function swallowRowEvent(e, keepClick) {
     try { if (!keepClick && e.preventDefault) e.preventDefault(); } catch (err) { /* ignore */ }
     try { e.stopPropagation(); } catch (err) { /* ignore */ }
     try { if (e.stopImmediatePropagation) e.stopImmediatePropagation(); } catch (err) { /* ignore */ }
+  }
+
+  // Ô "Chặn mở chat" trong panel — bỏ tích = không chặn gì cả (chuột hoạt động 100% như app)
+  function rowGuardOn() {
+    const cb = shadow && shadow.getElementById('ssb-guard');
+    return cb ? !!cb.checked : true;
+  }
+
+  // Alt/Ctrl có đang được giữ NGAY LÚC NÀY không?
+  //  - ưu tiên cờ của chính event (chính xác nhất),
+  //  - dự phòng bằng mốc keydown gần nhất (người dùng nhả Alt hơi sớm trước khi click phát sinh).
+  function altHeldNow(e) {
+    if (e && e.altKey) return true;
+    return !!(modState.altAt && Date.now() - modState.altAt < MOD_FRESH_MS);
+  }
+  function ctrlHeldNow(e) {
+    if (e && (e.ctrlKey || e.metaKey)) return true;
+    return !!(modState.ctrlAt && Date.now() - modState.ctrlAt < MOD_FRESH_MS);
   }
 
   // Dòng chat dưới con trỏ (null nếu là panel BOTFAKE hoặc không phải dòng chat)
@@ -6995,14 +7030,10 @@
 
   // Chặn ở các event "down/up" của chuột — app không được mở chat khi đang chọn chuỗi
   function onRowGesture(e) {
+    if (!rowGuardOn()) return;                  // người dùng đã bỏ tích "Chặn mở chat"
+    if (!altHeldNow(e) && !ctrlHeldNow(e) && !state.pickMode) return; // chuột thường → không can thiệp
     const info = convRowTarget(e);
     if (!info) return;
-    const ctrl = !!(e.ctrlKey || e.metaKey);
-    const alt = !!(e.altKey || (rowGestureAltAt && Date.now() - rowGestureAltAt < ROW_GESTURE_TTL && rowGestureId === info.id));
-    if (!ctrl && !alt && !state.pickMode) return; // click thường → không can thiệp
-    if (ctrl) rowCtrlAt = Date.now();
-    if (alt) { rowGestureAltAt = Date.now(); rowGestureId = info.id; }
-    // Giữ 'click' sống (xem swallowRowEvent) để phần chọn chuỗi bên dưới vẫn chạy
     swallowRowEvent(e, e.type === 'pointerdown' || e.type === 'pointerup');
   }
 
@@ -7036,27 +7067,25 @@
     }
 
     if (!state.enabled) return;
+    const isCtrl = ctrlHeldNow(e);
+    const isAlt = !isCtrl && altHeldNow(e);
+    const pickAct = !!(state.pickMode && !isCtrl && !isAlt);
+
+    // CLICK THƯỜNG = mở chat như bình thường: không preventDefault, không stop*, không render.
+    // (Đây là đường đi của 99% cú click — giữ nó tuyệt đối "trong suốt" với app.)
+    if (!isAlt && !isCtrl && !pickAct) return;
+
     const item = e.target && e.target.closest && e.target.closest('.conversation-list-item');
     if (!item) return;
     const info = rowInfo(item);
     if (!info) return;
-    const now = Date.now();
-    const isCtrl = !!(e.ctrlKey || e.metaKey
-      || (rowCtrlAt && now - rowCtrlAt < ROW_GESTURE_TTL));
-    // Alt+Click: nhận cả trường hợp click phát sinh SAU khi đã nhả Alt (người dùng bấm nhanh)
-    // → dựa vào mốc bấm chuột có Alt đã ghi ở onRowGesture.
-    const isAlt = !!(e.altKey || (rowGestureAltAt && now - rowGestureAltAt < ROW_GESTURE_TTL && rowGestureId === info.id));
-    const isPick = !!(state.pickMode && !isCtrl && !isAlt);
-
-    // Click THƯỜNG (không phím phụ, không ở chế độ chọn) = mở chat như bình thường — KHÔNG can thiệp
-    if (!isAlt && !isCtrl && !isPick) { render(); return; }
 
     // Đang chọn chuỗi → CHẶN app mở chat (xem chú thích onRowGesture)
-    swallowRowEvent(e, false);
-    rowGestureAltAt = 0; rowGestureId = ''; rowCtrlAt = 0;
+    if (rowGuardOn()) swallowRowEvent(e, false); // ô chặn đang tắt → để app mở chat, ta chỉ chọn
+    modState.altAt = 0; modState.ctrlAt = 0;
 
     // Chế độ "Chọn chuỗi (2 nhấp)": nhấp 1 = đầu chuỗi, nhấp 2 = cuối chuỗi (không cần giữ Alt)
-    if (isPick) {
+    if (pickAct) {
       if (state.mode === 'range' && state.rangeStart && !state.rangeEnd) {
         state.pickMode = false;
         completeRange(info).catch((err) => logLine('⚠ Lỗi khi tạo chuỗi: ' + err));
@@ -7083,6 +7112,7 @@
       return;
     }
 
+    const now = Date.now();
     // Alt + click cùng 1 đoạn 2 lần → chọn từ đoạn này xuống hết cuối danh sách (tùy chọn A)
     if (isAlt && state.lastAltClickId === info.id && now - state.lastAltClickTime < 800) {
       state.lastAltClickId = null;
@@ -7184,6 +7214,21 @@
   window.addEventListener('click', onDocClick, true);
   ROW_GUARD_EVENTS.forEach((ev) => window.addEventListener(ev, onRowGesture, true));
   window.addEventListener('keydown', onKeydown, true);
+
+  // Theo dõi Alt / Ctrl THẬT SỰ đang được giữ (dùng khi event click không còn kèm altKey/ctrlKey
+  // do người dùng nhả phím hơi sớm). Có keyup + blur + đáo hạn 900ms nên KHÔNG bao giờ "dính" lâu
+  // và không thể chặn nhầm một cú click thường về sau.
+  window.addEventListener('keydown', (e) => {
+    if (e.key === 'Alt') modState.altAt = Date.now();
+    else if (e.key === 'Control' || e.key === 'Meta') modState.ctrlAt = Date.now();
+    else if (e.altKey) modState.altAt = Date.now();
+    else if (e.ctrlKey || e.metaKey) modState.ctrlAt = Date.now();
+  }, true);
+  window.addEventListener('keyup', (e) => {
+    if (e.key === 'Alt') modState.altAt = 0;
+    else if (e.key === 'Control' || e.key === 'Meta') modState.ctrlAt = 0;
+  }, true);
+  window.addEventListener('blur', () => { modState.altAt = 0; modState.ctrlAt = 0; });
 
   function init() {
     buildPanel();
