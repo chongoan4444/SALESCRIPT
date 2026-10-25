@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE
 // @namespace    salescript
-// @version      1.81.1
+// @version      1.81.2
 // @description  BOTFAKE — chọn chuỗi chat (Alt+Click 2 đầu) hoặc theo snippet trong Pancake rồi gửi cùng 1 câu (kèm 1 hoặc nhiều ảnh nếu muốn) cho tất cả.
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -44,10 +44,23 @@
   /* ============================ HẰNG SỐ ============================ */
 
   const PANEL_ID = 'ssb-root';          // ssb = SaleScript Bulk — không đụng pk-*/adj-*/pancake-* của script khác
-  const APP_VERSION = '1.81.1';        // hiện ở tiêu đề panel — đối chiếu với @version trong header
+  const APP_VERSION = '1.81.2';        // hiện ở tiêu đề panel — đối chiếu với @version trong header
   const STYLE_ID = 'ssb-style';
 
   const MAX_NAME_LIST = 12;             // số tên hiển thị khi xác nhận
+
+  /* ---- KHOÁ localStorage (BẮT BUỘC khai báo TRƯỚC khi state được nạp) ----
+   * Lỗi đã sửa (mất câu sau F5): trước đây `state.savedLists = loadSavedLists()` chạy ngay
+   * sau khi khai báo `state`, còn `const SL_KEY` lại nằm tít bên dưới → lúc đó SL_KEY đang ở
+   * "temporal dead zone" nên `localStorage.getItem(SL_KEY)` ném ReferenceError, bị catch nuốt
+   * mất → lần nào F5 cũng nạp ra danh sách RỖNG (dữ liệu vẫn nằm trong localStorage nhưng
+   * không bao giờ đọc được). Nay khai báo khoá ở đây để không còn TDZ. */
+  const SL_KEY = 'ssb_saved_lists';
+  const SL_BAK = SL_KEY + '_bak';      // bản dự phòng câu — chống mất dữ liệu
+  const LOG_KEY = 'ssb_log';           // nhật ký gửi — giữ qua F5
+  const UI_KEY = 'ssb_ui_state';       // tick câu + ô nội dung đang gõ — giữ qua F5
+  const LAST_SENT_KEY = 'ssb_last_sent_v1'; // ảnh chụp lượt gửi gần nhất — "↺ Chọn lại list vừa gửi"
+  const LAST_SENT_MAX_ITEMS = 8000;    // trần số chat ghi xuống localStorage (chống tràn quota ~5MB)
 
   /* ============================ TRẠNG THÁI ============================ */
 
@@ -79,7 +92,9 @@
     lastSent: null,         // ẢNH CHỤP lượt gửi gần nhất { at, typedText, items:[chat…], lists:[{id,name,text}] }
                             // để nút "↺ Chọn lại list vừa gửi" chọn lại y nguyên mà KHÔNG phải tải danh sách
   };
-  state.savedLists = loadSavedLists();
+  // state.savedLists được nạp NGAY SAU khi loadSavedLists() được định nghĩa (xem dưới) —
+  // không nạp ở đây vì lúc này hằng số khoá localStorage chưa sẵn sàng.
+  state.savedLists = [];
   // Khôi phục danh sách chat đã gửi (sentIds) từ localStorage — F5 không mất tiến độ gửi
   try {
     const _ids = JSON.parse(localStorage.getItem('SSB_SENT_IDS') || 'null');
@@ -416,13 +431,8 @@
 
   /* ============================ LIST CÂU GỬI (localStorage) ============================ */
 
-  const SL_KEY = 'ssb_saved_lists';
-
-  const LOG_KEY = 'ssb_log';           // nhật ký gửi — giữ qua F5
-  const UI_KEY = 'ssb_ui_state';       // tick câu + ô nội dung đang gõ — giữ qua F5
-  const SL_BAK = SL_KEY + '_bak';      // bản dự phòng câu — chống mất dữ liệu
-  const LAST_SENT_KEY = 'ssb_last_sent_v1'; // ảnh chụp lượt gửi gần nhất — "↺ Chọn lại list vừa gửi"
-  const LAST_SENT_MAX_ITEMS = 8000;    // trần số chat ghi xuống localStorage (chống tràn quota ~5MB)
+  // (Các khoá localStorage SL_KEY / SL_BAK / LOG_KEY / UI_KEY / LAST_SENT_KEY đã được khai báo
+  //  ở đầu file — trước `state` — để loadSavedLists() không gặp TDZ. Xem chú thích ở đó.)
 
   function loadSavedLists() {
     try {
@@ -452,6 +462,9 @@
       return [];
     }
   }
+
+  // NẠP danh sách câu đã lưu (chạy ở đây vì SL_KEY/SL_BAK đã khởi tạo và hàm đã định nghĩa)
+  state.savedLists = loadSavedLists();
 
   function persistSavedLists() {
     try {
