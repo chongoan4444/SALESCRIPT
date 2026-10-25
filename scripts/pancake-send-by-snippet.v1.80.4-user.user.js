@@ -528,16 +528,50 @@
     box.innerHTML = state.savedLists.map((l) => {
       const sel = !!(state.listSel && state.listSel.has(l.id));
       const tt = 'Tích để chọn câu này gửi (chọn được nhiều câu cùng lúc)'
-        + (l.text ? '\nNội dung: ' + clip(l.text, 90) : '\n(chưa có nội dung — bấm ✎ để thêm)');
+        + (l.text ? '\nNội dung: ' + clip(l.text, 90) : '\n(chưa có nội dung — bấm ✎ để thêm)')
+        + '\n⧉ = nhân bản câu (giữ nguyên nội dung + danh sách chat)';
       return `
       <div class="sl-row${sel ? ' active' : ''}" data-id="${esc(l.id)}" title="${esc(tt)}">
         <input type="checkbox" class="sl-cb" ${sel ? 'checked' : ''}>
         <span class="sl-handle" draggable="true" title="Kéo để sắp xếp">⠿</span>
         <span class="sl-name">${esc(l.name)} <span class="sl-n">(${l.items.length})</span></span>
+        <button class="sl-btn" data-act="dup" title="Nhân bản câu này (giữ nguyên nội dung + danh sách chat)">⧉</button>
         <button class="sl-btn" data-act="edit" title="Sửa tên + nội dung câu">✎</button>
         <button class="sl-btn" data-act="del" title="Xóa câu">✕</button>
       </div>`;
     }).join('');
+  }
+
+  // NHÂN BẢN CÂU GỬI: tạo bản sao ĐỘC LẬP của 1 câu (nội dung + danh sách chat) để sửa thành
+  // biến thể khác mà không đụng câu gốc. Bản sao CHƯA tích → không tự lọt vào lượt gửi nào.
+  function copyCauName(srcName, usedNames) {
+    const src = String(srcName || 'Câu');
+    const root = src.replace(/\s*\(bản sao(?: \d+)?\)\s*$/i, '').trim() || 'Câu';
+    let name = root + ' (bản sao)';
+    let n = 2;
+    while (usedNames.has(name)) { name = root + ' (bản sao ' + n + ')'; n++; }
+    return name;
+  }
+
+  function duplicateSavedList(l) {
+    if (!l) return null;
+    const used = new Set(state.savedLists.map((x) => String(x.name || '')));
+    const copy = {
+      id: 'l' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
+      name: copyCauName(l.name, used),
+      text: String(l.text || ''),
+      // Deep copy: danh sách chat của bản sao độc lập — sửa/bỏ chat ở bản sao không đổi câu gốc
+      items: JSON.parse(JSON.stringify(Array.isArray(l.items) ? l.items : [])),
+    };
+    const at = state.savedLists.indexOf(l);
+    if (at < 0) state.savedLists.push(copy);
+    else state.savedLists.splice(at + 1, 0, copy); // chèn ngay dưới câu gốc cho dễ thấy
+    persistSavedLists();
+    renderSavedLists();
+    logLine('⧉ Đã nhân bản câu “' + l.name + '” → “' + copy.name + '” ('
+      + copy.items.length + ' chat' + (copy.text ? ', có nội dung' : ', chưa có nội dung')
+      + ') — bản sao chưa được tích');
+    return copy;
   }
 
   // Sửa 1 câu: đổi TÊN + đổi NỘI DUNG (ô nhiều dòng — prompt() của trình duyệt không làm được)
@@ -552,6 +586,7 @@
     const title = document.createElement('div');
     title.className = 'edit-title';
     title.textContent = '✎ Sửa câu';
+    title.title = 'Mẹo: bấm ⧉ trên dòng câu để nhân bản câu này (giữ nguyên nội dung + chat)';
     const lb1 = document.createElement('div');
     lb1.className = 'label';
     lb1.textContent = 'TÊN CÂU';
@@ -6378,6 +6413,9 @@
           const act = btn.getAttribute('data-act');
           if (act === 'edit') {
             openCauEditor(l); // sửa TÊN + NỘI DUNG của câu
+          } else if (act === 'dup') {
+            // Nhân bản: bản sao giữ nguyên nội dung + danh sách chat, KHÔNG tự tích
+            duplicateSavedList(l);
           } else if (act === 'del') {
             if (!confirm('Xóa câu “' + l.name + '” (' + l.items.length + ' chat)?')) return;
             const wasSel = state.listSel.has(l.id);
