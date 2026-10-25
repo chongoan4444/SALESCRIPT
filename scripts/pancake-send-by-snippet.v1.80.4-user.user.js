@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE
 // @namespace    salescript
-// @version      1.81.6
+// @version      1.81.7
 // @description  BOTFAKE — chọn chuỗi chat (Alt+Click 2 đầu) hoặc theo snippet trong Pancake rồi gửi cùng 1 câu (kèm 1 hoặc nhiều ảnh nếu muốn) cho tất cả.
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -44,7 +44,7 @@
   /* ============================ HẰNG SỐ ============================ */
 
   const PANEL_ID = 'ssb-root';          // ssb = SaleScript Bulk — không đụng pk-*/adj-*/pancake-* của script khác
-  const APP_VERSION = '1.81.6';        // hiện ở tiêu đề panel — đối chiếu với @version trong header
+  const APP_VERSION = '1.81.7';        // hiện ở tiêu đề panel — đối chiếu với @version trong header
   const STYLE_ID = 'ssb-style';
 
   const MAX_NAME_LIST = 12;             // số tên hiển thị khi xác nhận
@@ -547,6 +547,31 @@
       }
       localStorage.setItem(SL_BAK_SLOTS[0], prevRaw);
     } catch (e) { /* ignore — dự phòng là việc phụ */ }
+  }
+
+  // XOÁ các câu ĐÃ GỬI khỏi MỌI slot dự phòng.
+  // Vì sao: persistSavedLists() đẩy bản TRƯỚC khi xoá (còn câu đã gửi) vào _bak. Nếu sau đó xảy ra
+  // mất dữ liệu thật, bộ tự khôi phục sẽ lôi câu ĐÃ GỬI về → bấm ▶ Chạy là gửi trùng khách.
+  // Đã gửi xong thì không bao giờ được sống lại từ kho dự phòng.
+  function purgeListsFromBackups(ids) {
+    try {
+      if (!ids || !ids.length) return 0;
+      const drop = new Set(ids);
+      let removed = 0;
+      SL_BAK_SLOTS.concat([SL_KEEP]).forEach((key) => {
+        try {
+          const raw = localStorage.getItem(key);
+          if (!raw) return;
+          const arr = JSON.parse(raw);
+          if (!Array.isArray(arr) || !arr.length) return;
+          const kept = arr.filter((l) => !(l && drop.has(l.id)));
+          if (kept.length === arr.length) return;
+          removed += arr.length - kept.length;
+          localStorage.setItem(key, JSON.stringify(kept));
+        } catch (e1) { /* slot hỏng → bỏ qua, không ảnh hưởng slot khác */ }
+      });
+      return removed;
+    } catch (e) { return 0; }
   }
 
   function persistSavedLists() {
@@ -5809,10 +5834,12 @@
       state.savedLists = state.savedLists.filter((l) => ids.indexOf(l.id) === -1);
       state.listSel = new Set();
       state.loadedName = null;
-      persistSavedLists();
+      persistSavedLists();                 // (bản trước khi xoá được đẩy vào dự phòng)
+      const purged = purgeListsFromBackups(ids); // …rồi xoá câu ĐÃ GỬI khỏi mọi slot dự phòng
       renderSavedLists();
       if (delNames.length) {
-        logLine('🗑 Đã gửi xong — tự xóa ' + delNames.length + ' câu: ' + delNames.join(', '));
+        logLine('🗑 Đã gửi xong — tự xóa ' + delNames.length + ' câu: ' + delNames.join(', ')
+          + (purged ? ' (đã loại khỏi ' + purged + ' bản dự phòng để không gửi trùng)' : '') + '');
       }
     } else if (consumeIds.size) {
       logLine('💾 Lô gửi KHÔNG có tin nào được bắn — GIỮ NGUYÊN ' + consumeIds.size
