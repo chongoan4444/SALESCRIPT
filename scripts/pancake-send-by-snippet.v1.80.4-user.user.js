@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE
 // @namespace    salescript
-// @version      1.81.5
+// @version      1.81.6
 // @description  BOTFAKE — chọn chuỗi chat (Alt+Click 2 đầu) hoặc theo snippet trong Pancake rồi gửi cùng 1 câu (kèm 1 hoặc nhiều ảnh nếu muốn) cho tất cả.
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -44,7 +44,7 @@
   /* ============================ HẰNG SỐ ============================ */
 
   const PANEL_ID = 'ssb-root';          // ssb = SaleScript Bulk — không đụng pk-*/adj-*/pancake-* của script khác
-  const APP_VERSION = '1.81.5';        // hiện ở tiêu đề panel — đối chiếu với @version trong header
+  const APP_VERSION = '1.81.6';        // hiện ở tiêu đề panel — đối chiếu với @version trong header
   const STYLE_ID = 'ssb-style';
 
   const MAX_NAME_LIST = 12;             // số tên hiển thị khi xác nhận
@@ -63,6 +63,10 @@
   // Slot GIỮ BẢN LỚN NHẤT: chỉ bị thay khi có bản nhiều chat hơn → bộ 9 câu / 1.662 chat
   // không thể bị vài lần ghi nhỏ sau đó đẩy khỏi 3 slot xoay vòng.
   const SL_KEEP = SL_KEY + '_keep';
+  // DẤU "NGƯỜI DÙNG CỐ Ý XOÁ HẾT": danh sách rỗng do CHÍNH NGƯỜI DÙNG xoá (nút ✕ / 🗑 / gửi xong
+  // tự xoá) KHÁC với "dữ liệu bị mất". Không có dấu này thì mỗi lần xoá hết rồi F5, bộ tự khôi
+  // phục lại tưởng là mất dữ liệu và lôi câu cũ từ bản dự phòng về (gửi lại = gửi trùng!).
+  const SL_CLEARED = SL_KEY + '_cleared';
   const LOG_KEY = 'ssb_log';           // nhật ký gửi — giữ qua F5
   const UI_KEY = 'ssb_ui_state';       // tick câu + ô nội dung đang gõ — giữ qua F5
   const LAST_SENT_KEY = 'ssb_last_sent_v1'; // ảnh chụp lượt gửi gần nhất — "↺ Chọn lại list vừa gửi"
@@ -96,6 +100,7 @@
     quickReply: null,       // câu nhanh Pancake bắt bằng Alt+Q { shortcut, text, pageId, items:[{id,url,w,h}], parts:[{text,items}] }
     qrCapture: false,       // đang bật chế độ BẮT CÂU bằng Alt+Q (chờ click vào popup "/" của app)
     restoredFromBackup: null, // đã nạp câu từ bản dự phòng lúc khởi động (ghi log + sửa lại khoá chính)
+    clearedIntent: false,     // danh sách trống vì người dùng cố ý xoá hết → không tự khôi phục
     lastSent: null,         // ẢNH CHỤP lượt gửi gần nhất { at, typedText, items:[chat…], lists:[{id,name,text}] }
                             // để nút "↺ Chọn lại list vừa gửi" chọn lại y nguyên mà KHÔNG phải tải danh sách
   };
@@ -474,7 +479,24 @@
     return (lists || []).reduce((n, l) => n + ((l && l.items) ? l.items.length : 0), 0);
   }
 
+  // Người dùng đã cố ý xoá hết câu (và chưa thêm câu nào kể từ đó)?
+  function userClearedLists() {
+    try { return !!localStorage.getItem(SL_CLEARED); } catch (e) { return false; }
+  }
+
   function loadSavedLists() {
+    // 0) Đã cố ý xoá hết và chưa thêm câu mới → giữ TRỐNG, KHÔNG tự khôi phục
+    //    (nếu không, xoá xong F5 là câu cũ quay lại — và gửi lại là gửi trùng khách).
+    if (userClearedLists()) {
+      try {
+        const rawC = localStorage.getItem(SL_KEY);
+        const arrC = rawC ? JSON.parse(rawC) : [];
+        if (!Array.isArray(arrC) || !arrC.length) {
+          state.clearedIntent = true;
+          return [];
+        }
+      } catch (e0) { /* khoá chính hỏng → rơi xuống nhánh khôi phục bên dưới */ }
+    }
     // 1) Khoá chính là nguồn đúng
     try {
       const raw = localStorage.getItem(SL_KEY);
@@ -547,6 +569,15 @@
         if (keepIt) localStorage.setItem(SL_KEEP, curJson);
       } catch (e2) { /* slot phụ — không ảnh hưởng việc lưu chính */ }
       localStorage.setItem(SL_KEY, JSON.stringify(state.savedLists));
+      // Danh sách rỗng = người dùng vừa xoá hết → ĐÓNG DẤU để F5 không tự khôi phục lại.
+      // Thêm câu mới (khác rỗng) → mở dấu, bật lại khả năng tự khôi phục khi mất dữ liệu thật.
+      try {
+        if (!state.savedLists.length) {
+          localStorage.setItem(SL_CLEARED, JSON.stringify({ at: Date.now() }));
+        } else {
+          localStorage.removeItem(SL_CLEARED);
+        }
+      } catch (e3) { /* dấu phụ — không ảnh hưởng việc lưu chính */ }
       return true;
     } catch (e) {
       logLine('⚠ Không lưu được câu vào localStorage: ' + (e && e.message || e));
@@ -7366,6 +7397,13 @@ Click CHUỘT THƯỜNG luôn mở chat bình thường, không phụ thuộc ô
     buildPanel();
     // Vừa nạp câu từ BẢN DỰ PHÒNG lúc khởi động (khoá chính rỗng/hỏng) → báo động + ghi lại
     // vào khoá chính để lần F5 sau đọc đúng, không phụ thuộc bản dự phòng nữa.
+    // Danh sách trống vì CHÍNH NGƯỜI DÙNG đã xoá hết (không phải mất dữ liệu) → nói rõ để
+    // không ai tưởng script "mất câu" và cũng không chờ đợi nó tự khôi phục.
+    if (state.clearedIntent) {
+      const hasBak = readBackupSlots().length > 0;
+      logLine('💾 Danh sách câu đang TRỐNG vì bạn đã xoá hết — giữ trống, không tự khôi phục'
+        + (hasBak ? ' (kho dự phòng vẫn còn bản cũ, chỉ khôi phục khi mất dữ liệu ngoài ý muốn).' : '.'));
+    }
     if (state.restoredFromBackup) {
       const r = state.restoredFromBackup;
       persistSavedLists();
