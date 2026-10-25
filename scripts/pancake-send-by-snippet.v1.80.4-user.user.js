@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE
 // @namespace    salescript
-// @version      1.81.4
+// @version      1.81.5
 // @description  BOTFAKE — chọn chuỗi chat (Alt+Click 2 đầu) hoặc theo snippet trong Pancake rồi gửi cùng 1 câu (kèm 1 hoặc nhiều ảnh nếu muốn) cho tất cả.
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -44,7 +44,7 @@
   /* ============================ HẰNG SỐ ============================ */
 
   const PANEL_ID = 'ssb-root';          // ssb = SaleScript Bulk — không đụng pk-*/adj-*/pancake-* của script khác
-  const APP_VERSION = '1.81.4';        // hiện ở tiêu đề panel — đối chiếu với @version trong header
+  const APP_VERSION = '1.81.5';        // hiện ở tiêu đề panel — đối chiếu với @version trong header
   const STYLE_ID = 'ssb-style';
 
   const MAX_NAME_LIST = 12;             // số tên hiển thị khi xác nhận
@@ -554,43 +554,6 @@
     }
   }
 
-  // KHÔI PHỤC từ bản dự phòng (nút 🗂): liệt kê các bản còn câu, hợp nhất theo id (không ghi đè
-  // câu đang có), chỉ THÊM các câu bị mất. Luôn hỏi xác nhận vì có thể làm sống lại câu đã xoá.
-  function restoreListsFromBackup() {
-    const slots = readBackupSlots();
-    if (!slots.length) {
-      logLine('🗂 Không có bản dự phòng nào còn dữ liệu.');
-      alert('Không có bản dự phòng nào còn dữ liệu câu.');
-      return;
-    }
-    const curIds = new Set(state.savedLists.map((l) => l.id));
-    const lines = slots.map((sl, i) => {
-      const missing = sl.lists.filter((l) => !curIds.has(l.id)).length;
-      return (i + 1) + ') ' + sl.lists.length + ' câu · ' + sl.nChat + ' chat'
-        + (missing ? ' (' + missing + ' câu đang thiếu)' : ' (không thiếu câu nào)');
-    });
-    const pick = prompt('🗂 BẢN DỰ PHÒNG CÂU GỬI\n' + lines.join('\n')
-      + '\n\nNhập số bản muốn khôi phục (1 = mới nhất). Chỉ THÊM các câu đang thiếu,'
-      + ' câu đang có giữ nguyên.\nĐể trống = hủy.');
-    if (pick === null) return;
-    const idx = parseInt(String(pick).trim(), 10);
-    if (!idx || idx < 1 || idx > slots.length) { logLine('🗂 Đã hủy khôi phục (lựa chọn không hợp lệ).'); return; }
-    const slot = slots[idx - 1];
-    const add = slot.lists.filter((l) => !curIds.has(l.id));
-    if (!add.length) {
-      logLine('🗂 Bản dự phòng #' + idx + ' không có câu nào đang thiếu — không cần khôi phục.');
-      return;
-    }
-    if (!confirm('Khôi phục ' + add.length + ' câu từ bản dự phòng #' + idx + '?\n\n'
-      + add.slice(0, 12).map((l) => '• ' + l.name + ' (' + l.items.length + ' chat)').join('\n')
-      + (add.length > 12 ? '\n… và ' + (add.length - 12) + ' câu nữa' : ''))) return;
-    state.savedLists = state.savedLists.concat(add);
-    persistSavedLists();
-    renderSavedLists();
-    logLine('🗂 Đã khôi phục ' + add.length + ' câu từ bản dự phòng: '
-      + add.map((l) => l.name + ' (' + l.items.length + ')').join(', '));
-  }
-
   // Ghi trạng thái làm việc (câu đang tick + ô nội dung đang gõ) — F5 xong làm việc tiếp
   function persistUiState() {
     try {
@@ -648,20 +611,9 @@
     if (info) {
       const nChat = state.savedLists.reduce((n, l) => n + l.items.length, 0);
       const nSel = state.listSel ? state.listSel.size : 0;
-      const curIds = new Set(state.savedLists.map((l) => l.id));
-      let nMissing = 0;
-      readBackupSlots().forEach((sl) => { nMissing += sl.lists.filter((l) => !curIds.has(l.id)).length; });
       info.textContent = state.savedLists.length + ' câu · ' + nChat + ' chat'
-        + (nSel ? ' · đang chọn ' + nSel : '')
-        + (nMissing ? ' · ⚠ ' + nMissing + ' câu trong bản dự phòng chưa nạp' : '');
-      info.style.color = nMissing ? '#fbbf24' : '';
-    }
-    const rBtn = shadow && shadow.getElementById('ssb-sl-restore');
-    if (rBtn) {
-      const curIds2 = new Set(state.savedLists.map((l) => l.id));
-      let miss = 0;
-      readBackupSlots().forEach((sl) => { miss += sl.lists.filter((l) => !curIds2.has(l.id)).length; });
-      rBtn.textContent = miss ? ('🗂 Khôi phục (' + miss + ')') : '🗂 Khôi phục';
+        + (nSel ? ' · đang chọn ' + nSel : '');
+      info.style.color = '';
     }
     if (!box) return;
     if (!state.savedLists.length) {
@@ -6154,9 +6106,8 @@ Click CHUỘT THƯỜNG luôn mở chat bình thường, không phụ thuộc ô
             </div>
             <div class="row" style="margin:4px 0;align-items:center">
               <button class="b b-gray" id="ssb-sl-new" title="Lưu CÂU CẦN GỬI đang gõ + các chat đã chọn thành 1 câu — gửi xong tự xóa">＋ Tạo câu gửi</button>
-              <button class="b b-gray" id="ssb-sl-restore" title="Khôi phục câu từ bản dự phòng (dùng khi danh sách câu bị mất sau F5)">🗂 Khôi phục</button>
               <button class="b b-gray" id="ssb-sl-selall" title="Tích tất cả câu (bấm lần nữa để bỏ tích tất cả)">☑ Chọn tất cả</button>
-              <button class="b b-red" id="ssb-sl-delall" title="Xóa TẤT CẢ câu đã lưu (có xác nhận + vẫn khôi phục được từ bản dự phòng)">🗑 Xóa tất cả</button>
+              <button class="b b-red" id="ssb-sl-delall" title="Xóa TẤT CẢ câu đã lưu (luôn hỏi xác nhận trước khi xóa)">🗑 Xóa tất cả</button>
               <span class="hint" id="ssb-sl-info">0 câu</span>
             </div>
             <div class="saved-lists" id="ssb-sl-box"><div class="empty">Chưa có list nào — chọn chat ở mục 1–2 rồi bấm “＋ Tạo list”</div></div>
@@ -6668,10 +6619,6 @@ Click CHUỘT THƯỜNG luôn mở chat bình thường, không phụ thuộc ô
       render();
     });
     // ===== LIST CÂU GỬI =====
-    on('ssb-sl-restore', 'click', () => {
-      restoreListsFromBackup();
-      render();
-    });
     // CHỌN TẤT CẢ: đang tích hết thì bỏ tích hết, còn lại thì tích hết (kể cả câu đang tick dở)
     on('ssb-sl-selall', 'click', () => {
       if (!state.savedLists.length) { logLine('☑ Chưa có câu nào để chọn.'); return; }
@@ -6701,7 +6648,8 @@ Click CHUỘT THƯỜNG luôn mở chat bình thường, không phụ thuộc ô
       const names = state.savedLists.slice(0, 12).map((l) => '• ' + l.name + ' (' + (l.items ? l.items.length : 0) + ' chat)').join('\n')
         + (state.savedLists.length > 12 ? '\n… và ' + (state.savedLists.length - 12) + ' câu nữa' : '');
       if (!confirm('XÓA TẤT CẢ ' + state.savedLists.length + ' câu (' + nChat + ' chat)?\n\n' + names
-        + '\n\nVẫn khôi phục lại được bằng nút 🗂 Khôi phục (bản dự phòng).')) return;
+        + '\n\nLưu ý: các câu này bị xóa hẳn khỏi danh sách. Canh báo: nếu một lần F5 sau đó\n'
+        + 'danh sách bị trống bất thường, script sẽ tự lấy lại bản gần nhất từ kho dự phòng.')) return;
       const nDel = state.savedLists.length;
       state.savedLists = [];
       state.listSel = new Set();
@@ -6709,7 +6657,7 @@ Click CHUỘT THƯỜNG luôn mở chat bình thường, không phụ thuộc ô
       persistSavedLists();     // lưu ngay (bản cũ đã được đẩy vào dự phòng)
       renderSavedLists();
       render();
-      logLine('🗑 Đã xóa TẤT CẢ ' + nDel + ' câu (' + nChat + ' chat). Bấm 🗂 Khôi phục nếu cần lấy lại.');
+      logLine('🗑 Đã xóa TẤT CẢ ' + nDel + ' câu (' + nChat + ' chat).');
     });
     on('ssb-sl-new', 'click', () => {
       const sel = state.matches.filter((m) => m.checked);
