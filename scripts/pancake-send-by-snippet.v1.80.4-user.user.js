@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE
 // @namespace    salescript
-// @version      1.81.7
+// @version      1.82.0
 // @description  BOTFAKE — chọn chuỗi chat (Alt+Click 2 đầu) hoặc theo snippet trong Pancake rồi gửi cùng 1 câu (kèm 1 hoặc nhiều ảnh nếu muốn) cho tất cả.
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -44,17 +44,18 @@
   /* ============================ HẰNG SỐ ============================ */
 
   const PANEL_ID = 'ssb-root';          // ssb = SaleScript Bulk — không đụng pk-*/adj-*/pancake-* của script khác
-  const APP_VERSION = '1.81.7';        // hiện ở tiêu đề panel — đối chiếu với @version trong header
+  const APP_VERSION = '1.82.0';        // hiện ở tiêu đề panel — đối chiếu với @version trong header
   const STYLE_ID = 'ssb-style';
 
   const MAX_NAME_LIST = 12;             // số tên hiển thị khi xác nhận
 
   /* ---- KHOÁ localStorage (BẮT BUỘC khai báo TRƯỚC khi state được nạp) ----
-   * Lỗi đã sửa (mất câu sau F5): trước đây `state.savedLists = loadSavedLists()` chạy ngay
-   * sau khi khai báo `state`, còn `const SL_KEY` lại nằm tít bên dưới → lúc đó SL_KEY đang ở
-   * "temporal dead zone" nên `localStorage.getItem(SL_KEY)` ném ReferenceError, bị catch nuốt
-   * mất → lần nào F5 cũng nạp ra danh sách RỖNG (dữ liệu vẫn nằm trong localStorage nhưng
-   * không bao giờ đọc được). Nay khai báo khoá ở đây để không còn TDZ. */
+   * Lỗi đã sửa (mất câu sau F5) #1: `state.savedLists = loadSavedLists()` chạy khi `const SL_KEY`
+   * còn ở "temporal dead zone" → ReferenceError bị catch nuốt → F5 luôn nạp ra danh sách RỖNG.
+   * Lỗi #2 (nặng hơn): 1 câu 5.000 chat ≈ 3,8 MB, localStorage chỉ ~5 MB/origin → lưu 2 câu là
+   * QuotaExceededError, lỗi bị nuốt → mở tab mới thấy trống. Nay TOÀN BỘ câu nằm trong
+   * IndexedDB (xem khối "KHO CÂU GỬI (IndexedDB)"), các khoá dưới đây chỉ còn dùng để
+   * CHUYỂN dữ liệu cũ sang kho mới. */
   const SL_KEY = 'ssb_saved_lists';
   const SL_BAK = SL_KEY + '_bak';      // bản dự phòng câu — chống mất dữ liệu
   // NHIỀU slot dự phòng (xoay vòng): một lần ghi hỏng/ghi đè không thể xoá sạch mọi bản tốt.
@@ -70,7 +71,6 @@
   const LOG_KEY = 'ssb_log';           // nhật ký gửi — giữ qua F5
   const UI_KEY = 'ssb_ui_state';       // tick câu + ô nội dung đang gõ — giữ qua F5
   const LAST_SENT_KEY = 'ssb_last_sent_v1'; // ảnh chụp lượt gửi gần nhất — "↺ Chọn lại list vừa gửi"
-  const LAST_SENT_MAX_ITEMS = 8000;    // trần số chat ghi xuống localStorage (chống tràn quota ~5MB)
 
   /* ============================ TRẠNG THÁI ============================ */
 
@@ -99,13 +99,13 @@
     listIncomplete: false,  // danh sách tải CHƯA đầy đủ → CHẶN GỬI (tải sai là gửi sai)
     quickReply: null,       // câu nhanh Pancake bắt bằng Alt+Q { shortcut, text, pageId, items:[{id,url,w,h}], parts:[{text,items}] }
     qrCapture: false,       // đang bật chế độ BẮT CÂU bằng Alt+Q (chờ click vào popup "/" của app)
-    restoredFromBackup: null, // đã nạp câu từ bản dự phòng lúc khởi động (ghi log + sửa lại khoá chính)
-    clearedIntent: false,     // danh sách trống vì người dùng cố ý xoá hết → không tự khôi phục
+    listsLoaded: false,       // đã nạp xong danh sách câu từ IndexedDB chưa (để UI không báo "trống" oan)
     lastSent: null,         // ẢNH CHỤP lượt gửi gần nhất { at, typedText, items:[chat…], lists:[{id,name,text}] }
                             // để nút "↺ Chọn lại list vừa gửi" chọn lại y nguyên mà KHÔNG phải tải danh sách
   };
-  // state.savedLists được nạp NGAY SAU khi loadSavedLists() được định nghĩa (xem dưới) —
-  // không nạp ở đây vì lúc này hằng số khoá localStorage chưa sẵn sàng.
+  // Danh sách câu nạp BẤT ĐỒNG BỘ từ IndexedDB (xem loadListsFromStore) — lúc khởi động là rỗng,
+  // nạp xong sẽ vẽ lại panel. Xem chú thích "KHO CÂU GỬI (IndexedDB)" để biết vì sao không
+  // dùng localStorage nữa (1 câu 5.000 chat ≈ 3,8 MB > quota ~5 MB).
   state.savedLists = [];
   // Khôi phục danh sách chat đã gửi (sentIds) từ localStorage — F5 không mất tiến độ gửi
   try {
@@ -441,12 +441,111 @@
     highlightRows();
   }
 
-  /* ============================ LIST CÂU GỬI (localStorage) ============================ */
+  /* ============================ KHO CÂU GỬI (IndexedDB) ============================ */
+  // VÌ SAO ĐỔI TỪ localStorage SANG IndexedDB (bằng chứng đo thực tế):
+  //   • 1 chat lưu đủ trường ≈ 785 byte → 1 câu 5.000 chat = 3,80 MB; 2 câu = 7,60 MB.
+  //   • localStorage chỉ ~5 MB/origin, mà code cũ còn ghi thêm bản dự phòng
+  //     (SL_KEY + _bak + _keep ≈ 19 MB) → mọi lần lưu đều ném QuotaExceededError.
+  //   • Lỗi đó bị catch nuốt mất, khoá chính giữ nguyên giá trị cũ (thường là "[]")
+  //     → mở tab mới thấy danh sách TRỐNG dù tab tạo câu vẫn hiện (chỉ nằm trong RAM).
+  //   • IndexedDB cùng origin có quota lớn (hàng trăm MB – GB) và DÙNG CHUNG giữa các tab;
+  //     mỗi câu là 1 bản ghi riêng (key = id) nên 2 tab tạo 2 câu KHÔNG ghi đè nhau.
+  const IDB_NAME = 'ssb_lists_v1';
+  const IDB_LISTS = 'lists';     // key = list.id → { id, name, text, items:[…], order, savedAt }
+  const IDB_META = 'meta';       // key = 'cleared' | 'lastSent'
+  let idbPromise = null;
+  let listWriteChain = Promise.resolve();
+  // CHỐNG RACE: người dùng có thể tạo/sửa/xoá câu TRONG LÚC kho đang được đọc (IndexedDB là async).
+  // Nếu kết quả đọc cũ (đọc trước khi lưu) ghi đè RAM thì câu vừa tạo sẽ BIẾN MẤT khỏi panel.
+  // → đếm số lần RAM thay đổi; đọc xong mà thấy có thay đổi thì HỢP NHẤT thay vì ghi đè.
+  let localRev = 0;
+  let clearSeq = 0;
+  const recentlyDeleted = new Set();
 
-  // (Các khoá localStorage SL_KEY / SL_BAK / LOG_KEY / UI_KEY / LAST_SENT_KEY đã được khai báo
-  //  ở đầu file — trước `state` — để loadSavedLists() không gặp TDZ. Xem chú thích ở đó.)
+  function idbOpen() {
+    if (idbPromise) return idbPromise;
+    idbPromise = new Promise((resolve, reject) => {
+      if (typeof indexedDB === 'undefined') { reject(new Error('trình duyệt không có IndexedDB')); return; }
+      let req;
+      try { req = indexedDB.open(IDB_NAME, 1); } catch (e) { reject(e); return; }
+      req.onupgradeneeded = () => {
+        try {
+          const db = req.result;
+          if (!db.objectStoreNames.contains(IDB_LISTS)) db.createObjectStore(IDB_LISTS, { keyPath: 'id' });
+          if (!db.objectStoreNames.contains(IDB_META)) db.createObjectStore(IDB_META);
+        } catch (e) { /* ignore */ }
+      };
+      req.onsuccess = () => resolve(req.result);
+      req.onerror = () => reject(req.error || new Error('mở IndexedDB lỗi'));
+      req.onblocked = () => reject(new Error('IndexedDB bị tab khác chặn'));
+    });
+    // mở lỗi thì cho phép thử lại lần sau
+    idbPromise.catch(() => { idbPromise = null; });
+    return idbPromise;
+  }
 
-  // Đọc + kiểm tra 1 khoá: trả về mảng câu hợp lệ, hoặc null nếu không có/hỏng
+  function idbGetAll(storeName) {
+    return idbOpen().then((db) => new Promise((resolve, reject) => {
+      const tx = db.transaction(storeName, 'readonly');
+      const req = tx.objectStore(storeName).getAll();
+      req.onsuccess = () => resolve(req.result || []);
+      req.onerror = () => reject(req.error);
+    }));
+  }
+
+  function idbPutLists(lists) {
+    return idbOpen().then((db) => new Promise((resolve, reject) => {
+      if (!lists || !lists.length) { resolve(0); return; }
+      const tx = db.transaction(IDB_LISTS, 'readwrite');
+      const st = tx.objectStore(IDB_LISTS);
+      lists.forEach((l) => { try { st.put(l); } catch (e) { /* ignore */ } });
+      tx.oncomplete = () => resolve(lists.length);
+      tx.onerror = () => reject(tx.error);
+      tx.onabort = () => reject(tx.error || new Error('ghi bị hủy'));
+    }));
+  }
+
+  function idbDelLists(ids) {
+    return idbOpen().then((db) => new Promise((resolve, reject) => {
+      if (!ids || !ids.length) { resolve(0); return; }
+      const tx = db.transaction(IDB_LISTS, 'readwrite');
+      const st = tx.objectStore(IDB_LISTS);
+      ids.forEach((id) => { try { st.delete(id); } catch (e) { /* ignore */ } });
+      tx.oncomplete = () => resolve(ids.length);
+      tx.onerror = () => reject(tx.error);
+      tx.onabort = () => reject(tx.error || new Error('xóa bị hủy'));
+    }));
+  }
+
+  function idbClearLists() {
+    return idbOpen().then((db) => new Promise((resolve, reject) => {
+      const tx = db.transaction(IDB_LISTS, 'readwrite');
+      tx.objectStore(IDB_LISTS).clear();
+      tx.oncomplete = () => resolve(true);
+      tx.onerror = () => reject(tx.error);
+      tx.onabort = () => reject(tx.error || new Error('xóa tất cả bị hủy'));
+    }));
+  }
+
+  function idbPutMeta(key, val) {
+    return idbOpen().then((db) => new Promise((resolve, reject) => {
+      const tx = db.transaction(IDB_META, 'readwrite');
+      tx.objectStore(IDB_META).put(val, key);
+      tx.oncomplete = () => resolve(true);
+      tx.onerror = () => reject(tx.error);
+    }));
+  }
+
+  function idbGetMeta(key) {
+    return idbOpen().then((db) => new Promise((resolve, reject) => {
+      const tx = db.transaction(IDB_META, 'readonly');
+      const req = tx.objectStore(IDB_META).get(key);
+      req.onsuccess = () => resolve(req.result);
+      req.onerror = () => reject(req.error);
+    }));
+  }
+
+  // Đọc 1 khoá localStorage kiểu cũ (chỉ dùng để CHUYỂN dữ liệu cũ sang IndexedDB)
   function readListsKey(key) {
     try {
       const raw = localStorage.getItem(key);
@@ -458,156 +557,154 @@
     } catch (e) { return null; }
   }
 
-  // Bản dự phòng tốt nhất hiện có: [{ key, lists, nChat }] — mới nhất trước
-  function readBackupSlots() {
-    const out = [];
-    const seen = new Set();
-    SL_BAK_SLOTS.concat([SL_KEEP]).forEach((key) => {
-      const lists = readListsKey(key);
-      if (!lists || !lists.length) return;
-      const nChat = lists.reduce((n, l) => n + (l.items ? l.items.length : 0), 0);
-      // bỏ qua slot trùng nội dung với slot trước (cùng số câu + cùng số chat)
-      const sig = lists.length + '#' + nChat;
-      if (seen.has(sig)) return;
-      seen.add(sig);
-      out.push({ key, lists, nChat });
-    });
-    return out;
-  }
+  const LEGACY_LIST_KEYS = [SL_KEY, SL_BAK, SL_BAK_SLOTS[1], SL_BAK_SLOTS[2], SL_KEEP];
 
-  function listsChatCount(lists) {
-    return (lists || []).reduce((n, l) => n + ((l && l.items) ? l.items.length : 0), 0);
-  }
-
-  // Người dùng đã cố ý xoá hết câu (và chưa thêm câu nào kể từ đó)?
-  function userClearedLists() {
-    try { return !!localStorage.getItem(SL_CLEARED); } catch (e) { return false; }
-  }
-
-  function loadSavedLists() {
-    // 0) Đã cố ý xoá hết và chưa thêm câu mới → giữ TRỐNG, KHÔNG tự khôi phục
-    //    (nếu không, xoá xong F5 là câu cũ quay lại — và gửi lại là gửi trùng khách).
-    if (userClearedLists()) {
-      try {
-        const rawC = localStorage.getItem(SL_KEY);
-        const arrC = rawC ? JSON.parse(rawC) : [];
-        if (!Array.isArray(arrC) || !arrC.length) {
-          state.clearedIntent = true;
-          return [];
-        }
-      } catch (e0) { /* khoá chính hỏng → rơi xuống nhánh khôi phục bên dưới */ }
-    }
-    // 1) Khoá chính là nguồn đúng
+  // CHUYỂN dữ liệu cũ (localStorage) sang IndexedDB, rồi GIẢI PHÓNG quota localStorage.
+  async function migrateLegacyToListDb() {
     try {
-      const raw = localStorage.getItem(SL_KEY);
-      if (raw !== null) {
-        const arr = JSON.parse(raw || '[]');
-        if (!Array.isArray(arr)) throw new Error('dữ liệu hỏng');
-        const ok = arr.filter((l) => l && l.id && Array.isArray(l.items))
-          .map((l) => ({ ...l, text: String(l.text || '') }));
-        if (ok.length) return ok;
-        // Khoá chính RỖNG nhưng bản dự phòng còn câu → dữ liệu bị ghi đè (đúng lỗi bản ≤1.81.1)
-        const bak = readBackupSlots();
-        if (bak.length) {
-          const best = bak[0];
-          state.restoredFromBackup = { key: best.key, nLists: best.lists.length, nChat: best.nChat };
-          return best.lists;
-        }
-        return [];
+      const hasLegacy = LEGACY_LIST_KEYS.some((k) => { try { return !!localStorage.getItem(k); } catch (e) { return false; } });
+      if (!hasLegacy) return 0;
+      // Người dùng đã cố ý xoá hết → KHÔNG hồi sinh câu cũ, chỉ dọn khoá cũ
+      if (localStorage.getItem(SL_CLEARED)) {
+        LEGACY_LIST_KEYS.concat([LAST_SENT_KEY]).forEach((k) => { try { localStorage.removeItem(k); } catch (e) { /* ignore */ } });
+        return 0;
       }
-      // 2) Khoá chính KHÔNG CÒN → lấy bản dự phòng tốt nhất
-      const bak = readBackupSlots();
-      if (bak.length) {
-        state.restoredFromBackup = { key: bak[0].key, nLists: bak[0].lists.length, nChat: bak[0].nChat };
-        return bak[0].lists;
-      }
-      return [];
-    } catch (e) {
-      // 3) Khoá chính HỎNG → bản dự phòng
-      const bak = readBackupSlots();
-      if (bak.length) {
-        state.restoredFromBackup = { key: bak[0].key, nLists: bak[0].lists.length, nChat: bak[0].nChat, corrupt: true };
-        return bak[0].lists;
-      }
-      return [];
-    }
-  }
-
-  // NẠP danh sách câu đã lưu (chạy ở đây vì các khoá đã khởi tạo và hàm đã định nghĩa)
-  state.savedLists = loadSavedLists();
-
-  // Xoay vòng bản dự phòng: nội dung CŨ của khoá chính vào slot 1, các slot cũ lùi 1 bậc.
-  // Tuyệt đối KHÔNG đẩy một bản rỗng vào slot — bản tốt cũ vẫn được giữ nguyên.
-  function pushListBackup(prevRaw) {
-    try {
-      if (!prevRaw || prevRaw === '[]') return; // rỗng → không ghi, không đẩy lùi bản tốt
-      for (let i = SL_BAK_SLOTS.length - 1; i > 0; i--) {
-        const older = localStorage.getItem(SL_BAK_SLOTS[i - 1]);
-        if (older) localStorage.setItem(SL_BAK_SLOTS[i], older);
-      }
-      localStorage.setItem(SL_BAK_SLOTS[0], prevRaw);
-    } catch (e) { /* ignore — dự phòng là việc phụ */ }
-  }
-
-  // XOÁ các câu ĐÃ GỬI khỏi MỌI slot dự phòng.
-  // Vì sao: persistSavedLists() đẩy bản TRƯỚC khi xoá (còn câu đã gửi) vào _bak. Nếu sau đó xảy ra
-  // mất dữ liệu thật, bộ tự khôi phục sẽ lôi câu ĐÃ GỬI về → bấm ▶ Chạy là gửi trùng khách.
-  // Đã gửi xong thì không bao giờ được sống lại từ kho dự phòng.
-  function purgeListsFromBackups(ids) {
-    try {
-      if (!ids || !ids.length) return 0;
-      const drop = new Set(ids);
-      let removed = 0;
-      SL_BAK_SLOTS.concat([SL_KEEP]).forEach((key) => {
-        try {
-          const raw = localStorage.getItem(key);
-          if (!raw) return;
-          const arr = JSON.parse(raw);
-          if (!Array.isArray(arr) || !arr.length) return;
-          const kept = arr.filter((l) => !(l && drop.has(l.id)));
-          if (kept.length === arr.length) return;
-          removed += arr.length - kept.length;
-          localStorage.setItem(key, JSON.stringify(kept));
-        } catch (e1) { /* slot hỏng → bỏ qua, không ảnh hưởng slot khác */ }
+      const map = new Map();
+      LEGACY_LIST_KEYS.forEach((k) => {
+        const arr = readListsKey(k);
+        if (!arr) return;
+        arr.forEach((l) => { if (!map.has(l.id)) map.set(l.id, l); });
       });
-      return removed;
-    } catch (e) { return 0; }
+      const lists = Array.from(map.values());
+      let n = 0;
+      if (lists.length) n = await idbPutLists(lists.map((l, i) => ({ ...l, order: i, savedAt: Date.now() })));
+      // Chỉ xoá localStorage SAU khi IndexedDB đã ghi xong
+      LEGACY_LIST_KEYS.forEach((k) => { try { localStorage.removeItem(k); } catch (e) { /* ignore */ } });
+      // chuyển luôn ảnh chụp lượt gửi gần nhất
+      try {
+        const raw = localStorage.getItem(LAST_SENT_KEY);
+        if (raw) {
+          const snap = JSON.parse(raw);
+          if (snap && Array.isArray(snap.items) && snap.items.length) await idbPutMeta('lastSent', snap);
+          localStorage.removeItem(LAST_SENT_KEY);
+        }
+      } catch (e) { /* ignore */ }
+      return n;
+    } catch (e) {
+      logLine('⚠ Chuyển dữ liệu câu cũ sang kho mới chưa xong: ' + ((e && e.message) || e));
+      return 0;
+    }
   }
 
-  function persistSavedLists() {
+  // BÁO TAB KHÁC biết kho câu vừa đổi (2 tab cùng mở vẫn thấy câu của nhau)
+  let listChannel = null;
+  try { if (typeof BroadcastChannel === 'function') listChannel = new BroadcastChannel('ssb_lists_sync'); } catch (e) { listChannel = null; }
+  function notifyListsChanged() {
+    try { if (listChannel) listChannel.postMessage({ t: 'lists', at: Date.now() }); } catch (e) { /* ignore */ }
+    try { localStorage.setItem('ssb_lists_ping', String(Date.now())); } catch (e) { /* ignore */ }
+  }
+
+  // NẠP danh sách câu từ kho (gọi lúc khởi động + khi tab khác báo thay đổi)
+  async function loadListsFromStore() {
     try {
-      const prev = localStorage.getItem(SL_KEY);
-      pushListBackup(prev);
-      // Slot "giữ bản lớn nhất": chỉ ghi khi bản mới NHIỀU CHAT HƠN bản đang giữ
-      // (hoặc chưa có) → dữ liệu lớn nhất luôn còn một bản an toàn dài hạn.
-      try {
-        const curJson = JSON.stringify(state.savedLists);
-        const keptRaw = localStorage.getItem(SL_KEEP);
-        let keepIt = false;
-        if (!keptRaw) keepIt = true;
-        else {
-          let kept = null;
-          try { kept = JSON.parse(keptRaw); } catch (e1) { kept = null; }
-          if (!Array.isArray(kept) || !kept.length) keepIt = true;
-          else if (listsChatCount(state.savedLists) > listsChatCount(kept)) keepIt = true;
-        }
-        if (keepIt) localStorage.setItem(SL_KEEP, curJson);
-      } catch (e2) { /* slot phụ — không ảnh hưởng việc lưu chính */ }
-      localStorage.setItem(SL_KEY, JSON.stringify(state.savedLists));
-      // Danh sách rỗng = người dùng vừa xoá hết → ĐÓNG DẤU để F5 không tự khôi phục lại.
-      // Thêm câu mới (khác rỗng) → mở dấu, bật lại khả năng tự khôi phục khi mất dữ liệu thật.
-      try {
-        if (!state.savedLists.length) {
-          localStorage.setItem(SL_CLEARED, JSON.stringify({ at: Date.now() }));
-        } else {
-          localStorage.removeItem(SL_CLEARED);
-        }
-      } catch (e3) { /* dấu phụ — không ảnh hưởng việc lưu chính */ }
-      return true;
+      const rev0 = localRev;
+      const clear0 = clearSeq;
+      const migrated = await migrateLegacyToListDb();
+      if (migrated) logLine('📦 Đã chuyển ' + migrated + ' câu từ kho cũ (localStorage) sang kho mới (IndexedDB).');
+      let lists = [];
+      try { lists = await idbGetAll(IDB_LISTS); } catch (e) { lists = []; }
+      lists = (lists || [])
+        .filter((l) => l && l.id && Array.isArray(l.items))
+        .map((l) => ({ ...l, text: String(l.text || '') }));
+      lists.sort((a, b) => (a.order || 0) - (b.order || 0));
+      // Có thay đổi cục bộ trong lúc đọc → HỢP NHẤT (RAM thắng) để không nuốt câu vừa tạo/sửa
+      if (localRev !== rev0) {
+        if (clearSeq !== clear0) return 0; // vừa bấm 🗑 Xóa tất cả → bỏ qua kết quả đọc cũ
+        const byId = new Map(lists.map((l) => [l.id, l]));
+        (state.savedLists || []).forEach((l) => { if (l && l.id) byId.set(l.id, l); });
+        recentlyDeleted.forEach((id) => byId.delete(id));
+        lists = Array.from(byId.values());
+        state.savedLists = lists;
+        state.listsLoaded = true;
+        persistSavedLists(); // đồng bộ lại kho theo bản đã hợp nhất
+        renderSavedLists();
+        render();
+        return lists.length;
+      }
+      state.savedLists = lists;
+      state.listsLoaded = true;
+      // câu đang tích có thể đã bị tab khác xoá → lọc lại cho khớp
+      const ids = new Set(lists.map((l) => l.id));
+      let selChanged = false;
+      Array.from(state.listSel || []).forEach((id) => { if (!ids.has(id)) { state.listSel.delete(id); selChanged = true; } });
+      if (selChanged) { try { rebuildFromLists(); } catch (e) { /* ignore */ } }
+      renderSavedLists();
+      render();
+      return lists.length;
     } catch (e) {
-      logLine('⚠ Không lưu được câu vào localStorage: ' + (e && e.message || e));
-      return false;
+      state.listsLoaded = true;
+      logLine('⚠ KHÔNG ĐỌC ĐƯỢC kho câu (IndexedDB): ' + ((e && e.message) || e));
+      renderSavedLists();
+      return 0;
     }
+  }
+
+  // LƯU (upsert) các câu đang có vào kho. KHÔNG xoá câu của tab khác.
+  function persistSavedLists() {
+    localRev++;
+    const snapshot = state.savedLists.map((l, i) => ({ ...l, order: i, savedAt: Date.now() }));
+    listWriteChain = listWriteChain
+      .then(() => idbPutLists(snapshot))
+      .then(() => {
+        notifyListsChanged();
+        // danh sách rỗng = người dùng đã xoá hết → đóng dấu để không hồi sinh dữ liệu cũ
+        try {
+          if (!snapshot.length) localStorage.setItem(SL_CLEARED, JSON.stringify({ at: Date.now() }));
+          else localStorage.removeItem(SL_CLEARED);
+        } catch (e) { /* ignore */ }
+        return true;
+      })
+      .catch((e) => {
+        logLine('⛔ KHÔNG LƯU ĐƯỢC CÂU (' + ((e && e.message) || e) + ') — câu vẫn còn trên màn hình nhưng F5 sẽ mất. Thử đóng bớt tab Pancake rồi lưu lại.');
+        return false;
+      });
+    return true;
+  }
+
+  // XOÁ 1/nhiều câu khỏi kho (nút ✕, 🗑 Xóa tất cả, hoặc câu vừa GỬI XONG)
+  function deleteListsFromStore(ids) {
+    localRev++;
+    const arr = (ids || []).filter(Boolean);
+    arr.forEach((id) => recentlyDeleted.add(id));
+    if (!arr.length) return;
+    listWriteChain = listWriteChain
+      .then(() => idbDelLists(arr))
+      .then(() => { notifyListsChanged(); return true; })
+      .catch((e) => { logLine('⚠ Không xóa được câu khỏi kho: ' + ((e && e.message) || e)); return false; });
+  }
+
+  function clearListsStore() {
+    localRev++;
+    clearSeq++;
+    listWriteChain = listWriteChain
+      .then(() => idbClearLists())
+      .then(() => {
+        // đóng dấu "đã cố ý xoá hết" để dữ liệu legacy (nếu còn) không bị chuyển ngược về
+        try { localStorage.setItem(SL_CLEARED, JSON.stringify({ at: Date.now() })); } catch (e) { /* ignore */ }
+        notifyListsChanged();
+        return true;
+      })
+      .catch((e) => { logLine('⚠ Không xóa được kho câu: ' + ((e && e.message) || e)); return false; });
+  }
+
+  // Nạp ảnh chụp lượt gửi gần nhất từ kho (cho nút ↺)
+  function loadLastSentFromStore() {
+    idbGetMeta('lastSent').then((snap) => {
+      if (snap && Array.isArray(snap.items) && snap.items.length && !state.lastSent) {
+        state.lastSent = snap;
+        render();
+      }
+    }).catch(() => { /* ignore */ });
   }
 
   // Ghi trạng thái làm việc (câu đang tick + ô nội dung đang gõ) — F5 xong làm việc tiếp
@@ -667,13 +764,16 @@
     if (info) {
       const nChat = state.savedLists.reduce((n, l) => n + l.items.length, 0);
       const nSel = state.listSel ? state.listSel.size : 0;
-      info.textContent = state.savedLists.length + ' câu · ' + nChat + ' chat'
-        + (nSel ? ' · đang chọn ' + nSel : '');
+      info.textContent = state.listsLoaded
+        ? (state.savedLists.length + ' câu · ' + nChat + ' chat' + (nSel ? ' · đang chọn ' + nSel : ''))
+        : '⏳ đang nạp…';
       info.style.color = '';
     }
     if (!box) return;
     if (!state.savedLists.length) {
-      box.innerHTML = '<div class="empty">Chưa có câu nào — chọn chat + gõ câu cần gửi rồi bấm “＋ Tạo câu gửi”</div>';
+      box.innerHTML = state.listsLoaded
+        ? '<div class="empty">Chưa có câu nào — chọn chat + gõ câu cần gửi rồi bấm “＋ Tạo câu gửi”</div>'
+        : '<div class="empty">⏳ Đang nạp danh sách câu từ kho…</div>';
       return;
     }
     box.innerHTML = state.savedLists.map((l) => {
@@ -747,17 +847,9 @@
     };
   }
 
-  function loadLastSent() {
-    try {
-      const raw = JSON.parse(localStorage.getItem(LAST_SENT_KEY) || 'null');
-      if (raw && Array.isArray(raw.items) && raw.items.length) return raw;
-    } catch (e) { /* ignore */ }
-    return null;
-  }
-
   function getLastSent() {
-    if (!state.lastSent) state.lastSent = loadLastSent(); // nạp trễ: tránh đọc KEY trước khi khai báo const
-    return state.lastSent;
+    // Ảnh chụp được nạp từ IndexedDB lúc khởi động (loadLastSentFromStore) và giữ trong RAM
+    return state.lastSent || null;
   }
 
   // lists: CHỈ lưu { id, name, text } — danh sách chat của từng câu suy lại từ items[].listId
@@ -772,13 +864,10 @@
         .map((l) => ({ id: l.id, name: l.name, text: String(l.text || '') }));
       const snap = { at: Date.now(), typedText: String(typedText || ''), items, lists };
       state.lastSent = snap; // RAM luôn có — F5 vẫn còn nếu ghi được localStorage
-      if (items.length > LAST_SENT_MAX_ITEMS) {
-        logLine('↺ Lượt gửi này có ' + items.length + ' chat — chỉ giữ trong RAM (quá lớn để lưu localStorage); F5 sẽ mất.');
-        return;
-      }
-      try { localStorage.setItem(LAST_SENT_KEY, JSON.stringify(snap)); } catch (e) {
-        logLine('⚠ Không lưu được ảnh chụp lượt gửi vào localStorage (' + (e && e.name || e) + ') — vẫn dùng được tới khi F5.');
-      }
+      // Lưu vào IndexedDB (quota lớn) — 5.000 chat ≈ 3,8 MB nên localStorage không đủ.
+      listWriteChain = listWriteChain
+        .then(() => idbPutMeta('lastSent', snap))
+        .catch(() => { /* ảnh chụp là việc phụ */ });
     } catch (e) { /* ảnh chụp là việc phụ — không được làm hỏng lượt gửi */ }
   }
 
@@ -5834,12 +5923,12 @@
       state.savedLists = state.savedLists.filter((l) => ids.indexOf(l.id) === -1);
       state.listSel = new Set();
       state.loadedName = null;
-      persistSavedLists();                 // (bản trước khi xoá được đẩy vào dự phòng)
-      const purged = purgeListsFromBackups(ids); // …rồi xoá câu ĐÃ GỬI khỏi mọi slot dự phòng
+      persistSavedLists();
+      deleteListsFromStore(ids);           // xoá hẳn khỏi kho → không bao giờ gửi trùng
       renderSavedLists();
       if (delNames.length) {
         logLine('🗑 Đã gửi xong — tự xóa ' + delNames.length + ' câu: ' + delNames.join(', ')
-          + (purged ? ' (đã loại khỏi ' + purged + ' bản dự phòng để không gửi trùng)' : '') + '');
+          + ' (đã xoá khỏi kho, không gửi trùng)');
       }
     } else if (consumeIds.size) {
       logLine('💾 Lô gửi KHÔNG có tin nào được bắn — GIỮ NGUYÊN ' + consumeIds.size
@@ -6698,7 +6787,7 @@ Click CHUỘT THƯỜNG luôn mở chat bình thường, không phụ thuộc ô
       renderSavedLists();
       render();
     });
-    // XÓA TẤT CẢ: xác nhận rõ ràng; bản dự phòng vẫn còn nên khôi phục lại được
+    // XÓA TẤT CẢ: hỏi xác nhận, rồi xoá hẳn khỏi kho (IndexedDB)
     on('ssb-sl-delall', 'click', () => {
       if (!state.savedLists.length) { logLine('🗑 Chưa có câu nào để xóa.'); return; }
       if (state.sending) { logLine('⏳ Đang gửi — không xóa để tránh lệch lượt gửi.'); return; }
@@ -6706,13 +6795,12 @@ Click CHUỘT THƯỜNG luôn mở chat bình thường, không phụ thuộc ô
       const names = state.savedLists.slice(0, 12).map((l) => '• ' + l.name + ' (' + (l.items ? l.items.length : 0) + ' chat)').join('\n')
         + (state.savedLists.length > 12 ? '\n… và ' + (state.savedLists.length - 12) + ' câu nữa' : '');
       if (!confirm('XÓA TẤT CẢ ' + state.savedLists.length + ' câu (' + nChat + ' chat)?\n\n' + names
-        + '\n\nLưu ý: các câu này bị xóa hẳn khỏi danh sách. Canh báo: nếu một lần F5 sau đó\n'
-        + 'danh sách bị trống bất thường, script sẽ tự lấy lại bản gần nhất từ kho dự phòng.')) return;
+        + '\n\nCác câu này bị xóa HẲN (không khôi phục lại được).')) return;
       const nDel = state.savedLists.length;
       state.savedLists = [];
       state.listSel = new Set();
       rebuildFromLists();      // bỏ chọn chat trên danh sách + xóa lựa chọn hiện tại
-      persistSavedLists();     // lưu ngay (bản cũ đã được đẩy vào dự phòng)
+      clearListsStore();       // xoá sạch kho (IndexedDB)
       renderSavedLists();
       render();
       logLine('🗑 Đã xóa TẤT CẢ ' + nDel + ' câu (' + nChat + ' chat).');
@@ -6778,6 +6866,7 @@ Click CHUỘT THƯỜNG luôn mở chat bình thường, không phụ thuộc ô
             state.savedLists = state.savedLists.filter((x) => x.id !== id);
             if (wasSel) { state.listSel.delete(id); rebuildFromLists(); }
             persistSavedLists();
+            deleteListsFromStore([id]);   // xoá hẳn khỏi kho, không để tab khác đọc lại
             renderSavedLists();
             logLine('🗑 Đã xóa câu “' + l.name + '”');
           }
@@ -7424,21 +7513,19 @@ Click CHUỘT THƯỜNG luôn mở chat bình thường, không phụ thuộc ô
     buildPanel();
     // Vừa nạp câu từ BẢN DỰ PHÒNG lúc khởi động (khoá chính rỗng/hỏng) → báo động + ghi lại
     // vào khoá chính để lần F5 sau đọc đúng, không phụ thuộc bản dự phòng nữa.
-    // Danh sách trống vì CHÍNH NGƯỜI DÙNG đã xoá hết (không phải mất dữ liệu) → nói rõ để
-    // không ai tưởng script "mất câu" và cũng không chờ đợi nó tự khôi phục.
-    if (state.clearedIntent) {
-      const hasBak = readBackupSlots().length > 0;
-      logLine('💾 Danh sách câu đang TRỐNG vì bạn đã xoá hết — giữ trống, không tự khôi phục'
-        + (hasBak ? ' (kho dự phòng vẫn còn bản cũ, chỉ khôi phục khi mất dữ liệu ngoài ý muốn).' : '.'));
+    // Nạp kho câu (IndexedDB) + ảnh chụp lượt gửi gần nhất; nghe tab khác thay đổi kho
+    loadListsFromStore().then((n) => {
+      const nChat = state.savedLists.reduce((k, l) => k + (l.items ? l.items.length : 0), 0);
+      if (n) logLine('📦 Đã nạp ' + n + ' câu · ' + nChat + ' chat từ kho (IndexedDB, giữ qua F5).');
+      else logLine('📦 Kho câu đang trống.');
+    });
+    loadLastSentFromStore();
+    if (listChannel) {
+      listChannel.onmessage = () => { if (!state.sending) loadListsFromStore(); };
     }
-    if (state.restoredFromBackup) {
-      const r = state.restoredFromBackup;
-      persistSavedLists();
-      logLine('🗂 DANH SÁCH CÂU BỊ MẤT (khoá chính rỗng' + (r.corrupt ? '/hỏng' : '') + ') — đã KHÔI PHỤC '
-        + r.nLists + ' câu · ' + r.nChat + ' chat từ bản dự phòng (' + r.key + ').');
-      logLine('🗂 Đã ghi lại vào khoá chính — kiểm tra mục "Câu gửi" rồi F5 thử lại.');
-      state.restoredFromBackup = null;
-    }
+    window.addEventListener('storage', (e) => {
+      if ((e.key === 'ssb_lists_ping' || e.key === SL_KEY) && !state.sending) loadListsFromStore();
+    });
     logLine('Sẵn sàng. Alt+Click 2 lần (đầu → cuối chuỗi) để chọn chuỗi chat, hoặc dùng nút lấy snippet.');
     logLine('🖱 Alt+Click / Ctrl+Click / "Chọn chuỗi (2 nhấp)" chỉ CHỌN — đã chặn app tự mở chat.');
   }
