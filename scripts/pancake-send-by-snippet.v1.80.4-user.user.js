@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE
 // @namespace    salescript
-// @version      1.82.1
+// @version      1.82.2
 // @description  BOTFAKE — chọn chuỗi chat (Alt+Click 2 đầu) hoặc theo snippet trong Pancake rồi gửi cùng 1 câu (kèm 1 hoặc nhiều ảnh nếu muốn) cho tất cả.
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -44,7 +44,7 @@
   /* ============================ HẰNG SỐ ============================ */
 
   const PANEL_ID = 'ssb-root';          // ssb = SaleScript Bulk — không đụng pk-*/adj-*/pancake-* của script khác
-  const APP_VERSION = '1.82.1';        // hiện ở tiêu đề panel — đối chiếu với @version trong header
+  const APP_VERSION = '1.82.2';        // hiện ở tiêu đề panel — đối chiếu với @version trong header
   const STYLE_ID = 'ssb-style';
 
   const MAX_NAME_LIST = 12;             // số tên hiển thị khi xác nhận
@@ -843,6 +843,10 @@
       globalId: m.globalId || (m.customers && m.customers[0] && m.customers[0].global_id) || '',
       customers: Array.isArray(m.customers) ? m.customers : undefined,
       hasPhone: m.hasPhone === true,
+      // v1.82.2: giữ luôn tag + số điện thoại gần đây để lượt gửi lại từ ảnh chụp vẫn có dữ liệu
+      // cho chốt chặn tag/điện thoại (trước đây bỏ 2 field này ⇒ chat mang tag cấm mất dấu).
+      tags: Array.isArray(m.tags) ? m.tags.slice() : [],
+      recentPhone: m.recentPhone || 0,
       listId: m.listId || '',
     };
   }
@@ -1089,6 +1093,9 @@
       threadId: String(c.thread_id || ''), // thread_id có sẵn trong API — khỏi tải lại conversation khi gửi
       tags: Array.isArray(c.tags) ? c.tags.slice() : [], // tag ids — lọc "chốt"/"chặn" lúc gửi
       hasPhone: !!c.has_phone, // icon điện thoại (phone-green) — sale đang chăm, không bắn hàng loạt
+      // v1.82.2: `recent_phone_numbers` cũng là nguồn của icon điện thoại (loaddanhsach.har: mọi dòng
+      // chat đều có field này). Giữ SỐ LƯỢNG để chốt chặn điện thoại không phụ thuộc mỗi has_phone.
+      recentPhone: Array.isArray(c.recent_phone_numbers) ? c.recent_phone_numbers.length : 0,
       threadKey: String(c.thread_key || ''), // payload Ext cần convId = thread_key (đúng executeByExtOnce)
       customerName: String((c.from && (c.from.username || c.from.name)) || c.name || ''), // payload Ext cần customerName
       updatedAt: String(c.updated_at || ''), // payload Ext cần conversationUpdatedTime
@@ -1833,18 +1840,35 @@
   // Icon điện thoại (phone-green.svg) trong danh sách = chat CÓ SỐ ĐIỆN THOẠI (has_phone) —
   // sale đang chăm khách này → không bắn tin hàng loạt vào. Soi 3 nguồn: icon trên màn hình
   // (mắt thấy gì dùng nấy), redux app (live), dữ liệu dòng chat đã lưu.
+  // v1.82.2 — SỬA LỖI "vẫn gửi vào chat có icon điện thoại": bản cũ `return !!hit.has_phone` ngay
+  // ở nguồn redux ĐẦU TIÊN tìm được ⇒ redux trả has_phone=false (dữ liệu cũ/chưa có số) trong khi
+  // dòng chat/API lại CÓ số → hụt chốt chặn. Nay: chỉ cần MỘT nguồn nói "có" là chặn (OR toàn bộ),
+  // và đọc cả `recent_phone_numbers` vì icon điện thoại trên dòng chat lấy từ đó
+  // (_app: `recent_phone_numbers.length>0 && <icon điện thoại>` cạnh tag của hội thoại).
   function convHasPhone(m) {
+    if (!m) return false;
     try {
       const el = document.getElementById(String(m.id));
       if (el && el.querySelector('img[src*="phone"]')) return true;
+      // dòng chat có thể không mang id ngoài → soi khối tag của chính hội thoại
+      // (html3.txt: class "list_tags_conv_<convId> list-tags-conv")
+      const box = document.querySelector('.list_tags_conv_' + String(m.id).replace(/[^0-9a-zA-Z_\-]/g, ''));
+      if (box) {
+        const row = box.parentElement || box;
+        if (row && row.querySelector('img[src*="phone"]')) return true;
+      }
     } catch (e) { /* ignore */ }
     try {
       for (let i = 0; i < 2; i++) {
         const hit = getReduxConvById(m && m.id, i);
-        if (hit && hit.has_phone !== undefined && hit.has_phone !== null) return !!hit.has_phone;
+        if (!hit) continue;
+        if (hit.has_phone === true) return true;
+        if (Array.isArray(hit.recent_phone_numbers) && hit.recent_phone_numbers.length) return true;
       }
     } catch (e) { /* ignore */ }
-    return m.hasPhone === true;
+    if (m.hasPhone === true) return true;
+    if (m.recentPhone > 0) return true;
+    return false;
   }
 
   // Tên tag cấm hiển thị NGAY TRÊN DÒNG CHAT (DOM) — "mắt thấy gì dùng nấy": user thấy tag
@@ -1889,128 +1913,280 @@
     return checkIds(m && m.tags);
   }
 
-  // 🛡 BAN GUARD (v1.69.0): tập hợp TOÀN BỘ id chat đang dính tag cấm, nạp từ API lọc theo tag
-  // (server tự lọc — không phụ thuộc dòng chat có đang hiển thị hay redux đã nạp hay chưa).
-  // Được làm mới trước lượt gửi VÀ quét lại giữa lượt (mỗi 3.000 tin) để bắt cả tag vừa gắn trong lúc gửi.
-  const banGuard = { nameById: {}, convIds: new Set(), tagIds: [] };
+  // 🛡 BAN GUARD (v1.69.0, vá v1.82.2): tập hợp TOÀN BỘ id chat đang dính tag cấm.
+  // v1.82.2 — 3 lỗ thật khiến "vẫn gửi vào chat có tag chốt/chặn + có icon điện thoại":
+  //   (a) BẢNG TAG chưa nạp: bản cũ lấy tag cấm từ `conversations.pageSettingTags[pageId]`. App lưu
+  //       key này theo `settings.id` ở một số đường (_app: `pageSettingTags:{[e.settings.id]: e.tags}`)
+  //       ⇒ tra theo pageId trượt ⇒ banIds RỖNG ⇒ sweep thoát ngay (`if (!tagIds.length) return`)
+  //       ⇒ convIds RỖNG ⇒ mọi chat đều "không dính tag" và được gửi. Nay: page thiếu bảng tag thì
+  //       GỌI LUÔN `GET /v1/pages/{id}/settings…` (đúng request app dùng, guianh1.har có
+  //       settings.tags=[{id,text,…}]) và CHỜ xong trước khi lọc/gửi (có hạn thời gian, có log).
+  //   (b) SWEEP bị server lơ tham số lọc: loaddanhsach.har cho thấy request `…&tags=[4,5,10,13]`
+  //       vẫn trả về dòng có tags [93,257,306] (không giao) ⇒ bản cũ loại hết ⇒ sweep "nạp 0 chat"
+  //       mà vẫn báo "bỏ qua 100%". Nay đối chiếu `m.tags ∩ banIds` TRỰC TIẾP trên từng chat (không
+  //       phụ thuộc sweep) + sweep chỉ là lớp phụ, và có cảnh báo khi sweep không lọc được.
+  //   (c) LÀN GỬI CHẬM (deferredCtx) BỎ QUA HOÀN TOÀN chốt chặn trước từng tin. Nay chốt chặn chạy
+  //       cho MỌI làn (xem banGateCheck).
+  const banGuard = {
+    nameById: {}, tagIds: [], convIds: new Set(),
+    pages: [],            // page cần quét (lấy từ danh sách chat của lượt gửi)
+    sweptPages: new Set(),  // page đã quét tag xong (kết quả đầy đủ)
+    failedPages: new Set(), // page quét lỗi/không lọc được → chỉ dựa vào dữ liệu từng dòng
+    ready: null,          // Promise: quét tag nền xong (chốt chặn cuối chờ nó)
+    sweepFilterBroken: false,
+  };
   let banSweepRunning = false;
-  async function sweepBannedConvIds() {
-    if (!banGuard.tagIds.length || banSweepRunning) return { added: 0, nameOf: {} };
-    banSweepRunning = true;
+
+  const banTagNameById = (id) => (banGuard.nameById && banGuard.nameById[String(id)]) || null;
+
+  // Tag cấm của MỌI dòng chat đang render — không phụ thuộc dòng có `id` ngoài hay không.
+  // html3.txt: mỗi dòng có <div class="list_tags_conv_<convId> list-tags-conv"> … <span class="ant-tag
+  // … conversation_tags_item">TÊN TAG</span>. Cache 500ms để chốt chặn từng tin không phải quét lại.
+  let domBanCache = { at: 0, map: {} };
+  function domBanTagMap() {
+    const now = Date.now();
+    if (now - domBanCache.at < 500) return domBanCache.map;
+    const map = {};
     try {
-      const res = await Promise.race([
-        loadListViaApi(null, { forceTags: banGuard.tagIds.slice(), maxPages: 300 }),
-        sleep(25000).then(() => ({ ok: false, error: 'quá 25s' })),
-      ]);
-      if (!res || !res.ok) return { added: 0, nameOf: {} };
-      let added = 0;
-      const nameOf = {};
-      (res.rows || []).forEach((r) => {
-        if (!r || !r.id) return;
-        // server đã lọc theo tag; nếu dòng có tags thì đối chiếu lại cho chắc
-        const hit = (r.tags || []).map(String).find((t) => banGuard.nameById[t]);
-        if (hit) nameOf[r.id] = banGuard.nameById[hit];
-        if ((hit || !(r.tags || []).length) && !banGuard.convIds.has(r.id)) {
-          banGuard.convIds.add(r.id);
-          added++;
+      const boxes = document.querySelectorAll('[class*="list_tags_conv_"]');
+      for (let b = 0; b < boxes.length; b++) {
+        const box = boxes[b];
+        let cid = '';
+        const cls = String(box.className || '').split(/\s+/);
+        for (let i = 0; i < cls.length; i++) {
+          const mm = /^list_tags_conv_([0-9a-zA-Z_\-]+)$/.exec(cls[i]);
+          if (mm) { cid = mm[1]; break; }
         }
-      });
-      return { added, nameOf };
-    } catch (e) { return { added: 0, nameOf: {} }; } finally { banSweepRunning = false; }
+        if (!cid || map[cid]) continue;
+        const spans = box.querySelectorAll('.conversation_tags_item, .ant-tag');
+        for (let i = 0; i < spans.length; i++) {
+          const nm = String((spans[i] && spans[i].textContent) || '').trim();
+          if (nm && tagBanName(nm)) { map[cid] = nm; break; }
+        }
+      }
+    } catch (e) { /* ignore */ }
+    domBanCache = { at: now, map };
+    return map;
   }
 
-  // Trả { kept, skippedTag, skippedPhone }: CHỈ bỏ qua khi xác nhận dính tag cấm/icon điện thoại;
-  // chat không kiểm tra được → GIỮ NGUYÊN (thiếu dữ liệu không được làm mất tin).
+  // Quét 1 page bằng API lọc tag (server tự lọc). Đánh dấu swept/failed để chốt chặn biết
+  // page nào "đã kiểm tra xong" (khác với "chưa kiểm tra" — lỗ cũ coi như nhau).
+  async function sweepBanPage(pid) {
+    const key = String(pid || '*');
+    const opts = { forceTags: banGuard.tagIds.slice(), maxPages: 300 };
+    if (pid) opts.singlePageId = String(pid);
+    let res = null;
+    try {
+      res = await Promise.race([
+        loadListViaApi(null, opts),
+        sleep(25000).then(() => ({ ok: false, error: 'quá 25s' })),
+      ]);
+    } catch (e) { res = { ok: false, error: String((e && e.message) || e) }; }
+    if (!res || !res.ok || res.incomplete) {
+      banGuard.failedPages.add(key);
+      return { added: 0, nameOf: {}, ok: false, rows: 0 };
+    }
+    let added = 0, suspect = 0;
+    const nameOf = {};
+    const rows = res.rows || [];
+    rows.forEach((r) => {
+      if (!r || !r.id) return;
+      const hit = (r.tags || []).map(String).find((t) => banTagNameById(t));
+      if (hit) nameOf[r.id] = banTagNameById(hit);
+      if (hit || !(r.tags || []).length) {
+        if (!banGuard.convIds.has(r.id)) { banGuard.convIds.add(r.id); added++; }
+      } else suspect++; // dòng KHÔNG mang tag cấm → server đã lơ tham số lọc
+    });
+    if (suspect > 0) banGuard.sweepFilterBroken = true;
+    banGuard.sweptPages.add(key);
+    return { added, nameOf, ok: true, rows: rows.length, suspect };
+  }
+
+  async function sweepBannedConvIds(pages) {
+    if (!banGuard.tagIds.length) return { added: 0, nameOf: {}, pages: 0 };
+    if (banSweepRunning) return { added: 0, nameOf: {}, pages: 0, busy: true };
+    banSweepRunning = true;
+    try {
+      const list = (Array.isArray(pages) && pages.length ? pages : banGuard.pages).slice();
+      let added = 0, donePages = 0;
+      const nameOf = {};
+      const useList = list.length ? list : [''];
+      for (let i = 0; i < useList.length; i++) {
+        const r = await sweepBanPage(useList[i]);
+        added += r.added || 0;
+        Object.keys(r.nameOf || {}).forEach((k) => { nameOf[k] = r.nameOf[k]; });
+        if (r.ok) donePages++;
+      }
+      return { added, nameOf, pages: donePages };
+    } catch (e) { return { added: 0, nameOf: {}, pages: 0 }; } finally { banSweepRunning = false; }
+  }
+
+  // Nạp BẢNG TAG của những page còn thiếu (fetch settings như app) — CHỜ xong mới lọc/gửi.
+  async function ensureBanTagDefs(pages, budgetMs) {
+    const st = window.__pancakeReduxStore__ && window.__pancakeReduxStore__.getState();
+    const defsByPage = (st && st.conversations && st.conversations.pageSettingTags) || {};
+    const need = [];
+    (pages || []).forEach((pid) => {
+      if (!pid || need.indexOf(pid) > -1) return;
+      let defs = defsByPage[pid];
+      if (!Array.isArray(defs) && Array.isArray(defsByPage)) defs = defsByPage;
+      if (!(defs || []).length) need.push(pid);
+    });
+    if (!need.length) return { fetched: 0, missing: [] };
+    const deadline = Date.now() + (budgetMs || 12000);
+    let fetched = 0;
+    const missing = [];
+    for (let i = 0; i < need.length; i++) {
+      if (Date.now() > deadline) { missing.push(need[i]); continue; }
+      const pid2 = need[i];
+      try {
+        const sres = await fetchJson(apiBase() + '/v1/pages/' + encodeURIComponent(pid2)
+          + '/settings?access_token=' + encodeURIComponent(getToken() || '')
+          + '&separate_pos=true&separate_qr=true', 2, { timeoutMs: Math.min(8000, Math.max(1500, deadline - Date.now())) });
+        const stags = (sres && sres.ok && sres.data && sres.data.settings && sres.data.settings.tags) || [];
+        if (!stags.length) { missing.push(pid2); continue; }
+        fetched++;
+        stags.forEach((t) => {
+          const nm = String((t && (t.text || t.name || t.title || t.label)) || '');
+          if (tagBanName(nm)) {
+            banGuard.nameById[String(t.id)] = nm;
+          }
+        });
+      } catch (e) { missing.push(pid2); }
+    }
+    banGuard.tagIds = Object.keys(banGuard.nameById);
+    return { fetched, missing };
+  }
+
+  // CHỐT CHẶN TRƯỚC TỪNG TIN — dùng chung cho MỌI làn gửi (kể cả làn chậm/deferred vốn bỏ qua
+  // hoàn toàn ở bản cũ). Trả tên tag cấm hoặc null. Chỉ chờ quét nền khi page của chat CHƯA được
+  // kiểm tra xong (chờ 1 lần, tối đa 20s) — không làm chậm các chat đã kiểm tra.
+  const banWaitLogged = {};
+  async function banGateCheck(c) {
+    const pid = c.pageId || String(c.id || '').split('_')[0];
+    const quick = () => (banGuard.convIds.has(c.id) ? 'tag cấm (API)' : null)
+      || domBanTagMap()[String(c.id)] || rowBanTagFromDom(c) || convBanTagFromData(c, banGuard.nameById);
+    const hit0 = quick();
+    if (hit0) return hit0;
+    const key = String(pid || '*');
+    if (banGuard.ready && !banGuard.sweptPages.has(key) && !banGuard.failedPages.has(key)) {
+      if (!banWaitLogged[key]) {
+        banWaitLogged[key] = 1;
+        logLine('⏳ Chờ quét xong tag cấm của page ' + key + ' trước khi gửi (an toàn: chưa biết chat nào dính tag thì chưa bắn)…');
+      }
+      try { await Promise.race([banGuard.ready, sleep(20000)]); } catch (e) { /* ignore */ }
+      return quick();
+    }
+    return null;
+  }
+
+  // Lọc trước khi bắn — v1.82.2 viết lại theo hướng "biết rồi mới bắn":
+  //   0) CHỜ nạp BẢNG TAG của mọi page trong danh sách (fetch settings như app khi redux thiếu)
+  //      → có id tag "chốt"/"chặn" TRƯỚC khi xét từng chat (lỗ cũ: banIds rỗng ⇒ không chặn ai).
+  //   1) Chốt theo tag của TỪNG DÒNG dữ liệu: m.tags ∩ banIds (không cần tên tag), tag trên DOM,
+  //      filledTags của redux — tất cả đều kiểm tra được ngay, không phụ thuộc sweep.
+  //   2) Sweep API chạy NỀN song song để bắt tag vừa gắn (mỗi page 1 lượt, có đánh dấu đã quét);
+  //      chốt chặn trước từng tin (banGateCheck) sẽ CHỜ sweep của page chưa quét xong.
+  //   3) Icon điện thoại: OR mọi nguồn (DOM / has_phone / recent_phone_numbers / dữ liệu dòng).
+  // Trả { kept, skippedTag, skippedPhone, pages, missingTagPages }.
   async function filterBannedTagTargets(targets) {
     const kept = [], skippedTag = [], skippedPhone = [];
+    const pages = [];
+    (targets || []).forEach((m) => {
+      const pid = m.pageId || String(m.id || '').split('_')[0];
+      if (pid && pages.indexOf(pid) === -1) pages.push(pid);
+    });
+    banGuard.pages = pages.slice();
     try {
       const st = window.__pancakeReduxStore__ && window.__pancakeReduxStore__.getState();
       const defsByPage = (st && st.conversations && st.conversations.pageSettingTags) || {};
-      const banIds = new Set();
-      const banNameById = {};
+      banGuard.nameById = {};
+      banGuard.tagIds = [];
+      banGuard.convIds = new Set();
+      banGuard.sweptPages = new Set();
+      banGuard.failedPages = new Set();
+      banGuard.sweepFilterBroken = false;
+      Object.keys(banWaitLogged).forEach((k) => { delete banWaitLogged[k]; });
       const banNames = [];
-      const seenPage = {};
-      targets.forEach((m) => {
-        const pid = m.pageId || String(m.id || '').split('_')[0];
-        if (seenPage[pid]) return;
-        seenPage[pid] = 1;
-        // bảng tag trang: { [pageId]: defs } (shape app) hoặc mảng phẳng — thiếu cũng không sao,
-        // tag cấm vẫn bắt được từ filledTags/dòng chat (DOM) ở bước lọc từng chat bên dưới
+      pages.forEach((pid) => {
+        // bảng tag trang: { [pageId]: defs } (shape app) hoặc mảng phẳng
         let defs = defsByPage[pid];
         if (!Array.isArray(defs) && Array.isArray(defsByPage)) defs = defsByPage;
         (defs || []).forEach((t) => {
-          const nm = String((t && (t.text || t.name || t.title)) || '');
+          const nm = String((t && (t.text || t.name || t.title || t.label)) || '');
           if (tagBanName(nm)) {
-            banIds.add(t.id);
-            banNameById[String(t.id)] = nm;
+            banGuard.nameById[String(t.id)] = nm;
             if (banNames.indexOf(nm) < 0) banNames.push(nm);
           }
         });
       });
-      // Page nào redux CHƯA nạp bảng tag → tự gọi GET /pages/{id}/settings (đúng request app gọi
-      // trong _app @331980, trả settings.tags) để lấy đủ bảng tag, tránh mù lọc hoàn toàn cho page đó.
-      const pagesNoDefs = Object.keys(seenPage).filter((pid) => {
-        let defs = defsByPage[pid];
-        if (!Array.isArray(defs) && Array.isArray(defsByPage)) defs = defsByPage;
-        return !(defs || []).some((t) => tagBanName(String((t && (t.text || t.name || t.title || t.label)) || '')));
-      });
+      // Thiếu bảng tag → tự gọi GET /pages/{id}/settings và CHỜ (tối đa 12s) — thà chậm vài giây
+      // còn hơn bắn vào chat đã chốt.
+      const defsPrep = await ensureBanTagDefs(pages, 12000);
+      if (defsPrep.missing.length) {
+        logLine('⚠ Không lấy được bảng tag của page ' + defsPrep.missing.join(', ')
+          + ' — vẫn kiểm tra tag từng dòng (dữ liệu API/DOM), riêng page này KHÔNG có chốt chặn toàn page.');
+        defsPrep.missing.forEach((pid) => banGuard.failedPages.add(String(pid)));
+      }
+      banGuard.tagIds = Object.keys(banGuard.nameById);
+      const banIdList = banGuard.tagIds;
+      if (banIdList.length) {
+        const allNames = banIdList.map((k) => banGuard.nameById[k]).filter((v, i, a) => v && a.indexOf(v) === i);
+        logLine('🛡 Bảng tag: ' + banIdList.length + ' tag cấm ('
+          + allNames.slice(0, 6).map((x) => '"' + x + '"').join(', ') + (allNames.length > 6 ? ' …' : '')
+          + ') · id: ' + banIdList.slice(0, 12).join(', ')
+          + (banIdList.length > 12 ? ' …' : '') + ' — đối chiếu tag của TỪNG chat với danh sách id này.');
+      } else {
+        logLine('⚠ Trang KHÔNG có tag nào tên "chốt"/"chặn" — chỉ còn chốt chặn icon điện thoại.');
+      }
       const tagOf = {}; // convId → TÊN tag cấm mà nó mang (để log cho user soi)
-      // 🚀 BẮN NGAY (v1.75.0): KHÔNG await quét tag nữa — lượt gửi bắt đầu tức thì với 2 lớp lọc
-      // đồng bộ có sẵn (tag trên dòng chat + filledTags/dữ liệu app). Việc tải bảng tag còn thiếu
-      // + quét TOÀN BỘ chat dính tag cấm qua API chạy NỀN: nạp tới đâu, chốt chặn trước từng tin
-      // (sendOneAndLog late-gate, check banGuard.convIds) chặn tới đó + quét lại mỗi 3.000 tin.
-      banGuard.nameById = banNameById;
-      banGuard.tagIds = Array.from(banIds);
-      banGuard.convIds = new Set();
-      const bgBanPrep = (async () => {
-        for (let pi = 0; pi < pagesNoDefs.length; pi++) {
-          try {
-            const pid2 = pagesNoDefs[pi];
-            const sres = await fetchJson(apiBase() + '/v1/pages/' + encodeURIComponent(pid2)
-              + '/settings?access_token=' + encodeURIComponent(getToken() || '')
-              + '&separate_pos=true&separate_qr=true', 2, { timeoutMs: 8000 });
-            const stags = (sres && sres.ok && sres.data && sres.data.settings && sres.data.settings.tags) || [];
-            stags.forEach((t) => {
-              const nm = String((t && (t.text || t.name || t.title || t.label)) || '');
-              if (tagBanName(nm)) {
-                banIds.add(t.id);
-                banNameById[String(t.id)] = nm;
-                if (banNames.indexOf(nm) < 0) banNames.push(nm);
-              }
-            });
-          } catch (e) { /* thiếu bảng tag của 1 page không được làm hỏng lượt gửi */ }
-        }
-        banGuard.nameById = banNameById;
-        banGuard.tagIds = Array.from(banIds);
-        if (!banIds.size) {
-          logLine('⚠ Không có bảng tag của trang — soi tag theo DÒNG CHAT + dữ liệu app (filledTags).');
-          return;
-        }
-        const preview = banNames.slice(0, 3).map((x) => '"' + x + '"').join(', ')
-          + (banNames.length > 3 ? '… +' + (banNames.length - 3) + ' tag' : '');
-        logLine('🔎 Quét nền tag cấm: trang có ' + banNames.length + ' tag cấm (' + preview
-          + ') — đang quét TOÀN BỘ chat dính các tag này qua API (vẫn bắn ngay, chat nào bị phát hiện sẽ bị chặn ở chốt trước từng tin)…');
-        const sweep0 = await sweepBannedConvIds();
-        Object.keys(sweep0.nameOf || {}).forEach((cid) => { tagOf[cid] = sweep0.nameOf[cid]; });
-        logLine('🛡 Đã nạp ' + banGuard.convIds.size + ' chat đang dính tag cấm — từ đây các chat này sẽ bị bỏ qua 100%.');
-      })();
-      bgBanPrep.catch(() => {});
-      // BẰNG CHỨNG ĐỦ 3 LỚP cho từng chat — lớp nào bắt được trước thì dùng, log kèm tên tag:
-      //   1) tag hiển thị TRÊN DÒNG CHAT (DOM) — mắt thấy gì dùng nấy
-      //   2) dữ liệu app: filledTags (app tự map tên) / tags id + bảng tag trang
-      //   3) kết quả tải lại tag theo API (tagOf) — kiểm tra cả khi server lơ tham số lọc
+      // Quét nền: MỖI PAGE 1 lượt lọc theo tag (server tự lọc) — chốt chặn trước từng tin chờ
+      // promise này khi page của chat chưa quét xong.
+      if (banIdList.length) {
+        logLine('🔎 Quét nền tag cấm ' + pages.length + ' page (vẫn bắt đầu lọc/gửi ngay — chat nào chưa '
+          + 'kiểm tra xong thì chốt chặn trước từng tin sẽ chờ, không bắn mù)…');
+        banGuard.ready = (async () => {
+          const sw = await sweepBannedConvIds(pages);
+          if (sw && sw.added) logLine('🛡 Quét tag xong: ' + sw.added + ' chat dính tag cấm (tổng ' + banGuard.convIds.size + ').');
+          else logLine('🛡 Quét tag xong: server không trả về chat nào dính tag cấm trong ' + sw.pages + ' page.');
+          if (banGuard.sweepFilterBroken) {
+            logLine('⚠ Server trả dòng KHÔNG mang tag cấm cho request lọc tag (tham số lọc bị lơ) — '
+              + 'chốt chặn chính vẫn là đối chiếu tag từng chat, sweep chỉ là lớp phụ.');
+          }
+          return sw;
+        })();
+        banGuard.ready.catch(() => {});
+      } else {
+        banGuard.ready = null;
+      }
+      // Chốt đồng bộ từng chat — 4 nguồn, không cần chờ mạng
+      const domBan = domBanTagMap();
+      let unknownTagData = 0;
       targets.forEach((m) => {
+        // list cũ (tạo trước bản này) không lưu `tags` → bù từ redux (app đang giữ tag live)
+        if (!Array.isArray(m.tags)) {
+          let hitR = null;
+          try { hitR = getReduxConvById(m.id, 0) || getReduxConvById(m.id, 1); } catch (e) { /* ignore */ }
+          if (hitR && Array.isArray(hitR.tags)) m.tags = hitR.tags.slice();
+        }
+        if (!Array.isArray(m.tags)) unknownTagData++;
         const why = (banGuard.convIds.has(m.id) ? (tagOf[m.id] || 'tag cấm (API)') : null)
-          || rowBanTagFromDom(m) || convBanTagFromData(m, banNameById) || tagOf[m.id] || null;
+          || domBan[String(m.id)] || rowBanTagFromDom(m)
+          || convBanTagFromData(m, banGuard.nameById) || tagOf[m.id] || null;
         if (why) skippedTag.push({ m: m, why: why });
         else if (convHasPhone(m)) skippedPhone.push(m);
         else kept.push(m);
       });
+      if (unknownTagData > 0) {
+        logLine('⚠ ' + unknownTagData + ' chat KHÔNG có dữ liệu tag trong danh sách (list tạo từ bản cũ) — '
+          + 'vẫn kiểm tra bằng tag đang hiển thị + tag app đang giữ; nên bấm "⚡ Tải danh sách" và tạo lại list '
+          + 'để có dữ liệu tag đầy đủ.');
+      }
     } catch (e) {
       logLine('⚠ Lọc lúc gửi lỗi (' + (e && e.message || e) + ') — giữ nguyên danh sách.');
-      return { kept: targets, skippedTag, skippedPhone };
+      return { kept: targets, skippedTag, skippedPhone, pages, missingTagPages: [] };
     }
-    return { kept, skippedTag, skippedPhone };
+    return { kept, skippedTag, skippedPhone, pages, missingTagPages: Array.from(banGuard.failedPages) };
   }
 
   /* ============================ QUÉT TOÀN BỘ DANH SÁCH ============================ */
@@ -5596,11 +5772,12 @@
 
     const sendOneAndLog = async (c, gtext, itemOpts) => {
       const isDeferredPass = !!(itemOpts && itemOpts.deferredCtx);
-      if (!isDeferredPass) {
+      {
         // CHỐT PHÚT CHÓT — soi lại tag/icon NGAY TRƯỚC khi bắn từng chat: tag cấm có thể vừa
-        // được gắn SAU bước lọc trước, và đây là lớp an toàn cuối cho mọi lỗ dữ liệu
-        const lateBan = (banGuard.convIds.has(c.id) ? 'tag cấm (API)' : null)
-          || rowBanTagFromDom(c) || convBanTagFromData(c, banGuard.nameById);
+        // được gắn SAU bước lọc trước, và đây là lớp an toàn cuối cho mọi lỗ dữ liệu.
+        // v1.82.2: chạy cho MỌI làn gửi. Bản cũ bọc `if (!isDeferredPass)` nên làn chậm
+        // (extBacklogWorkers → deferredCtx) bỏ qua hoàn toàn chốt chặn này.
+        const lateBan = await banGateCheck(c);
         if (lateBan) {
           done++;
           if (window && typeof window.__botfakeTrackStatus__ === 'function') window.__botfakeTrackStatus__(c.id, 'skip');
@@ -6835,6 +7012,8 @@ Click CHUỘT THƯỜNG luôn mở chat bình thường, không phụ thuộc ô
           globalId: m.globalId || (m.customers && m.customers[0] && m.customers[0].global_id) || '',
           customers: Array.isArray(m.customers) ? m.customers : undefined,
           hasPhone: m.hasPhone === true,
+          tags: Array.isArray(m.tags) ? m.tags.slice() : [], // v1.82.2: giữ tag để chốt chặn tag còn dữ liệu
+          recentPhone: m.recentPhone || 0,
         })),
       };
       state.savedLists.push(l);
@@ -7616,6 +7795,8 @@ Click CHUỘT THƯỜNG luôn mở chat bình thường, không phụ thuộc ô
     computeMatches,
     clearSelection,
     getBatchSummaryCounts,
+    // v1.82.2 — soi chốt chặn tag/điện thoại (dùng khi cần kiểm tra vì sao 1 chat bị bỏ qua / lọt)
+    banGuard, convHasPhone, filterBannedTagTargets, banGateCheck, domBanTagMap,
     setTargetByIndex(i) {
       const rows = visibleRows();
       if (rows[i]) setTarget(rows[i], 'debug');
