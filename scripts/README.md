@@ -15,7 +15,7 @@ Phù hợp khi nhiều khách nhắn cùng 1 câu hỏi / cùng 1 tin tự độ
 
 ## Bản LITE (`pancake-send-lite.user.js`, v1.90.0)
 
-Bản **copy riêng**, không đụng file gốc v1.82.10. Gửi **hết** chat đã chọn — **không** lọc tag chốt/chặn, **không** lọc icon điện thoại, **không** xác minh tag lần 2. **Không** có tạo câu / list câu / chọn lại list vừa gửi. Panel thu nhỏ. Vẫn: Alt+Click chọn chuỗi, snippet, ⚡ tải danh sách, gửi chữ/ảnh/câu nhanh.
+Bản **copy riêng**, không đụng file gốc v1.82.10. Gửi **hết** chat đã chọn — **không** lọc tag chốt/chặn, **không** lọc icon điện thoại, **không** xác minh tag lần 2. **Không** có tạo câu / chọn chuỗi / snippet. Panel thu nhỏ. Vẫn: ⚡ tải danh sách, ☑ Chọn tất cả, gửi chữ/ảnh/câu nhanh.
 
 ## Cài đặt
 

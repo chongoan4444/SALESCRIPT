@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE LITE
 // @namespace    salescript
-// @version      1.90.0
+// @version      1.90.1
 // @description  BOTFAKE — chọn chuỗi chat (Alt+Click 2 đầu) hoặc theo snippet trong Pancake rồi gửi cùng 1 câu (kèm 1 hoặc nhiều ảnh nếu muốn) cho tất cả.
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -44,7 +44,7 @@
   /* ============================ HẰNG SỐ ============================ */
 
   const PANEL_ID = 'ssb-root';          // ssb = SaleScript Bulk — không đụng pk-*/adj-*/pancake-* của script khác
-  const APP_VERSION = '1.90.0';        // hiện ở tiêu đề panel — đối chiếu với @version trong header
+  const APP_VERSION = '1.90.1';        // hiện ở tiêu đề panel — đối chiếu với @version trong header
   const STYLE_ID = 'ssb-style';
 
   const MAX_NAME_LIST = 12;             // số tên hiển thị khi xác nhận
@@ -328,10 +328,8 @@
         mark: markOf(r),
       });
     };
-    if (state.mode === 'snippet' && state.target) {
-      sourceRows().forEach((r) => {
-        if (sameSnippet(r.snippetRaw || r.snippet, state.target.snippetRaw || state.target.snippet)) push(r);
-      });
+    if (state.mode === 'all') {
+      sourceRows().forEach((r) => push(r));
     } else if (state.mode === 'range' && state.rangeStart && state.rangeEnd) {
       const aId = state.rangeStart.id, bId = state.rangeEnd.id;
       let rows, idxOf;
@@ -4618,7 +4616,7 @@
     const imgState = state.image || null;
     let targets = state.matches.filter((m) => m.checked);
     if (!targets.length) {
-      alert('Chưa có đoạn chat nào được chọn.\nHãy chọn snippet (nút "Lấy snippet từ chat đang chọn")\nhoặc chọn chuỗi bằng 2 lần Alt+Click (đầu → cuối).');
+      alert('Chưa có đoạn chat nào được chọn.\nHãy bấm ⚡ Tải danh sách rồi ☑ Chọn tất cả.');
       return;
     }
     // loại dòng trùng id — 1 chat chỉ được gửi 1 lần
@@ -5441,10 +5439,9 @@
           </div>
           <div>
             <div class="label">1) Đang chọn</div>
-            <div class="snippet-box" id="ssb-target">Chưa chọn — <b>Alt+Click 2 lần</b> (đầu → cuối chuỗi) hoặc lấy snippet từ chat đang chọn</div>
+            <div class="snippet-box" id="ssb-target">Chưa chọn — bấm ⚡ Tải danh sách rồi <b>Chọn tất cả</b></div>
             <div class="row" style="margin-top:6px">
-              <button class="b b-blue" id="ssb-use-selected">Lấy snippet từ chat đang chọn</button>
-              <button class="b b-gray" id="ssb-pick" title="Bật rồi nhấp 2 lần: dòng ĐẦU → dòng CUỐI (không cần giữ Alt, không mở chat)">Chọn chuỗi (2 nhấp)</button>
+              <button class="b b-blue" id="ssb-selall" title="Chọn toàn bộ chat trong danh sách đã tải">☑ Chọn tất cả</button>
               <button class="b b-gray" id="ssb-to-end">⬇ Từ đây xuống cuối</button>
               <button class="b b-gray" id="ssb-clear">Xóa</button>
             </div>
@@ -5900,16 +5897,23 @@ Click CHUỘT THƯỜNG luôn mở chat bình thường, không phụ thuộc ô
         logLine('📷 Đã dán ảnh từ clipboard: ' + (file.name || 'ảnh'));
       } catch (err) { /* ignore */ }
     });
-    on('ssb-use-selected', 'click', () => {
-      const info = selectedRowInfo();
-      if (!info) { logLine('⚠ Không có chat nào đang được chọn trong danh sách'); render(); return; }
-      setTarget(info, 'chat đang chọn');
-    });
-    on('ssb-pick', 'click', () => {
-      state.pickMode = !state.pickMode;
-      logLine(state.pickMode
-        ? '👉 Chế độ chọn chuỗi: nhấp dòng ĐẦU, rồi nhấp tiếp dòng CUỐI (Esc để hủy)'
-        : 'Đã tắt chế độ chọn chuỗi');
+    on('ssb-selall', 'click', async () => {
+      if (!state.allRows || !state.allRows.size) {
+        logLine('⚡ Chưa tải danh sách — tự tải rồi chọn tất cả…');
+        await scanFullList();
+      }
+      const rows = sourceRows();
+      if (!rows.length) {
+        logLine('⚠ Không có chat nào trong danh sách.');
+        render();
+        return;
+      }
+      state.mode = 'all';
+      state.target = null;
+      state.rangeStart = null;
+      state.rangeEnd = null;
+      computeMatches();
+      logLine('☑ Đã chọn tất cả ' + state.matches.length + ' chat');
       render();
     });
     on('ssb-to-end', 'click', async () => {
@@ -6203,25 +6207,14 @@ Click CHUỘT THƯỜNG luôn mở chat bình thường, không phụ thuộc ô
       } else if (state.mode === 'range' && state.rangeStart) {
         tgt.innerHTML = '🅰 Đã đặt ĐẦU CHUỖI: <b>' + esc(state.rangeStart.name || '?') + '</b> · ' + esc(state.rangeStart.time || '')
           + '<br>Giữ Alt và nhấp tiếp dòng <b>CUỐI chuỗi</b>…';
-      } else if (state.target) {
-        tgt.innerHTML = '🎯 Snippet: <b>' + esc(state.target.name || '?') + '</b> · ' + esc(state.target.time || '') + '<br>'
-          + esc(state.target.snippetRaw || state.target.snippet);
-      } else if (state.mode === 'saved' && state.loadedName) {
-        tgt.innerHTML = '📚 Câu: <b>' + esc(state.loadedName) + '</b><br>' + state.matches.length
-          + ' chat trong câu — sẵn sàng gửi';
+      } else if (state.mode === 'all' && state.matches.length) {
+        tgt.innerHTML = '☑ Đã chọn <b>tất cả</b> — ' + state.matches.length + ' chat';
       } else {
-        tgt.innerHTML = 'Chưa chọn — <b>Alt+Click 2 lần</b> (đầu → cuối chuỗi) hoặc lấy snippet từ chat đang chọn';
+        tgt.innerHTML = 'Chưa chọn — bấm ⚡ Tải danh sách rồi <b>Chọn tất cả</b>';
       }
     }
     const cnt = shadow.getElementById('ssb-count');
     if (cnt) cnt.textContent = String(state.matches.length);
-
-    // Nút "Chọn chuỗi (2 nhấp)": hiện rõ đang BẬT để người dùng biết nhấp dòng là chọn, không mở chat
-    const pickBtn = shadow.getElementById('ssb-pick');
-    if (pickBtn) {
-      pickBtn.textContent = state.pickMode ? '✅ Đang chọn chuỗi (nhấp đầu → cuối)' : 'Chọn chuỗi (2 nhấp)';
-      pickBtn.className = 'b ' + (state.pickMode ? 'b-green' : 'b-gray');
-    }
 
     const list = shadow.getElementById('ssb-list');
     if (list) {
@@ -6551,7 +6544,7 @@ Click CHUỘT THƯỜNG luôn mở chat bình thường, không phụ thuộc ô
 
   function init() {
     buildPanel();
-    logLine('Sẵn sàng. Alt+Click 2 lần (đầu → cuối chuỗi) để chọn chuỗi chat, hoặc dùng nút lấy snippet.');
+    logLine('Sẵn sàng. Bấm ⚡ Tải danh sách rồi ☑ Chọn tất cả.');
     logLine('🖱 Alt+Click / Ctrl+Click / "Chọn chuỗi (2 nhấp)" chỉ CHỌN — đã chặn app tự mở chat.');
   }
 
