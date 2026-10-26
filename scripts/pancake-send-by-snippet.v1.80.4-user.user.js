@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE
 // @namespace    salescript
-// @version      1.82.6
+// @version      1.82.7
 // @description  BOTFAKE — chọn chuỗi chat (Alt+Click 2 đầu) hoặc theo snippet trong Pancake rồi gửi cùng 1 câu (kèm 1 hoặc nhiều ảnh nếu muốn) cho tất cả.
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -44,7 +44,7 @@
   /* ============================ HẰNG SỐ ============================ */
 
   const PANEL_ID = 'ssb-root';          // ssb = SaleScript Bulk — không đụng pk-*/adj-*/pancake-* của script khác
-  const APP_VERSION = '1.82.6';        // hiện ở tiêu đề panel — đối chiếu với @version trong header
+  const APP_VERSION = '1.82.7';        // hiện ở tiêu đề panel — đối chiếu với @version trong header
   const STYLE_ID = 'ssb-style';
 
   const MAX_NAME_LIST = 12;             // số tên hiển thị khi xác nhận
@@ -2090,6 +2090,55 @@
   const GUARD_FRESH_MS = 120000;      // vừa đồng bộ xong <2 phút → dùng lại (bấm gửi 2 list liền nhau)
   const GUARD_MID_MS = 15 * 60000;    // lượt gửi dài: đồng bộ lại sau mỗi 15 phút
 
+  // v1.82.7 — đọc TRỰC TIẾP list Pancake trong RAM (Redux), KHÔNG đụng DOM / không cuộn.
+  // Nguồn (_app): conversations.data + filteredConversationsCloneList + pinned.
+  // Mỗi phần tử cùng shape API list (tags, has_phone, recent_phone_numbers) — loaddanhsach.har.
+  // Virtual list trên màn hình chỉ vẽ ~12 dòng (html3.txt) nên KHÔNG dùng DOM cho lô dài.
+  function collectReduxLiveRows() {
+    const map = new Map();
+    try {
+      const st = window.__pancakeReduxStore__ && window.__pancakeReduxStore__.getState();
+      const cs = st && st.conversations;
+      if (!cs) return map;
+      const bags = [cs.data, cs.filteredConversationsCloneList, cs.pinned];
+      for (let b = 0; b < bags.length; b++) {
+        const arr = bags[b];
+        if (!Array.isArray(arr)) continue;
+        for (let i = 0; i < arr.length; i++) {
+          const c = arr[i];
+          if (!c || c.id === undefined || c.id === null) continue;
+          const id = String(c.id);
+          if (!id || map.has(id)) continue;
+          map.set(id, convApiRow(c, map.size));
+        }
+      }
+    } catch (e) { /* store chưa sẵn */ }
+    return map;
+  }
+
+  function applyGuardRowToTarget(m, f, stats) {
+    if (!m || !f) return;
+    stats.updated++;
+    if (Array.isArray(f.tags)) {
+      const had = (m.tags || []).map(String).sort().join(',');
+      m.tags = f.tags.slice();
+      if (had && had !== m.tags.map(String).sort().join(',')) stats.tagNew++;
+    }
+    if (f.pageId) m.pageId = f.pageId;
+    if (f.hasPhone === true && m.hasPhone !== true) { m.hasPhone = true; stats.phone++; }
+    if (f.recentPhone) {
+      m.recentPhone = f.recentPhone;
+      if (m.hasPhone !== true) { m.hasPhone = true; stats.phone++; }
+    }
+    if (banGuard.nameById && Array.isArray(f.tags)) {
+      const hit = f.tags.map(String).find((t) => banGuard.nameById[t]);
+      if (hit) {
+        stats.tagged++;
+        if (!banGuard.convIds.has(m.id)) banGuard.convIds.add(m.id);
+      }
+    }
+  }
+
   async function refreshGuardRows(targets, opts) {
     const silent = !!(opts && opts.silent);
     if (guardRefresh.running) return { ok: false, busy: true };
@@ -2103,74 +2152,74 @@
     const prevStop = state.scanStopRequested;
     state.scanStopRequested = false;
     try {
-      // v1.82.4 — BỎ GIỚI HẠN maxPages (trước là 300 trang ≈ 12.000 chat): lô 30.000 chat bị
-      // cắt CÒN 18.000 chat không được đọc lại ⇒ chat vừa "chốt"/"chặn"/có ĐT vẫn bị gửi.
-      // Nay dùng đúng đường tải NHANH của nút "⚡ Tải danh sách" (đa luồng theo page + cursor),
-      // đọc TRỌN danh sách; chỉ dừng nếu quá thời gian.
+      // v1.82.7 — Redux Pancake trước (0ms, không cuộn DOM). API list chỉ BÙ id chưa có trong store.
+      const map = collectReduxLiveRows();
+      let fromRedux = 0;
+      (targets || []).forEach((m) => {
+        if (m && m.id && map.has(String(m.id))) fromRedux++;
+      });
+      const nTarget = (targets || []).filter((m) => m && m.id).length;
+      const needApi = fromRedux < nTarget;
+      let res = { ok: true, incomplete: false };
       const loadFresh = (extra) => Promise.race([
         loadListViaApi(null, Object.assign({}, extra || {})),
         sleep(180000).then(() => ({ ok: false, error: 'quá 180s' })),
       ]);
-      const res = await loadFresh(null);
-      if (!res || !res.ok) {
-        guardRefresh.lastErr = (res && res.error) || 'lỗi';
-        // v1.82.4 — không đọc được API ⇒ KHÔNG chat nào được xác minh ⇒ đánh dấu TẤT CẢ là
-        // chưa xác minh để lớp lọc bỏ qua (an toàn) thay vì gửi khi chưa biết tag/ĐT.
-        guardRefresh.unverified = (targets || []).slice();
-        if (!silent) logLine('⚠ Không đọc lại được danh sách chat từ API (' + guardRefresh.lastErr
-          + ') — KHÔNG xác minh được tag/số điện thoại hiện tại ⇒ các chat này sẽ KHÔNG được gửi.');
-        return { ok: false, error: guardRefresh.lastErr, unverified: guardRefresh.unverified };
-      }
-      const map = new Map();
-      (res.rows || []).forEach((r) => { if (r && r.id) map.set(String(r.id), r); });
-      // Chat trong list không còn thấy ở lượt đọc theo bộ lọc của app (app đang lọc tag/người phụ
-      // trách…) → đọc lại 1 lượt với tags="ALL" để không bỏ sót chat vừa được gắn tag "chốt".
-      const miss0 = (targets || []).filter((m) => m && m.id && !map.has(String(m.id))).length;
-      if (miss0 > 0) {
-        const res2 = await loadFresh({ forceAllTags: true });
-        if (res2 && res2.ok) (res2.rows || []).forEach((r) => { if (r && r.id && !map.has(String(r.id))) map.set(String(r.id), r); });
+      if (needApi) {
+        res = await loadFresh(null);
+        if (res && res.ok) {
+          (res.rows || []).forEach((r) => {
+            if (r && r.id && !map.has(String(r.id))) map.set(String(r.id), r);
+          });
+        }
+        const miss0 = (targets || []).filter((m) => m && m.id && !map.has(String(m.id))).length;
+        if (miss0 > 0) {
+          const res2 = await loadFresh({ forceAllTags: true });
+          if (res2 && res2.ok) {
+            (res2.rows || []).forEach((r) => {
+              if (r && r.id && !map.has(String(r.id))) map.set(String(r.id), r);
+            });
+          }
+        }
+        if ((!res || !res.ok) && fromRedux === 0) {
+          guardRefresh.lastErr = (res && res.error) || 'lỗi';
+          guardRefresh.unverified = (targets || []).slice();
+          if (!silent) logLine('⚠ Không đọc được list Pancake (Redux trống + API lỗi: ' + guardRefresh.lastErr
+            + ') — KHÔNG xác minh được tag/số điện thoại ⇒ các chat này sẽ KHÔNG được gửi.');
+          return { ok: false, error: guardRefresh.lastErr, unverified: guardRefresh.unverified };
+        }
+        if (!res || !res.ok) {
+          if (!silent) logLine('⚠ API list lỗi (' + ((res && res.error) || 'lỗi')
+            + ') — vẫn dùng ' + fromRedux + ' chat có sẵn trong Redux Pancake; chat không có trong store sẽ không gửi.');
+        }
       }
       guardRefresh.map = map;
       guardRefresh.at = Date.now();
-      guardRefresh.lastErr = '';   // đọc được rồi → xoá lỗi cũ (gate từng tin không còn chặn oan)
-      let updated = 0, missing = 0, tagged = 0, phone = 0, tagNew = 0;
+      guardRefresh.lastErr = '';
+      const stats = { updated: 0, tagged: 0, phone: 0, tagNew: 0 };
+      let missing = 0;
       const unverified = [];
       (targets || []).forEach((m) => {
         if (!m || !m.id) return;
         const f = map.get(String(m.id));
         if (!f) { missing++; unverified.push(m); return; }
-        updated++;
-        // tags: dữ liệu API mới là CHUẨN (tag có thể vừa được gắn / vừa được gỡ)
-        if (Array.isArray(f.tags)) {
-          const had = (m.tags || []).map(String).sort().join(',');
-          m.tags = f.tags.slice();
-          if (had && had !== m.tags.map(String).sort().join(',')) tagNew++;
-        }
-        if (f.pageId) m.pageId = f.pageId;
-        // số điện thoại: chỉ NÂNG lên true (không hạ true cũ xuống — an toàn khi dữ liệu thiếu)
-        if (f.hasPhone === true && m.hasPhone !== true) { m.hasPhone = true; phone++; }
-        if (f.recentPhone) {
-          m.recentPhone = f.recentPhone;
-          if (m.hasPhone !== true) { m.hasPhone = true; phone++; }
-        }
-        // dòng mới dính tag cấm → nạp thẳng vào tập chặn (lớp chắc nhất, không cần sweep)
-        if (banGuard.nameById && Array.isArray(f.tags)) {
-          const hit = f.tags.map(String).find((t) => banGuard.nameById[t]);
-          if (hit) {
-            tagged++;
-            if (!banGuard.convIds.has(m.id)) banGuard.convIds.add(m.id);
-          }
-        }
+        applyGuardRowToTarget(m, f, stats);
       });
       if (!silent) {
-        logLine('🔄 Đã đọc lại ' + map.size + ' chat từ API · cập nhật ' + updated + '/' + (targets || []).length
-          + ' chat trong list' + (tagNew ? ' · ' + tagNew + ' chat ĐỔI TAG so với lúc tạo list' : '')
-          + (tagged ? ' · ' + tagged + ' chat đang dính tag cấm' : '')
-          + (phone ? ' · ' + phone + ' chat có số điện thoại' : '')
-          + (missing ? ' · ' + missing + ' chat KHÔNG thấy trong API (giữ dữ liệu cũ + kiểm tra từng tin)' : ''));
+        logLine('🔄 Xác minh tag/ĐT: ' + stats.updated + '/' + nTarget + ' chat'
+          + ' · Redux Pancake: ' + fromRedux + '/' + nTarget + ' (0ms, không cuộn màn hình)'
+          + (needApi ? ' · API bù phần thiếu' : ' · đủ trong store — không gọi API list')
+          + (stats.tagNew ? ' · ' + stats.tagNew + ' chat ĐỔI TAG' : '')
+          + (stats.tagged ? ' · ' + stats.tagged + ' chat dính tag cấm' : '')
+          + (stats.phone ? ' · ' + stats.phone + ' chat có số ĐT' : '')
+          + (missing ? ' · ' + missing + ' chat không thấy (không gửi)' : ''));
       }
       guardRefresh.unverified = unverified;
-      return { ok: true, updated, total: (targets || []).length, missing, tagged, phone, tagNew, rows: map.size, incomplete: !!res.incomplete, unverified };
+      return {
+        ok: true, updated: stats.updated, total: nTarget, missing,
+        tagged: stats.tagged, phone: stats.phone, tagNew: stats.tagNew,
+        rows: map.size, incomplete: !!(res && res.incomplete), unverified, fromRedux,
+      };
     } catch (e) {
       guardRefresh.lastErr = String((e && e.message) || e);
       return { ok: false, error: guardRefresh.lastErr };
@@ -2261,8 +2310,8 @@
       // 🔄 ĐỒNG BỘ MỚI NHẤT trước khi lọc: list câu giữ ảnh chụp tags/has_phone lúc TẠO, mà bạn
       // gửi cùng 1 list nhiều lượt cách nhau ~30 phút → trong khoảng đó khách có thể đã "chốt"/
       // "chặn" hoặc đã có số điện thoại. Đọc lại từ API để chốt chặn xét tag HIỆN TẠI.
-      logLine('🔄 Đang đọc lại danh sách chat từ API để lấy tag/số điện thoại MỚI NHẤT ('
-        + targets.length + ' chat trong list — dữ liệu lúc tạo list có thể đã cũ)…');
+      logLine('🔄 Đang xác minh tag/ĐT từ list Pancake (Redux trước, API chỉ bù chỗ thiếu — không cuộn màn hình) · '
+        + targets.length + ' chat…');
       await refreshGuardRows(targets, { force: true });
       const tagOf = {}; // convId → TÊN tag cấm mà nó mang (để log cho user soi)
       // Quét nền: MỖI PAGE 1 lượt lọc theo tag (server tự lọc) — chốt chặn trước từng tin chờ
