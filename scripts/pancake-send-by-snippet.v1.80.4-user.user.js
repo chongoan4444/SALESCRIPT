@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE
 // @namespace    salescript
-// @version      1.82.7
+// @version      1.82.8
 // @description  BOTFAKE — chọn chuỗi chat (Alt+Click 2 đầu) hoặc theo snippet trong Pancake rồi gửi cùng 1 câu (kèm 1 hoặc nhiều ảnh nếu muốn) cho tất cả.
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -44,7 +44,7 @@
   /* ============================ HẰNG SỐ ============================ */
 
   const PANEL_ID = 'ssb-root';          // ssb = SaleScript Bulk — không đụng pk-*/adj-*/pancake-* của script khác
-  const APP_VERSION = '1.82.7';        // hiện ở tiêu đề panel — đối chiếu với @version trong header
+  const APP_VERSION = '1.82.8';        // hiện ở tiêu đề panel — đối chiếu với @version trong header
   const STYLE_ID = 'ssb-style';
 
   const MAX_NAME_LIST = 12;             // số tên hiển thị khi xác nhận
@@ -2415,10 +2415,23 @@
       render();
 
       // 1) TẢI ĐA LUỒNG QUA API — siêu nhanh, không cuộn, cập nhật live từng chặng
-      logLine('⚡ Đã xóa danh sách cũ — đang tải lại danh sách mới đa luồng qua API (bấm nút lần nữa nếu muốn dừng & dùng ngay)…');
-      setBtn('⏹ Dừng tải (0 chat)');
+      // v1.82.8 — mồi 0ms từ Redux Pancake (data + clone list + pinned). Store chỉ có chat
+      // app ĐÃ nạp; không thay được API cho list 5k–30k chưa load. Không cuộn DOM ở bước này.
+      const rdxSeed = collectReduxLiveRows();
       let lastLiveSync = 0;
       let lastSyncedLen = 0;
+      if (rdxSeed.size) {
+        const seedMap = new Map();
+        let ord0 = 0;
+        rdxSeed.forEach((r) => { r.order = ord0++; seedMap.set(r.id, r); });
+        state.allRows = seedMap;
+        lastSyncedLen = seedMap.size;
+        setBtn('⏹ Dừng tải (' + seedMap.size + ' chat)');
+        logLine('⚡ Đã lấy ' + seedMap.size + ' chat từ list Pancake trong RAM (Redux, 0ms, không cuộn) — đang tải API để đủ và đúng thứ tự…');
+      } else {
+        logLine('⚡ Đã xóa danh sách cũ — đang tải lại danh sách mới đa luồng qua API (bấm nút lần nữa nếu muốn dừng & dùng ngay)…');
+        setBtn('⏹ Dừng tải (0 chat)');
+      }
       const syncLiveRows = (rowsArr) => {
         if (!Array.isArray(rowsArr) || !rowsArr.length) return;
         const now = Date.now();
@@ -2502,12 +2515,42 @@
           render();
           return;
         }
-        logLine('⚠ Danh sách API không khớp màn hình (có thể đang bật bộ lọc) — chuyển sang quét giao diện…');
+        logLine('⚠ Danh sách API không khớp màn hình (có thể đang bật bộ lọc) — thử list RAM rồi mới quét giao diện…');
       } else {
-        logLine('⚠ ' + ((api && api.error) || 'Tải API thất bại') + ' — chuyển sang quét giao diện…');
+        logLine('⚠ ' + ((api && api.error) || 'Tải API thất bại') + ' — thử list RAM rồi mới quét giao diện…');
       }
 
-      // 2) QUÉT GIAO DIỆN (dự phòng tốc độ cao) — luôn khớp đúng những gì đang thấy trên màn hình
+      // 1b) API hỏng/lệch — dùng Redux nếu đủ các dòng đang thấy (không cuộn). Store thiếu → mới quét DOM.
+      {
+        const vis0 = visibleRows();
+        const rdxUse = (rdxSeed && rdxSeed.size) ? rdxSeed : collectReduxLiveRows();
+        let visMiss = 0;
+        for (let i = 0; i < vis0.length; i++) {
+          if (!rdxUse.has(vis0[i].id)) visMiss++;
+        }
+        if (rdxUse.size && visMiss === 0) {
+          const foundR = new Map();
+          let ordR = 0;
+          rdxUse.forEach((r) => { r.order = ordR++; foundR.set(r.id, r); });
+          vis0.forEach((r) => {
+            if (foundR.has(r.id)) foundR.set(r.id, { ...foundR.get(r.id), ...r });
+          });
+          state.allRows = foundR;
+          state.listIncomplete = false;
+          setBtn('⚡ Tải danh sách (' + foundR.size + ' chat)');
+          logLine('⚡ Dùng list Pancake trong RAM: ' + foundR.size + ' chat (khớp ' + vis0.length
+            + ' dòng đang thấy — không cuộn). Nếu thiếu chat phía dưới, để app tải thêm rồi bấm ⚡ lại.');
+          computeMatches();
+          render();
+          return;
+        }
+        if (rdxUse.size) {
+          logLine('⚠ Redux có ' + rdxUse.size + ' chat nhưng thiếu ' + visMiss
+            + '/' + vis0.length + ' dòng đang thấy — chuyển sang quét giao diện.');
+        }
+      }
+
+      // 2) QUÉT GIAO DIỆN (dự phòng cuối) — luôn khớp đúng những gì đang thấy trên màn hình
       const savedTop = scroller.scrollTop;
       const found = new Map();
       let guard = 0;
