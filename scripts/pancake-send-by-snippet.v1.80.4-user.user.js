@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE
 // @namespace    salescript
-// @version      1.82.4
+// @version      1.82.5
 // @description  BOTFAKE — chọn chuỗi chat (Alt+Click 2 đầu) hoặc theo snippet trong Pancake rồi gửi cùng 1 câu (kèm 1 hoặc nhiều ảnh nếu muốn) cho tất cả.
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -44,7 +44,7 @@
   /* ============================ HẰNG SỐ ============================ */
 
   const PANEL_ID = 'ssb-root';          // ssb = SaleScript Bulk — không đụng pk-*/adj-*/pancake-* của script khác
-  const APP_VERSION = '1.82.4';        // hiện ở tiêu đề panel — đối chiếu với @version trong header
+  const APP_VERSION = '1.82.5';        // hiện ở tiêu đề panel — đối chiếu với @version trong header
   const STYLE_ID = 'ssb-style';
 
   const MAX_NAME_LIST = 12;             // số tên hiển thị khi xác nhận
@@ -4775,6 +4775,13 @@
   // không thử kênh khác, không gửi thêm. Lỗi là lỗi — báo trong log, không gửi lại, không kiểm tra lại.
   async function sendOne(conv, text, photo, opts) {
     opts = opts || {};
+    // v1.82.5 — 1 chat chỉ được bắn 1 lần/lượt: đã đến nơi hoặc Socket đang chờ ACK thì KHÔNG bắn thêm
+    if (conv && conv.id && deliveredIds[conv.id]) {
+      return { ok: true, id: '', sendBy: deliveredIds[conv.id], sent: true };
+    }
+    if (conv && conv.id && sockFiredPending.has(conv.id)) {
+      return { ok: true, id: '', sendBy: 'socket', sent: true, fired: true };
+    }
     // ⚡ CHẾ ĐỘ NHANH — ĐÚNG PLAN CỦA APP (_app @936800, @945200):
     //   • TEXT hoặc ẢNH ngoài cửa sổ 24h + !dr(): đi thẳng Extension ⇄ Socket trước (bắn API trước
     //     100% bị FB từ chối (#551)/(#10)). Việc chọn ưu tiên Socket hay Extension được quyết định ĐỘNG
@@ -5376,6 +5383,7 @@
   let buRetrySeq = 0;
   let runSeq = 0; // mỗi lượt gửi 1 số — bù của lượt cũ tự hủy khi có lượt mới (chống gửi lẫn/lặp)
   const deliveredIds = {}; // convId → ĐÃ có kênh báo thành công trong lượt này ('api'|'ext'|'socket') — tuyệt đối không gửi lại
+  const claimedSendIds = {}; // convId → đã nhận quyền bắn trong lượt này (chống 2 worker / 2 câu cùng 1 chat)
   const finalFailedIds = {}; // convId → đã thất bại hẳn (hết kênh hoặc khách khóa nick)
   const uncertainIds = {};   // convId → không rõ kết quả ('maybe')
   const skippedLateIds = {}; // convId → bỏ qua lúc gửi (tag cấm / icon điện thoại vừa gắn)
@@ -5695,6 +5703,7 @@
     buRetrySeq = 0;
     Object.keys(buRetryDone).forEach((k) => { delete buRetryDone[k]; });
     Object.keys(deliveredIds).forEach((k) => { delete deliveredIds[k]; });
+    Object.keys(claimedSendIds).forEach((k) => { delete claimedSendIds[k]; });
     sockFiredPending.clear();
     Object.keys(finalFailedIds).forEach((k) => { delete finalFailedIds[k]; });
     Object.keys(uncertainIds).forEach((k) => { delete uncertainIds[k]; });
@@ -5849,6 +5858,23 @@
     const WAVE_GAP = isNaN(gapRaw) ? 0 : Math.max(0, Math.min(60000, gapRaw));
     // gửi theo từng nhóm nội dung (câu khác câu → chữ khác chữ)
     sendGroups = buildSendGroups(targets, state.savedLists, typedText);
+    // v1.82.5 — cùng 1 chat chỉ nằm 1 nhóm: nếu 2 câu cùng chứa 1 chat thì giữ lần đầu, không bắn 2 lần.
+    {
+      const seenG = new Set();
+      let nDupG = 0;
+      sendGroups.forEach((g) => {
+        const keep = [];
+        (g.list || []).forEach((m) => {
+          if (!m || !m.id) return;
+          if (seenG.has(m.id)) { nDupG++; return; }
+          seenG.add(m.id);
+          keep.push(m);
+        });
+        g.list = keep;
+      });
+      sendGroups = sendGroups.filter((g) => g.list && g.list.length);
+      if (nDupG) logLine('⚠ Loại ' + nDupG + ' chat trùng giữa các câu — mỗi đoạn chat chỉ gửi 1 lần trong lượt.');
+    }
     if (!imgState && !photo) {
       const emptyGs = sendGroups.filter((g) => !g.text.trim());
       if (emptyGs.length) {
@@ -5908,6 +5934,16 @@
 
     const sendOneAndLog = async (c, gtext, itemOpts) => {
       const isDeferredPass = !!(itemOpts && itemOpts.deferredCtx);
+      // v1.82.5 — khóa cứng 1 chat = 1 lần bắn trong lượt.
+      // Làn chậm (deferredCtx) là TIẾP TỤC cùng 1 lần đã khóa ở làn nhanh → được vào.
+      // Worker thứ 2 / câu thứ 2 cùng id → bỏ, không bắn thêm (chống gửi 2 lần).
+      if (c && c.id && deliveredIds[c.id]) {
+        return { ok: true, skippedDup: true, sent: true, sendBy: deliveredIds[c.id] };
+      }
+      if (c && c.id && claimedSendIds[c.id] && !isDeferredPass) {
+        return { ok: true, skippedDup: true, sent: true };
+      }
+      if (c && c.id) claimedSendIds[c.id] = 1;
       {
         // CHỐT PHÚT CHÓT — soi lại tag/icon NGAY TRƯỚC khi bắn từng chat: tag cấm có thể vừa
         // được gắn SAU bước lọc trước, và đây là lớp an toàn cuối cho mọi lỗ dữ liệu.
