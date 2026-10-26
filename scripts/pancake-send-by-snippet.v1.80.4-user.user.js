@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE
 // @namespace    salescript
-// @version      1.82.3
+// @version      1.82.4
 // @description  BOTFAKE — chọn chuỗi chat (Alt+Click 2 đầu) hoặc theo snippet trong Pancake rồi gửi cùng 1 câu (kèm 1 hoặc nhiều ảnh nếu muốn) cho tất cả.
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -44,7 +44,7 @@
   /* ============================ HẰNG SỐ ============================ */
 
   const PANEL_ID = 'ssb-root';          // ssb = SaleScript Bulk — không đụng pk-*/adj-*/pancake-* của script khác
-  const APP_VERSION = '1.82.3';        // hiện ở tiêu đề panel — đối chiếu với @version trong header
+  const APP_VERSION = '1.82.4';        // hiện ở tiêu đề panel — đối chiếu với @version trong header
   const STYLE_ID = 'ssb-style';
 
   const MAX_NAME_LIST = 12;             // số tên hiển thị khi xác nhận
@@ -1999,13 +1999,19 @@
     let added = 0, suspect = 0;
     const nameOf = {};
     const rows = res.rows || [];
+    // v1.82.4 — dòng KHÔNG có tag: KHÔNG tự động coi là dính tag cấm nữa.
+    // Lý do: loaddanhsach.har cho thấy request lọc tags=[…] trả về dòng LUÔN có tag khác
+    // (tagsRỗng=0) ⇒ server KHÔNG lọc và KHÔNG xoá tag; dòng tags=[] chỉ xuất hiện ở
+    // request tags="ALL" (≈0,2% chat sạch) ⇒ quy tắc cũ chặn oan chat sạch.
+    // Nay: dòng có tag cấm → chặn; dòng có tag khác → "suspect" (server lơ tham số lọc,
+    // cảnh báo + lớp đối chiếu từng dòng là lớp quyết định); dòng không tag → coi như sạch.
     rows.forEach((r) => {
       if (!r || !r.id) return;
       const hit = (r.tags || []).map(String).find((t) => banTagNameById(t));
       if (hit) nameOf[r.id] = banTagNameById(hit);
-      if (hit || !(r.tags || []).length) {
+      if (hit) {
         if (!banGuard.convIds.has(r.id)) { banGuard.convIds.add(r.id); added++; }
-      } else suspect++; // dòng KHÔNG mang tag cấm → server đã lơ tham số lọc
+      } else if ((r.tags || []).length) suspect++; // dòng KHÔNG mang tag cấm → server đã lơ tham số lọc
     });
     if (suspect > 0) banGuard.sweepFilterBroken = true;
     banGuard.sweptPages.add(key);
@@ -2091,21 +2097,29 @@
       return { ok: true, cached: true, updated: 0, total: 0, missing: 0, tagged: 0, phone: 0 };
     }
     guardRefresh.running = true;
+    guardRefresh.unverified = [];
     // cờ "dừng tải" của nút ⚡ có thể còn true từ lần trước → loadListViaApi() sẽ thoát ngay.
     // Tạm hạ xuống false trong lúc tự đồng bộ rồi trả lại như cũ.
     const prevStop = state.scanStopRequested;
     state.scanStopRequested = false;
     try {
+      // v1.82.4 — BỎ GIỚI HẠN maxPages (trước là 300 trang ≈ 12.000 chat): lô 30.000 chat bị
+      // cắt CÒN 18.000 chat không được đọc lại ⇒ chat vừa "chốt"/"chặn"/có ĐT vẫn bị gửi.
+      // Nay dùng đúng đường tải NHANH của nút "⚡ Tải danh sách" (đa luồng theo page + cursor),
+      // đọc TRỌN danh sách; chỉ dừng nếu quá thời gian.
       const loadFresh = (extra) => Promise.race([
-        loadListViaApi(null, Object.assign({ maxPages: 300 }, extra || {})),
-        sleep(90000).then(() => ({ ok: false, error: 'quá 90s' })),
+        loadListViaApi(null, Object.assign({}, extra || {})),
+        sleep(180000).then(() => ({ ok: false, error: 'quá 180s' })),
       ]);
       const res = await loadFresh(null);
       if (!res || !res.ok) {
         guardRefresh.lastErr = (res && res.error) || 'lỗi';
+        // v1.82.4 — không đọc được API ⇒ KHÔNG chat nào được xác minh ⇒ đánh dấu TẤT CẢ là
+        // chưa xác minh để lớp lọc bỏ qua (an toàn) thay vì gửi khi chưa biết tag/ĐT.
+        guardRefresh.unverified = (targets || []).slice();
         if (!silent) logLine('⚠ Không đọc lại được danh sách chat từ API (' + guardRefresh.lastErr
-          + ') — vẫn kiểm tra bằng tag đang hiển thị/app + quét theo tag cấm.');
-        return { ok: false, error: guardRefresh.lastErr };
+          + ') — KHÔNG xác minh được tag/số điện thoại hiện tại ⇒ các chat này sẽ KHÔNG được gửi.');
+        return { ok: false, error: guardRefresh.lastErr, unverified: guardRefresh.unverified };
       }
       const map = new Map();
       (res.rows || []).forEach((r) => { if (r && r.id) map.set(String(r.id), r); });
@@ -2118,11 +2132,13 @@
       }
       guardRefresh.map = map;
       guardRefresh.at = Date.now();
+      guardRefresh.lastErr = '';   // đọc được rồi → xoá lỗi cũ (gate từng tin không còn chặn oan)
       let updated = 0, missing = 0, tagged = 0, phone = 0, tagNew = 0;
+      const unverified = [];
       (targets || []).forEach((m) => {
         if (!m || !m.id) return;
         const f = map.get(String(m.id));
-        if (!f) { missing++; return; }
+        if (!f) { missing++; unverified.push(m); return; }
         updated++;
         // tags: dữ liệu API mới là CHUẨN (tag có thể vừa được gắn / vừa được gỡ)
         if (Array.isArray(f.tags)) {
@@ -2153,7 +2169,8 @@
           + (phone ? ' · ' + phone + ' chat có số điện thoại' : '')
           + (missing ? ' · ' + missing + ' chat KHÔNG thấy trong API (giữ dữ liệu cũ + kiểm tra từng tin)' : ''));
       }
-      return { ok: true, updated, total: (targets || []).length, missing, tagged, phone, tagNew, rows: map.size, incomplete: !!res.incomplete };
+      guardRefresh.unverified = unverified;
+      return { ok: true, updated, total: (targets || []).length, missing, tagged, phone, tagNew, rows: map.size, incomplete: !!res.incomplete, unverified };
     } catch (e) {
       guardRefresh.lastErr = String((e && e.message) || e);
       return { ok: false, error: guardRefresh.lastErr };
@@ -2161,6 +2178,11 @@
   }
   async function banGateCheck(c) {
     const pid = c.pageId || String(c.id || '').split('_')[0];
+    // v1.82.4 — lần đồng bộ gần nhất KHÔNG thành công ⇒ không xác minh được tag/ĐT hiện tại
+    // ⇒ chặn (an toàn) thay vì gửi khi chưa biết chat có "chốt"/"chặn"/icon ĐT hay không.
+    // CHỈ chặn khi lượt gửi này CHƯA từng đồng bộ thành công (guardRefresh.at rỗng) — đồng bộ
+    // giữa lượt hỏng thì vẫn dùng dữ liệu đã xác minh lúc đầu lượt, không giết cả lô.
+    if (guardRefresh.lastErr && !guardRefresh.at) return 'chưa xác minh được tag/ĐT (API lỗi)';
     const quick = () => (banGuard.convIds.has(c.id) ? 'tag cấm (API)' : null)
       || domBanTagMap()[String(c.id)] || rowBanTagFromDom(c) || convBanTagFromData(c, banGuard.nameById);
     const hit0 = quick();
@@ -2187,7 +2209,7 @@
   //   3) Icon điện thoại: OR mọi nguồn (DOM / has_phone / recent_phone_numbers / dữ liệu dòng).
   // Trả { kept, skippedTag, skippedPhone, pages, missingTagPages }.
   async function filterBannedTagTargets(targets) {
-    const kept = [], skippedTag = [], skippedPhone = [];
+    const kept = [], skippedTag = [], skippedPhone = [], skippedUnverified = [];
     const pages = [];
     (targets || []).forEach((m) => {
       const pid = m.pageId || String(m.id || '').split('_')[0];
@@ -2265,6 +2287,10 @@
       // Chốt đồng bộ từng chat — 4 nguồn, không cần chờ mạng
       const domBan = domBanTagMap();
       let unknownTagData = 0;
+      // v1.82.4 — FAIL-SAFE: chat KHÔNG đọc lại được từ API (API lỗi/giới hạn/trang bị lỗi)
+      // thì KHÔNG được gửi khi chưa xác minh được tag/ĐT hiện tại — nếu không sẽ lỡ gửi vào
+      // chat vừa được gắn "chốt"/"chặn" hoặc vừa có icon điện thoại.
+      const unverSet = new Set((guardRefresh.unverified || []).map((x) => String(x.id)));
       targets.forEach((m) => {
         // list cũ (tạo trước bản này) không lưu `tags` → bù từ redux (app đang giữ tag live)
         if (!Array.isArray(m.tags)) {
@@ -2278,8 +2304,15 @@
           || convBanTagFromData(m, banGuard.nameById) || tagOf[m.id] || null;
         if (why) skippedTag.push({ m: m, why: why });
         else if (convHasPhone(m)) skippedPhone.push(m);
+        else if (unverSet.has(String(m.id))) skippedUnverified.push(m); // chưa xác minh được → KHÔNG gửi
         else kept.push(m);
       });
+      if (skippedUnverified.length) {
+        logLine('🛑 BỎ QUA ' + skippedUnverified.length + ' chat KHÔNG đọc lại được từ API (không xác minh được '
+          + 'tag/điện thoại hiện tại) — an toàn hơn là gửi mù: '
+          + skippedUnverified.slice(0, 8).map((x) => (x.name || x.id)).join(', ')
+          + (skippedUnverified.length > 8 ? ', …' : ''));
+      }
       if (unknownTagData > 0) {
         logLine('⚠ ' + unknownTagData + ' chat KHÔNG có dữ liệu tag trong danh sách (list tạo từ bản cũ) — '
           + 'vẫn kiểm tra bằng tag đang hiển thị + tag app đang giữ; nên bấm "⚡ Tải danh sách" và tạo lại list '
@@ -2287,9 +2320,9 @@
       }
     } catch (e) {
       logLine('⚠ Lọc lúc gửi lỗi (' + (e && e.message || e) + ') — giữ nguyên danh sách.');
-      return { kept: targets, skippedTag, skippedPhone, pages, missingTagPages: [] };
+      return { kept: targets, skippedTag, skippedPhone, pages, missingTagPages: [], skippedUnverified: [] };
     }
-    return { kept, skippedTag, skippedPhone, pages, missingTagPages: Array.from(banGuard.failedPages) };
+    return { kept, skippedTag, skippedPhone, pages, missingTagPages: Array.from(banGuard.failedPages), skippedUnverified: skippedUnverified || [] };
   }
 
   /* ============================ QUÉT TOÀN BỘ DANH SÁCH ============================ */
@@ -5687,7 +5720,7 @@
     // LỌC TRƯỚC KHI BẮN: tag "chốt"/"chặn" (tải lại tag 1 lượt) + chat có icon điện thoại (has_phone)
     {
       const ban = await filterBannedTagTargets(targets);
-      batchStats.skippedPre = ban.skippedTag.length + ban.skippedPhone.length;
+      batchStats.skippedPre = ban.skippedTag.length + ban.skippedPhone.length + (ban.skippedUnverified ? ban.skippedUnverified.length : 0);
       const nm = (arr) => arr.slice(0, 20).map((m) => m.name || m.id).join(', ') + (arr.length > 20 ? ', …' : '');
       if (ban.skippedTag.length) {
         logLine('🧹 Bỏ qua ' + ban.skippedTag.length + ' chat THẬT SỰ đang gắn tag cấm: '
@@ -5699,7 +5732,7 @@
       if (ban.skippedPhone.length) {
         logLine('📞 Bỏ qua ' + ban.skippedPhone.length + ' chat có icon điện thoại (sale đang chăm): ' + nm(ban.skippedPhone));
       }
-      if (ban.skippedTag.length || ban.skippedPhone.length) {
+      if (ban.skippedTag.length || ban.skippedPhone.length || (ban.skippedUnverified && ban.skippedUnverified.length)) {
         targets = ban.kept;
       }
       if (!targets.length) {
