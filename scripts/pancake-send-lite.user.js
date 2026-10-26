@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE LITE
 // @namespace    salescript
-// @version      1.90.2
+// @version      1.90.3
 // @description  BOTFAKE — chọn chuỗi chat (Alt+Click 2 đầu) hoặc theo snippet trong Pancake rồi gửi cùng 1 câu (kèm 1 hoặc nhiều ảnh nếu muốn) cho tất cả.
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -44,7 +44,7 @@
   /* ============================ HẰNG SỐ ============================ */
 
   const PANEL_ID = 'ssb-root';          // ssb = SaleScript Bulk — không đụng pk-*/adj-*/pancake-* của script khác
-  const APP_VERSION = '1.90.2';        // hiện ở tiêu đề panel — đối chiếu với @version trong header
+  const APP_VERSION = '1.90.3';        // hiện ở tiêu đề panel — đối chiếu với @version trong header
   const STYLE_ID = 'ssb-style';
 
   const MAX_NAME_LIST = 12;             // số tên hiển thị khi xác nhận
@@ -1321,6 +1321,7 @@
       // 1) TẢI ĐA LUỒNG QUA API — siêu nhanh, không cuộn. Redux chỉ ~cửa sổ list (~19/200) → không mồi.
       logLine('⚡ Đã xóa danh sách cũ — đang tải lại danh sách mới đa luồng qua API (bấm nút lần nữa nếu muốn dừng & dùng ngay)…');
       setBtn('⏹ Dừng tải (0 chat)');
+      setScanProgress(0, 0);
       let lastLiveSync = 0;
       let lastSyncedLen = 0;
       const syncLiveRows = (rowsArr) => {
@@ -1351,6 +1352,7 @@
       const apiProgress = (n, rowsArr) => {
         setBtn('⏹ Dừng tải (' + n + ' chat)');
         syncLiveRows(rowsArr);
+        setScanProgress(n, null);
       };
       let api = await loadListViaApi(apiProgress);
       if (api && api.ok && api.incomplete && !api.stopped) {
@@ -1366,6 +1368,7 @@
         state.allRows = null;
         logLine('⛔ Tải 2 lần vẫn CHƯA đầy đủ (' + api.rows.length + ' chat) — KHÔNG dùng danh sách thiếu để gửi (gửi sẽ sai). Kiểm tra mạng rồi bấm ⚡ Tải danh sách lại.');
         setBtn('⚠ Tải chưa đủ — bấm tải lại');
+        setScanProgress(api.rows.length, null);
         return;
       }
       if (api && api.ok && api.rows.length) {
@@ -1401,6 +1404,7 @@
           state.allRows = found;
           state.listIncomplete = false;
           setBtn('⚡ Tải danh sách (' + found.size + ' chat)');
+          setScanProgress(found.size, 100);
           logLine('⚡ Tải qua API: ' + found.size + ' chat — ĐẦY ĐỦ, không cần cuộn');
           computeMatches();
           render();
@@ -1471,7 +1475,11 @@
         } else {
           noNewStreak = 0;
         }
-        if (guard % 6 === 0) setBtn('⏹ Dừng tải (' + found.size + ' chat)');
+        if (guard % 6 === 0) {
+          setBtn('⏹ Dừng tải (' + found.size + ' chat)');
+          const maxS = Math.max(1, scroller.scrollHeight - scroller.clientHeight);
+          setScanProgress(found.size, Math.min(99, Math.round((scroller.scrollTop / maxS) * 100)));
+        }
       }
 
       scroller.scrollTop = savedTop;
@@ -1484,6 +1492,7 @@
       found.forEach((v) => { v.order = ord++; });
       state.allRows = found;
       setBtn('⚡ Tải danh sách (' + found.size + ' chat)');
+      setScanProgress(found.size, 100);
       logLine('⚡ Tải xong: ' + found.size + ' chat trong danh sách');
       computeMatches();
       render();
@@ -4430,7 +4439,7 @@
         sumEl.style.display = '';
         sumEl.innerHTML = html;
       }
-      if (c.total > 0) setProgress(c.okTotal, c.total);
+      if (c.total > 0) setProgress(c.settled, c.total, c.okTotal);
       if (isDoneAll || c.total <= 200) {
         try { localStorage.setItem(SUMMARY_LS_KEY, html); } catch (e) { /* ignore */ }
       }
@@ -5359,7 +5368,9 @@
         .item .tm { color: #64748b; font-size: 10px; margin-left: auto; white-space: nowrap; }
         .prog { height: 8px; border-radius: 999px; background: #1e293b; overflow: hidden; }
         .prog > i { display: block; height: 100%; width: 0%; background: #22c55e; transition: width .25s; }
+        .prog.scan > i { background: #38bdf8; }
         .prog-stat { font-size: 11px; font-weight: 700; color: #4ade80; text-align: center; margin-top: 4px; }
+        .prog-stat.scan { color: #7dd3fc; }
         .summary-box { background: #132033; border: 1px solid #334155; border-radius: 8px; padding: 6px 8px;
                        font-size: 11px; line-height: 1.45; color: #e2e8f0; display: none; word-break: break-word; }
         .log { background: #0b1220; border: 1px solid #334155; border-radius: 8px; padding: 8px;
@@ -5439,7 +5450,7 @@
             <button class="b b-red" id="ssb-stop" disabled style="flex:1">⏹ Dừng</button>
           </div>
           <div class="prog"><i id="ssb-bar"></i></div>
-          <div class="prog-stat" id="ssb-progstat">0% · 0/0</div>
+          <div class="prog-stat" id="ssb-progstat">0% · ✅ 0/0</div>
           <div>
             <div class="label">1) Đang chọn</div>
             <div class="snippet-box" id="ssb-target">Chưa chọn — bấm ⚡ Tải danh sách rồi <b>Chọn tất cả</b></div>
@@ -5453,6 +5464,8 @@
             <button class="b b-gray" id="ssb-scan">⚡ Tải danh sách</button>
             <span class="hint">đã chọn: <span class="count" id="ssb-count">0</span></span>
           </div>
+          <div class="prog scan"><i id="ssb-scanbar"></i></div>
+          <div class="prog-stat scan" id="ssb-scanstat">Tải DS: 0%</div>
           <div>
             <div class="label">2) Câu cần gửi</div>
             <textarea id="ssb-msg" placeholder="Nhập 1 câu sẽ gửi cho tất cả đoạn chat ở trên…"></textarea>
@@ -6168,12 +6181,30 @@
     flushLogUI();
   }
 
-  function setProgress(ok, total) {
-    const pct = total ? Math.round((ok / total) * 100) : 0;
+  function setProgress(done, total, ok) {
+    const pct = total ? Math.min(100, Math.round((done / total) * 100)) : 0;
     const bar = shadow && shadow.getElementById('ssb-bar');
     if (bar) bar.style.width = pct + '%';
     const st = shadow && shadow.getElementById('ssb-progstat');
-    if (st) st.textContent = pct + '% · ' + (ok || 0) + '/' + (total || 0);
+    if (st) {
+      const okN = (ok != null) ? ok : done;
+      st.textContent = pct + '% · ✅ ' + (okN || 0) + '/' + (total || 0);
+    }
+  }
+
+  function setScanProgress(n, pct) {
+    const bar = shadow && shadow.getElementById('ssb-scanbar');
+    const st = shadow && shadow.getElementById('ssb-scanstat');
+    const p = (pct == null) ? null : Math.max(0, Math.min(100, Math.round(pct)));
+    if (bar) {
+      if (p != null) bar.style.width = p + '%';
+      else bar.style.width = Math.min(95, 8 + Math.round(Math.log10(Math.max(1, n) + 1) * 28)) + '%';
+    }
+    if (st) {
+      st.textContent = (p != null)
+        ? ('Tải DS: ' + p + '% · ' + (n || 0) + ' chat')
+        : ('Tải DS: đang chạy · ' + (n || 0) + ' chat');
+    }
   }
 
   function render() {
