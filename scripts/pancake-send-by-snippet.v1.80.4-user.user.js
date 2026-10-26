@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE
 // @namespace    salescript
-// @version      1.82.5
+// @version      1.82.6
 // @description  BOTFAKE — chọn chuỗi chat (Alt+Click 2 đầu) hoặc theo snippet trong Pancake rồi gửi cùng 1 câu (kèm 1 hoặc nhiều ảnh nếu muốn) cho tất cả.
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -44,7 +44,7 @@
   /* ============================ HẰNG SỐ ============================ */
 
   const PANEL_ID = 'ssb-root';          // ssb = SaleScript Bulk — không đụng pk-*/adj-*/pancake-* của script khác
-  const APP_VERSION = '1.82.5';        // hiện ở tiêu đề panel — đối chiếu với @version trong header
+  const APP_VERSION = '1.82.6';        // hiện ở tiêu đề panel — đối chiếu với @version trong header
   const STYLE_ID = 'ssb-style';
 
   const MAX_NAME_LIST = 12;             // số tên hiển thị khi xác nhận
@@ -3076,6 +3076,7 @@
     const req = buildInboxSend(conv, text, photo);
     if (req.error) return { ok: false, sent: false, error: req.error };
     if (state.stopRequested) return { ok: false, sent: false, error: 'Đã dừng' };
+    if (!acquireOutbound(conv.id)) return dupBlockedResult(conv.id);
     const myRun = runSeq;
     apiSendLane(async () => {
       if (myRun !== runSeq || state.stopRequested) return;
@@ -3099,6 +3100,7 @@
       const nm = conv.name || conv.id;
       const certainFail = (res.status >= 400 && res.status < 500) || (res.ok && data && data.success === false);
       if (certainFail) {
+        releaseOutbound(conv.id); // tin chắc chưa đi → kênh khác được bắn (không sót)
         // "(#10)…ngoài khoảng thời gian…"/"(#551)" KHÔNG phải "mọi kênh đều thua": app vẫn fallback
         // Extension/Socket và gửi ĐƯỢC (log 07:36 — Thanh Binh bù THÀNH CÔNG qua Extension ngay sau
         // "(#10)"; HAR có update_global_id chạy sau cả "(#551)"). → PHẢI bù qua kênh chưa thử.
@@ -3133,6 +3135,7 @@
     if (photo && !hasValidApiPhoto(photo)) return { ok: false, sent: false, error: 'Không có attachment ảnh cho API' };
     const req = buildInboxSend(conv, text, photo);
     if (req.error) return { ok: false, sent: false, error: req.error };
+    if (!acquireOutbound(conv.id)) return dupBlockedResult(conv.id);
     try {
       const makeFetchOpts = (rObj) => (rObj.isJson
         ? { method: 'POST', body: JSON.stringify(rObj.jsonBody), headers: { Accept: 'application/json', 'Content-Type': 'application/json' }, credentials: 'include' }
@@ -3153,13 +3156,15 @@
       }
       if (res.status === 401 || res.status === 403) {
         capturedToken = null; // token cũ — lần sau tự lấy token mới
+        releaseOutbound(conv.id);
         return { ok: false, sent: false, error: 'Token hết hạn/không hợp lệ (' + res.status + ') — tải lại trang rồi thử lại' };
       }
       // 200 nhưng không đọc được kết quả, hoặc lỗi 5xx → KHÔNG rõ tin đã đi hay chưa
       if ((res.ok && (!parsed || !data || data.success === undefined)) || res.status >= 500) {
         return { ok: false, sent: 'maybe', error: 'API không trả kết quả rõ (' + res.status + ')' };
       }
-      // server trả lời rõ ràng là không gửi được → chắc chắn chưa gửi
+      // server trả lời rõ ràng là không gửi được → chắc chắn chưa gửi → nhả khóa để kênh khác bắn (không sót)
+      releaseOutbound(conv.id);
       return {
         ok: false,
         sent: false,
@@ -4221,6 +4226,7 @@
           // Đã bắn rồi và đang chờ ACK — tuyệt đối không bắn lần 2 (chống trùng tận gốc)
           return { ok: true, id: gid, sendBy: 'socket', sent: true, fired: true };
         }
+        if (!acquireOutbound(conv.id)) return dupBlockedResult(conv.id);
         sockFiredPending.add(conv.id);
         const myRun = runSeq;
         const finalizeSockBg = (res) => {
@@ -4233,6 +4239,7 @@
             logLine('⚠ ' + nm + ' — ' + (res.error || 'Socket không rõ kết quả') + ' (xác nhận nền — không gửi thêm để tránh trùng)');
             return;
           }
+          releaseOutbound(conv.id); // FB từ chối / chắc fail → nhả khóa để bù kênh khác (không sót)
           if (res && !res.recipientUnavailable && isRetryableLoss(res.error || '')) {
             logLine('❌ ' + nm + ' — ' + (res.error || 'Socket thất bại') + ' (xác nhận nền — sẽ bù kênh khác)');
             scheduleBuRetry(conv, text, photo, nm, 'Socket bị từ chối (xác nhận nền)', ['socket']);
@@ -4256,8 +4263,11 @@
         if (photo && !inBlockedCluster) ctx.nonReusableFbId = null;
         return { ok: true, id: gid, sendBy: 'socket', sent: true, fired: true };
       }
+      if (!acquireOutbound(conv.id)) return dupBlockedResult(conv.id);
       const rawSync = await pageLane(() => socketPublishSend(helper, pageId, gid, text, attFbIds));
-      return settleSocketResult(rawSync);
+      const settled = await settleSocketResult(rawSync);
+      if (!(settled && (settled.ok || settled.sent === 'maybe'))) releaseOutbound(conv.id);
+      return settled;
     } catch (e) {
       return { ok: false, sent: 'maybe', error: 'Socket lỗi: ' + (e && e.message || e) };
     }
@@ -4355,8 +4365,10 @@
       // Tách bước chuẩn bị HTTP (ctxFull + uploadPhotoForPage + resolveGlobalId chạy ở extPrepLane)
       // khỏi bước bắn Extension thật (extSendLane): khi vào adapter.send là đã có sẵn
       // 100% payload (globalUserId + files=[fbId]), không giữ slot Extension trong lúc chờ HTTP!
+      if (!acquireOutbound(conv.id)) return dupBlockedResult(conv.id);
       const res = await extSendLane(() => adapter.send(payload, { timeout: 35000 }));
       if (res && res.ok === false && res.sent === false && res.error) {
+        releaseOutbound(conv.id);
         return { ok: false, sent: false, error: res.error };
       }
       if (res && res.success) {
@@ -4398,6 +4410,7 @@
         // Chỉ kết luận khách khóa nick thật (deadUser) khi đã gửi bằng globalUserId thật (khác null, !ctx.gidFromPsid)
         const deadUser = !!globalUserId && (!ctx || !ctx.gidFromPsid)
           && /1545041|Người này hiện không có mặt|Không tìm thấy người dùng/i.test(String(why || ''));
+        releaseOutbound(conv.id);
         return { ok: false, sent: false, recipientUnavailable: deadUser, error: errStr };
       }
       // không có phản hồi (timeout/hủy) → extension có thể đã gửi → KHÔNG rõ
@@ -4781,6 +4794,9 @@
     }
     if (conv && conv.id && sockFiredPending.has(conv.id)) {
       return { ok: true, id: '', sendBy: 'socket', sent: true, fired: true };
+    }
+    if (conv && conv.id && outboundLock[conv.id]) {
+      return { ok: true, id: '', sendBy: deliveredIds[conv.id] || 'dup-block', sent: true, fired: true };
     }
     // ⚡ CHẾ ĐỘ NHANH — ĐÚNG PLAN CỦA APP (_app @936800, @945200):
     //   • TEXT hoặc ẢNH ngoài cửa sổ 24h + !dr(): đi thẳng Extension ⇄ Socket trước (bắn API trước
@@ -5384,9 +5400,25 @@
   let runSeq = 0; // mỗi lượt gửi 1 số — bù của lượt cũ tự hủy khi có lượt mới (chống gửi lẫn/lặp)
   const deliveredIds = {}; // convId → ĐÃ có kênh báo thành công trong lượt này ('api'|'ext'|'socket') — tuyệt đối không gửi lại
   const claimedSendIds = {}; // convId → đã nhận quyền bắn trong lượt này (chống 2 worker / 2 câu cùng 1 chat)
+  const outboundLock = {}; // convId → đang/đã bắn tin (chưa xác nhận fail) — chặn POST/publish chồng
+  const buRetryTimer = {}; // convId → timeout bù đang chờ (chống 2 chuỗi bù chạy song song)
   const finalFailedIds = {}; // convId → đã thất bại hẳn (hết kênh hoặc khách khóa nick)
   const uncertainIds = {};   // convId → không rõ kết quả ('maybe')
   const skippedLateIds = {}; // convId → bỏ qua lúc gửi (tag cấm / icon điện thoại vừa gắn)
+  // v1.82.6 — khóa tin đang bay: đã POST/publish thì kênh khác không bắn thêm, trừ khi kênh trước
+  // XÁC NHẬN thất bại (releaseOutbound). 'maybe' giữ khóa → không gửi lần 2.
+  function dupBlockedResult(convId) {
+    return { ok: true, id: '', sendBy: deliveredIds[convId] || 'dup-block', sent: true, fired: true };
+  }
+  function acquireOutbound(convId) {
+    if (!convId) return true;
+    if (deliveredIds[convId] || sockFiredPending.has(convId) || outboundLock[convId]) return false;
+    outboundLock[convId] = 1;
+    return true;
+  }
+  function releaseOutbound(convId) {
+    if (convId) delete outboundLock[convId];
+  }
   // Bộ đếm O(1) chống O(N²) khi chạy 20.000–30.000 tin (không gọi Object.keys() 60.000 lần)
   const summaryCounters = { okApi: 0, okExt: 0, okSocket: 0, fail: 0, unsure: 0, skipLate: 0 };
   let summaryUiTimer = null;
@@ -5522,6 +5554,7 @@
   // hỗ trợ API/Extension. 'maybe'/đã đến nơi → DỪNG tuyệt đối (chống trùng).
   function scheduleBuRetry(conv, text, photo, name, why, tried) {
     if (!conv) return;
+    if (buRetryTimer[conv.id]) return; // đã có chuỗi bù đang chờ — không chạy song song (chống gửi 2 lần)
     if (sockFiredPending.has(conv.id)) {
       // Socket đã bắn và ACK chưa chốt — bù kênh khác lúc này có thể gây TRÙNG câu. Chờ xác nhận nền chốt.
       logLine('⏳ ' + name + ' — đang chờ xác nhận Socket (bắn-nhả) — không bù chồng để tránh trùng');
@@ -5555,7 +5588,8 @@
     const delay = hadDirectFail ? (150 + Math.min(buRetrySeq++, 6) * BU_SPREAD_MS) : BU_RETRY_EXT_MS;
     logLine('⏳ ' + name + ' — ' + why + ' — đang bù'
       + (remaining.length > 1 ? ' (Socket/Extension)' : (' qua ' + (remaining[0] === 'ext' ? 'Extension' : 'Socket'))) + '…');
-    setTimeout(() => {
+    buRetryTimer[conv.id] = setTimeout(() => {
+      buRetryTimer[conv.id] = null;
       if (myRun !== runSeq) return; // có lượt gửi mới — bù của lượt cũ bỏ (tránh gửi lẫn 2 lượt)
       if (state.stopRequested) {
         if (window && typeof window.__botfakeTrackStatus__ === 'function') window.__botfakeTrackStatus__(conv.id, 'fail');
@@ -5704,6 +5738,8 @@
     Object.keys(buRetryDone).forEach((k) => { delete buRetryDone[k]; });
     Object.keys(deliveredIds).forEach((k) => { delete deliveredIds[k]; });
     Object.keys(claimedSendIds).forEach((k) => { delete claimedSendIds[k]; });
+    Object.keys(outboundLock).forEach((k) => { delete outboundLock[k]; });
+    Object.keys(buRetryTimer).forEach((k) => { try { clearTimeout(buRetryTimer[k]); } catch (e0) { /* ignore */ } delete buRetryTimer[k]; });
     sockFiredPending.clear();
     Object.keys(finalFailedIds).forEach((k) => { delete finalFailedIds[k]; });
     Object.keys(uncertainIds).forEach((k) => { delete uncertainIds[k]; });
