@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE
 // @namespace    salescript
-// @version      1.82.8
+// @version      1.82.9
 // @description  BOTFAKE — chọn chuỗi chat (Alt+Click 2 đầu) hoặc theo snippet trong Pancake rồi gửi cùng 1 câu (kèm 1 hoặc nhiều ảnh nếu muốn) cho tất cả.
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -44,7 +44,7 @@
   /* ============================ HẰNG SỐ ============================ */
 
   const PANEL_ID = 'ssb-root';          // ssb = SaleScript Bulk — không đụng pk-*/adj-*/pancake-* của script khác
-  const APP_VERSION = '1.82.8';        // hiện ở tiêu đề panel — đối chiếu với @version trong header
+  const APP_VERSION = '1.82.9';        // hiện ở tiêu đề panel — đối chiếu với @version trong header
   const STYLE_ID = 'ssb-style';
 
   const MAX_NAME_LIST = 12;             // số tên hiển thị khi xác nhận
@@ -2152,47 +2152,40 @@
     const prevStop = state.scanStopRequested;
     state.scanStopRequested = false;
     try {
-      // v1.82.7 — Redux Pancake trước (0ms, không cuộn DOM). API list chỉ BÙ id chưa có trong store.
-      const map = collectReduxLiveRows();
-      let fromRedux = 0;
-      (targets || []).forEach((m) => {
-        if (m && m.id && map.has(String(m.id))) fromRedux++;
-      });
+      // v1.82.9 — Redux chỉ ~cửa sổ virtual list (thực tế ~19/200) → KHÔNG dùng làm nguồn list.
+      // Nguồn đủ: API cursor (loaddanhsach.har), cùng request app. Không cuộn DOM.
+      // Redux chỉ ĐÈ LÊN sau API cho chat đang mở (tag vừa gắn trên màn hình).
       const nTarget = (targets || []).filter((m) => m && m.id).length;
-      const needApi = fromRedux < nTarget;
-      let res = { ok: true, incomplete: false };
       const loadFresh = (extra) => Promise.race([
         loadListViaApi(null, Object.assign({}, extra || {})),
         sleep(180000).then(() => ({ ok: false, error: 'quá 180s' })),
       ]);
-      if (needApi) {
-        res = await loadFresh(null);
-        if (res && res.ok) {
-          (res.rows || []).forEach((r) => {
+      let res = await loadFresh(null);
+      if (!res || !res.ok) {
+        guardRefresh.lastErr = (res && res.error) || 'lỗi';
+        guardRefresh.unverified = (targets || []).slice();
+        if (!silent) logLine('⚠ Không đọc được danh sách chat từ API (' + guardRefresh.lastErr
+          + ') — KHÔNG xác minh được tag/số điện thoại ⇒ các chat này sẽ KHÔNG được gửi.');
+        return { ok: false, error: guardRefresh.lastErr, unverified: guardRefresh.unverified };
+      }
+      const map = new Map();
+      (res.rows || []).forEach((r) => { if (r && r.id) map.set(String(r.id), r); });
+      const miss0 = (targets || []).filter((m) => m && m.id && !map.has(String(m.id))).length;
+      if (miss0 > 0) {
+        const res2 = await loadFresh({ forceAllTags: true });
+        if (res2 && res2.ok) {
+          (res2.rows || []).forEach((r) => {
             if (r && r.id && !map.has(String(r.id))) map.set(String(r.id), r);
           });
         }
-        const miss0 = (targets || []).filter((m) => m && m.id && !map.has(String(m.id))).length;
-        if (miss0 > 0) {
-          const res2 = await loadFresh({ forceAllTags: true });
-          if (res2 && res2.ok) {
-            (res2.rows || []).forEach((r) => {
-              if (r && r.id && !map.has(String(r.id))) map.set(String(r.id), r);
-            });
-          }
-        }
-        if ((!res || !res.ok) && fromRedux === 0) {
-          guardRefresh.lastErr = (res && res.error) || 'lỗi';
-          guardRefresh.unverified = (targets || []).slice();
-          if (!silent) logLine('⚠ Không đọc được list Pancake (Redux trống + API lỗi: ' + guardRefresh.lastErr
-            + ') — KHÔNG xác minh được tag/số điện thoại ⇒ các chat này sẽ KHÔNG được gửi.');
-          return { ok: false, error: guardRefresh.lastErr, unverified: guardRefresh.unverified };
-        }
-        if (!res || !res.ok) {
-          if (!silent) logLine('⚠ API list lỗi (' + ((res && res.error) || 'lỗi')
-            + ') — vẫn dùng ' + fromRedux + ' chat có sẵn trong Redux Pancake; chat không có trong store sẽ không gửi.');
-        }
       }
+      // Overlay Redux: chỉ những id ĐÃ có từ API — cập nhật tag/ĐT sống, không thêm id mới từ cửa sổ 19 dòng.
+      let overlay = 0;
+      collectReduxLiveRows().forEach((r, id) => {
+        if (!map.has(id) || !r) return;
+        map.set(id, r);
+        overlay++;
+      });
       guardRefresh.map = map;
       guardRefresh.at = Date.now();
       guardRefresh.lastErr = '';
@@ -2206,9 +2199,8 @@
         applyGuardRowToTarget(m, f, stats);
       });
       if (!silent) {
-        logLine('🔄 Xác minh tag/ĐT: ' + stats.updated + '/' + nTarget + ' chat'
-          + ' · Redux Pancake: ' + fromRedux + '/' + nTarget + ' (0ms, không cuộn màn hình)'
-          + (needApi ? ' · API bù phần thiếu' : ' · đủ trong store — không gọi API list')
+        logLine('🔄 Xác minh tag/ĐT từ API: ' + stats.updated + '/' + nTarget + ' chat · API ' + map.size + ' dòng'
+          + (overlay ? ' · đè ' + overlay + ' chat đang mở (Redux)' : '')
           + (stats.tagNew ? ' · ' + stats.tagNew + ' chat ĐỔI TAG' : '')
           + (stats.tagged ? ' · ' + stats.tagged + ' chat dính tag cấm' : '')
           + (stats.phone ? ' · ' + stats.phone + ' chat có số ĐT' : '')
@@ -2218,7 +2210,7 @@
       return {
         ok: true, updated: stats.updated, total: nTarget, missing,
         tagged: stats.tagged, phone: stats.phone, tagNew: stats.tagNew,
-        rows: map.size, incomplete: !!(res && res.incomplete), unverified, fromRedux,
+        rows: map.size, incomplete: !!(res && res.incomplete), unverified,
       };
     } catch (e) {
       guardRefresh.lastErr = String((e && e.message) || e);
@@ -2310,7 +2302,7 @@
       // 🔄 ĐỒNG BỘ MỚI NHẤT trước khi lọc: list câu giữ ảnh chụp tags/has_phone lúc TẠO, mà bạn
       // gửi cùng 1 list nhiều lượt cách nhau ~30 phút → trong khoảng đó khách có thể đã "chốt"/
       // "chặn" hoặc đã có số điện thoại. Đọc lại từ API để chốt chặn xét tag HIỆN TẠI.
-      logLine('🔄 Đang xác minh tag/ĐT từ list Pancake (Redux trước, API chỉ bù chỗ thiếu — không cuộn màn hình) · '
+      logLine('🔄 Đang xác minh tag/ĐT từ API danh sách Pancake (không dùng Redux cửa sổ ~20 dòng) · '
         + targets.length + ' chat…');
       await refreshGuardRows(targets, { force: true });
       const tagOf = {}; // convId → TÊN tag cấm mà nó mang (để log cho user soi)
@@ -2414,24 +2406,11 @@
       highlightRows();
       render();
 
-      // 1) TẢI ĐA LUỒNG QUA API — siêu nhanh, không cuộn, cập nhật live từng chặng
-      // v1.82.8 — mồi 0ms từ Redux Pancake (data + clone list + pinned). Store chỉ có chat
-      // app ĐÃ nạp; không thay được API cho list 5k–30k chưa load. Không cuộn DOM ở bước này.
-      const rdxSeed = collectReduxLiveRows();
+      // 1) TẢI ĐA LUỒNG QUA API — siêu nhanh, không cuộn. Redux chỉ ~cửa sổ list (~19/200) → không mồi.
+      logLine('⚡ Đã xóa danh sách cũ — đang tải lại danh sách mới đa luồng qua API (bấm nút lần nữa nếu muốn dừng & dùng ngay)…');
+      setBtn('⏹ Dừng tải (0 chat)');
       let lastLiveSync = 0;
       let lastSyncedLen = 0;
-      if (rdxSeed.size) {
-        const seedMap = new Map();
-        let ord0 = 0;
-        rdxSeed.forEach((r) => { r.order = ord0++; seedMap.set(r.id, r); });
-        state.allRows = seedMap;
-        lastSyncedLen = seedMap.size;
-        setBtn('⏹ Dừng tải (' + seedMap.size + ' chat)');
-        logLine('⚡ Đã lấy ' + seedMap.size + ' chat từ list Pancake trong RAM (Redux, 0ms, không cuộn) — đang tải API để đủ và đúng thứ tự…');
-      } else {
-        logLine('⚡ Đã xóa danh sách cũ — đang tải lại danh sách mới đa luồng qua API (bấm nút lần nữa nếu muốn dừng & dùng ngay)…');
-        setBtn('⏹ Dừng tải (0 chat)');
-      }
       const syncLiveRows = (rowsArr) => {
         if (!Array.isArray(rowsArr) || !rowsArr.length) return;
         const now = Date.now();
@@ -2515,42 +2494,12 @@
           render();
           return;
         }
-        logLine('⚠ Danh sách API không khớp màn hình (có thể đang bật bộ lọc) — thử list RAM rồi mới quét giao diện…');
+        logLine('⚠ Danh sách API không khớp màn hình (có thể đang bật bộ lọc) — chuyển sang quét giao diện…');
       } else {
-        logLine('⚠ ' + ((api && api.error) || 'Tải API thất bại') + ' — thử list RAM rồi mới quét giao diện…');
+        logLine('⚠ ' + ((api && api.error) || 'Tải API thất bại') + ' — chuyển sang quét giao diện…');
       }
 
-      // 1b) API hỏng/lệch — dùng Redux nếu đủ các dòng đang thấy (không cuộn). Store thiếu → mới quét DOM.
-      {
-        const vis0 = visibleRows();
-        const rdxUse = (rdxSeed && rdxSeed.size) ? rdxSeed : collectReduxLiveRows();
-        let visMiss = 0;
-        for (let i = 0; i < vis0.length; i++) {
-          if (!rdxUse.has(vis0[i].id)) visMiss++;
-        }
-        if (rdxUse.size && visMiss === 0) {
-          const foundR = new Map();
-          let ordR = 0;
-          rdxUse.forEach((r) => { r.order = ordR++; foundR.set(r.id, r); });
-          vis0.forEach((r) => {
-            if (foundR.has(r.id)) foundR.set(r.id, { ...foundR.get(r.id), ...r });
-          });
-          state.allRows = foundR;
-          state.listIncomplete = false;
-          setBtn('⚡ Tải danh sách (' + foundR.size + ' chat)');
-          logLine('⚡ Dùng list Pancake trong RAM: ' + foundR.size + ' chat (khớp ' + vis0.length
-            + ' dòng đang thấy — không cuộn). Nếu thiếu chat phía dưới, để app tải thêm rồi bấm ⚡ lại.');
-          computeMatches();
-          render();
-          return;
-        }
-        if (rdxUse.size) {
-          logLine('⚠ Redux có ' + rdxUse.size + ' chat nhưng thiếu ' + visMiss
-            + '/' + vis0.length + ' dòng đang thấy — chuyển sang quét giao diện.');
-        }
-      }
-
-      // 2) QUÉT GIAO DIỆN (dự phòng cuối) — luôn khớp đúng những gì đang thấy trên màn hình
+      // 2) QUÉT GIAO DIỆN (dự phòng) — Redux không đủ list dài, chỉ khi API lệch màn hình
       const savedTop = scroller.scrollTop;
       const found = new Map();
       let guard = 0;
