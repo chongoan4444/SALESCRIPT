@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE LITE
 // @namespace    salescript
-// @version      1.90.1
+// @version      1.90.2
 // @description  BOTFAKE — chọn chuỗi chat (Alt+Click 2 đầu) hoặc theo snippet trong Pancake rồi gửi cùng 1 câu (kèm 1 hoặc nhiều ảnh nếu muốn) cho tất cả.
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -44,7 +44,7 @@
   /* ============================ HẰNG SỐ ============================ */
 
   const PANEL_ID = 'ssb-root';          // ssb = SaleScript Bulk — không đụng pk-*/adj-*/pancake-* của script khác
-  const APP_VERSION = '1.90.1';        // hiện ở tiêu đề panel — đối chiếu với @version trong header
+  const APP_VERSION = '1.90.2';        // hiện ở tiêu đề panel — đối chiếu với @version trong header
   const STYLE_ID = 'ssb-style';
 
   const MAX_NAME_LIST = 12;             // số tên hiển thị khi xác nhận
@@ -4430,7 +4430,7 @@
         sumEl.style.display = '';
         sumEl.innerHTML = html;
       }
-      if (c.total > 0) setProgress(c.settled, c.total);
+      if (c.total > 0) setProgress(c.okTotal, c.total);
       if (isDoneAll || c.total <= 200) {
         try { localStorage.setItem(SUMMARY_LS_KEY, html); } catch (e) { /* ignore */ }
       }
@@ -5357,8 +5357,9 @@
         .item .nm { color: #f8fafc; font-weight: 600; font-size: 11px; }
         .item .sn { color: #7dd3fc; font-size: 10px; word-break: break-word; }
         .item .tm { color: #64748b; font-size: 10px; margin-left: auto; white-space: nowrap; }
-        .prog { height: 6px; border-radius: 999px; background: #1e293b; overflow: hidden; }
+        .prog { height: 8px; border-radius: 999px; background: #1e293b; overflow: hidden; }
         .prog > i { display: block; height: 100%; width: 0%; background: #22c55e; transition: width .25s; }
+        .prog-stat { font-size: 11px; font-weight: 700; color: #4ade80; text-align: center; margin-top: 4px; }
         .summary-box { background: #132033; border: 1px solid #334155; border-radius: 8px; padding: 6px 8px;
                        font-size: 11px; line-height: 1.45; color: #e2e8f0; display: none; word-break: break-word; }
         .log { background: #0b1220; border: 1px solid #334155; border-radius: 8px; padding: 8px;
@@ -5437,6 +5438,8 @@
             <button class="b b-green" id="ssb-send" style="flex:1">▶ Chạy</button>
             <button class="b b-red" id="ssb-stop" disabled style="flex:1">⏹ Dừng</button>
           </div>
+          <div class="prog"><i id="ssb-bar"></i></div>
+          <div class="prog-stat" id="ssb-progstat">0% · 0/0</div>
           <div>
             <div class="label">1) Đang chọn</div>
             <div class="snippet-box" id="ssb-target">Chưa chọn — bấm ⚡ Tải danh sách rồi <b>Chọn tất cả</b></div>
@@ -5449,13 +5452,6 @@
           <div class="row" style="margin:2px 0 4px;align-items:center">
             <button class="b b-gray" id="ssb-scan">⚡ Tải danh sách</button>
             <span class="hint">đã chọn: <span class="count" id="ssb-count">0</span></span>
-          </div>
-          <div class="row" style="margin:0 0 4px;align-items:center;gap:6px">
-            <label class="hint" style="display:flex;align-items:center;gap:5px;cursor:pointer" title="BẬT: Alt+Click / Ctrl+Click chỉ CHỌN, không nhảy vào hội thoại.
-TẮT: chọn vẫn hoạt động nhưng app cũng mở chat (giống lúc chưa cài script).
-Click CHUỘT THƯỜNG luôn mở chat bình thường, không phụ thuộc ô này.">
-              <input type="checkbox" id="ssb-guard" checked> 🚫 Chặn mở chat khi Alt/Ctrl
-            </label>
           </div>
           <div>
             <div class="label">2) Câu cần gửi</div>
@@ -5487,7 +5483,6 @@ Click CHUỘT THƯỜNG luôn mở chat bình thường, không phụ thuộc ô
             <span class="label">LOG</span>
             <button class="minibtn" id="ssb-logzoom" title="Phóng to / thu nhỏ bảng log — kéo tiêu đề để di chuyển, kéo góc dưới-phải để đổi cỡ">⛶ Phóng to log</button>
           </div>
-          <div class="prog"><i id="ssb-bar"></i></div>
           <div class="summary-box" id="ssb-summary"></div>
           <div class="log" id="ssb-log"></div>
         </div>
@@ -5968,19 +5963,6 @@ Click CHUỘT THƯỜNG luôn mở chat bình thường, không phụ thuộc ô
       btn.disabled = false;
       render();
     });
-    // Ô "Chặn mở chat": nhớ lựa chọn qua F5; tắt là chuột hoạt động y như app
-    {
-      const gEl = root.getElementById('ssb-guard');
-      if (gEl) {
-        gEl.checked = localStorage.getItem('ssb_guard_click') !== '0';
-        gEl.addEventListener('change', () => {
-          localStorage.setItem('ssb_guard_click', gEl.checked ? '1' : '0');
-          logLine(gEl.checked
-            ? '🚫 Đã BẬT chặn mở chat: Alt+Click / Ctrl+Click chỉ chọn chuỗi, không nhảy vào hội thoại.'
-            : '🖱 Đã TẮT chặn mở chat: app sẽ mở hội thoại cả khi bạn Alt+Click (chọn vẫn hoạt động).');
-        });
-      }
-    }
     // Nhóm chat của lượt gửi gần nhất — chọn lại tại chỗ, không quét lại danh sách
     // ===== KHÔI PHỤC SAU F5: câu đang tick + ô nội dung đang gõ + nhật ký — dữ liệu không mất =====
     try {
@@ -6186,9 +6168,12 @@ Click CHUỘT THƯỜNG luôn mở chat bình thường, không phụ thuộc ô
     flushLogUI();
   }
 
-  function setProgress(done, total) {
+  function setProgress(ok, total) {
+    const pct = total ? Math.round((ok / total) * 100) : 0;
     const bar = shadow && shadow.getElementById('ssb-bar');
-    if (bar) bar.style.width = (total ? Math.round((done / total) * 100) : 0) + '%';
+    if (bar) bar.style.width = pct + '%';
+    const st = shadow && shadow.getElementById('ssb-progstat');
+    if (st) st.textContent = pct + '% · ' + (ok || 0) + '/' + (total || 0);
   }
 
   function render() {
@@ -6296,7 +6281,7 @@ Click CHUỘT THƯỜNG luôn mở chat bình thường, không phụ thuộc ô
    *   - hoặc đang bật chế độ "Chọn chuỗi (2 nhấp)".
    * CLICK THƯỜNG: thoát ngay ở dòng đầu, KHÔNG preventDefault / KHÔNG stop* / KHÔNG render →
    * app mở chat, gõ tin, mọi thứ y như khi không cài script.
-   * Có ô "Chặn mở chat" trong panel (mặc định BẬT): bỏ tích là tắt hoàn toàn việc chặn.
+   * Luôn BẬT: Alt/Ctrl+Click chỉ chọn, không mở hội thoại.
    */
   const ROW_GUARD_EVENTS = ['pointerdown', 'pointerup', 'mousedown', 'mouseup', 'auxclick', 'dblclick'];
   const MOD_FRESH_MS = 900;        // chỉ tin "phím đang giữ" trong 900ms gần nhất (keyup lỡ mất thì tự hết hạn)
@@ -6310,11 +6295,7 @@ Click CHUỘT THƯỜNG luôn mở chat bình thường, không phụ thuộc ô
     try { if (e.stopImmediatePropagation) e.stopImmediatePropagation(); } catch (err) { /* ignore */ }
   }
 
-  // Ô "Chặn mở chat" trong panel — bỏ tích = không chặn gì cả (chuột hoạt động 100% như app)
-  function rowGuardOn() {
-    const cb = shadow && shadow.getElementById('ssb-guard');
-    return cb ? !!cb.checked : true;
-  }
+  function rowGuardOn() { return true; }
 
   // Alt/Ctrl có đang được giữ NGAY LÚC NÀY không?
   //  - ưu tiên cờ của chính event (chính xác nhất),
