@@ -6600,4 +6600,94 @@
       }
     },
   };
+(function () {
+  'use strict';
+
+  try {
+    if (window.__botfake_logic_loaded) return;
+    window.__botfake_logic_loaded = true;
+
+    console.log('[BOTFAKE PATCH] loaded');
+
+    function getToken() {
+      try {
+        const m = /(?:^|;\s*)jwt=([^;]+)/.exec(document.cookie || '');
+        if (m && m[1]) return decodeURIComponent(m[1]);
+      } catch (e) {}
+
+      if (window.capturedToken) return window.capturedToken;
+
+      try {
+        const nd = document.getElementById('__NEXT_DATA__');
+        if (nd) {
+          const j = JSON.parse(nd.textContent || '{}');
+          const t = j && j.props && j.props.initialState && j.props.initialState.auth
+            && j.props.initialState.auth.accessToken;
+          if (t) return t;
+        }
+      } catch (e) {}
+
+      return null;
+    }
+
+    function monitorToken() {
+      function grab(url) {
+        const m = /access_token=([A-Za-z0-9._-]+)/.exec(url || '');
+        if (m && m[1] && m[1].split('.').length === 3) {
+          window.capturedToken = m[1];
+        }
+      }
+
+      const origFetch = window.fetch;
+      window.fetch = function (input, init) {
+        try {
+          const url = typeof input === 'string' ? input : (input && input.url) || '';
+          grab(url);
+        } catch (e) {}
+        return origFetch.apply(this, arguments);
+      };
+
+      const origOpen = XMLHttpRequest.prototype.open;
+      XMLHttpRequest.prototype.open = function (method, url) {
+        try { grab(String(url || '')); } catch (e) {}
+        return origOpen.apply(this, arguments);
+      };
+    }
+
+    monitorToken();
+
+    setTimeout(() => {
+      const token = getToken();
+      console.log('[BOTFAKE PATCH] token?', !!token);
+      if (token && window.state) {
+        console.log('[BOTFAKE PATCH] state ready');
+      }
+    }, 1500);
+
+  } catch (e) {
+    console.error('[BOTFAKE PATCH] failed', e);
+  }
+})();
+})();
+(function () {
+  'use strict';
+
+  try {
+    if (window.__botfake_patch_runtime) return;
+    window.__botfake_patch_runtime = true;
+
+    console.log('[BOTFAKE PATCH] runtime loaded');
+
+    setTimeout(() => {
+      try {
+        const panel = document.getElementById('ssb-root');
+        console.log('[BOTFAKE PATCH] panel exists?', !!panel);
+      } catch (e) {
+        console.error('[BOTFAKE PATCH] check panel failed', e);
+      }
+    }, 500);
+
+  } catch (e) {
+    console.error('[BOTFAKE PATCH] failed', e);
+  }
 })();
