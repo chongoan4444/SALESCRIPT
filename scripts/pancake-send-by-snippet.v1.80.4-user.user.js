@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE
 // @namespace    salescript
-// @version      1.82.9
+// @version      1.82.10
 // @description  BOTFAKE — chọn chuỗi chat (Alt+Click 2 đầu) hoặc theo snippet trong Pancake rồi gửi cùng 1 câu (kèm 1 hoặc nhiều ảnh nếu muốn) cho tất cả.
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -44,7 +44,7 @@
   /* ============================ HẰNG SỐ ============================ */
 
   const PANEL_ID = 'ssb-root';          // ssb = SaleScript Bulk — không đụng pk-*/adj-*/pancake-* của script khác
-  const APP_VERSION = '1.82.9';        // hiện ở tiêu đề panel — đối chiếu với @version trong header
+  const APP_VERSION = '1.82.10';        // hiện ở tiêu đề panel — đối chiếu với @version trong header
   const STYLE_ID = 'ssb-style';
 
   const MAX_NAME_LIST = 12;             // số tên hiển thị khi xác nhận
@@ -2152,34 +2152,49 @@
     const prevStop = state.scanStopRequested;
     state.scanStopRequested = false;
     try {
-      // v1.82.9 — Redux chỉ ~cửa sổ virtual list (thực tế ~19/200) → KHÔNG dùng làm nguồn list.
-      // Nguồn đủ: API cursor (loaddanhsach.har), cùng request app. Không cuộn DOM.
-      // Redux chỉ ĐÈ LÊN sau API cho chat đang mở (tag vừa gắn trên màn hình).
+      // v1.82.10 — KHÔNG dùng Redux làm list (chỉ ~cửa sổ 19 dòng).
+      // KHÔNG tải lại cả page mỗi lần gửi nếu ⚡ đã nạp đủ id vào state.allRows.
+      // Thiếu id (câu lưu từ phiên khác / F5) → mới gọi API cursor. Overlay Redux = tag sống của chat đang mở.
       const nTarget = (targets || []).filter((m) => m && m.id).length;
-      const loadFresh = (extra) => Promise.race([
-        loadListViaApi(null, Object.assign({}, extra || {})),
-        sleep(180000).then(() => ({ ok: false, error: 'quá 180s' })),
-      ]);
-      let res = await loadFresh(null);
-      if (!res || !res.ok) {
-        guardRefresh.lastErr = (res && res.error) || 'lỗi';
-        guardRefresh.unverified = (targets || []).slice();
-        if (!silent) logLine('⚠ Không đọc được danh sách chat từ API (' + guardRefresh.lastErr
-          + ') — KHÔNG xác minh được tag/số điện thoại ⇒ các chat này sẽ KHÔNG được gửi.');
-        return { ok: false, error: guardRefresh.lastErr, unverified: guardRefresh.unverified };
-      }
       const map = new Map();
-      (res.rows || []).forEach((r) => { if (r && r.id) map.set(String(r.id), r); });
-      const miss0 = (targets || []).filter((m) => m && m.id && !map.has(String(m.id))).length;
-      if (miss0 > 0) {
-        const res2 = await loadFresh({ forceAllTags: true });
-        if (res2 && res2.ok) {
-          (res2.rows || []).forEach((r) => {
-            if (r && r.id && !map.has(String(r.id))) map.set(String(r.id), r);
-          });
+      let src = '';
+      if (state.allRows && state.allRows.size) {
+        state.allRows.forEach((r, id) => { if (r && id) map.set(String(id), r); });
+      }
+      const missAll = (targets || []).filter((m) => m && m.id && !map.has(String(m.id))).length;
+      let res = { ok: true, incomplete: false };
+      if (nTarget && missAll === 0) {
+        src = 'allRows';
+      } else {
+        src = 'api';
+        const loadFresh = (extra) => Promise.race([
+          loadListViaApi(null, Object.assign({}, extra || {})),
+          sleep(180000).then(() => ({ ok: false, error: 'quá 180s' })),
+        ]);
+        res = await loadFresh(null);
+        if (!res || !res.ok) {
+          if (map.size && missAll < nTarget) {
+            if (!silent) logLine('⚠ API list lỗi — vẫn dùng ' + (nTarget - missAll) + ' chat đã có trong list ⚡; chat thiếu sẽ không gửi.');
+          } else {
+            guardRefresh.lastErr = (res && res.error) || 'lỗi';
+            guardRefresh.unverified = (targets || []).slice();
+            if (!silent) logLine('⚠ Không đọc được danh sách chat từ API (' + guardRefresh.lastErr
+              + ') — KHÔNG xác minh được tag/số điện thoại ⇒ các chat này sẽ KHÔNG được gửi.');
+            return { ok: false, error: guardRefresh.lastErr, unverified: guardRefresh.unverified };
+          }
+        } else {
+          (res.rows || []).forEach((r) => { if (r && r.id) map.set(String(r.id), r); });
+          const miss0 = (targets || []).filter((m) => m && m.id && !map.has(String(m.id))).length;
+          if (miss0 > 0) {
+            const res2 = await loadFresh({ forceAllTags: true });
+            if (res2 && res2.ok) {
+              (res2.rows || []).forEach((r) => {
+                if (r && r.id && !map.has(String(r.id))) map.set(String(r.id), r);
+              });
+            }
+          }
         }
       }
-      // Overlay Redux: chỉ những id ĐÃ có từ API — cập nhật tag/ĐT sống, không thêm id mới từ cửa sổ 19 dòng.
       let overlay = 0;
       collectReduxLiveRows().forEach((r, id) => {
         if (!map.has(id) || !r) return;
@@ -2199,7 +2214,10 @@
         applyGuardRowToTarget(m, f, stats);
       });
       if (!silent) {
-        logLine('🔄 Xác minh tag/ĐT từ API: ' + stats.updated + '/' + nTarget + ' chat · API ' + map.size + ' dòng'
+        logLine('🔄 Xác minh tag/ĐT: ' + stats.updated + '/' + nTarget
+          + (src === 'allRows'
+            ? ' · dùng list ⚡ đã tải (' + map.size + ' dòng) — không gọi lại API cả page'
+            : ' · API cursor ' + map.size + ' dòng')
           + (overlay ? ' · đè ' + overlay + ' chat đang mở (Redux)' : '')
           + (stats.tagNew ? ' · ' + stats.tagNew + ' chat ĐỔI TAG' : '')
           + (stats.tagged ? ' · ' + stats.tagged + ' chat dính tag cấm' : '')
@@ -2210,7 +2228,7 @@
       return {
         ok: true, updated: stats.updated, total: nTarget, missing,
         tagged: stats.tagged, phone: stats.phone, tagNew: stats.tagNew,
-        rows: map.size, incomplete: !!(res && res.incomplete), unverified,
+        rows: map.size, incomplete: !!(res && res.incomplete), unverified, src,
       };
     } catch (e) {
       guardRefresh.lastErr = String((e && e.message) || e);
@@ -2302,8 +2320,7 @@
       // 🔄 ĐỒNG BỘ MỚI NHẤT trước khi lọc: list câu giữ ảnh chụp tags/has_phone lúc TẠO, mà bạn
       // gửi cùng 1 list nhiều lượt cách nhau ~30 phút → trong khoảng đó khách có thể đã "chốt"/
       // "chặn" hoặc đã có số điện thoại. Đọc lại từ API để chốt chặn xét tag HIỆN TẠI.
-      logLine('🔄 Đang xác minh tag/ĐT từ API danh sách Pancake (không dùng Redux cửa sổ ~20 dòng) · '
-        + targets.length + ' chat…');
+      logLine('🔄 Đang xác minh tag/ĐT · ' + targets.length + ' chat (ưu tiên list ⚡ đã tải, thiếu mới gọi API)…');
       await refreshGuardRows(targets, { force: true });
       const tagOf = {}; // convId → TÊN tag cấm mà nó mang (để log cho user soi)
       // Quét nền: MỖI PAGE 1 lượt lọc theo tag (server tự lọc) — chốt chặn trước từng tin chờ
