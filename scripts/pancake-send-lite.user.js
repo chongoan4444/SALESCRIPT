@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE LITE
 // @namespace    salescript
-// @version      1.90.3
+// @version      1.90.4
 // @description  BOTFAKE — chọn chuỗi chat (Alt+Click 2 đầu) hoặc theo snippet trong Pancake rồi gửi cùng 1 câu (kèm 1 hoặc nhiều ảnh nếu muốn) cho tất cả.
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -44,7 +44,7 @@
   /* ============================ HẰNG SỐ ============================ */
 
   const PANEL_ID = 'ssb-root';          // ssb = SaleScript Bulk — không đụng pk-*/adj-*/pancake-* của script khác
-  const APP_VERSION = '1.90.3';        // hiện ở tiêu đề panel — đối chiếu với @version trong header
+  const APP_VERSION = '1.90.4';        // hiện ở tiêu đề panel — đối chiếu với @version trong header
   const STYLE_ID = 'ssb-style';
 
   const MAX_NAME_LIST = 12;             // số tên hiển thị khi xác nhận
@@ -4443,6 +4443,7 @@
       if (isDoneAll || c.total <= 200) {
         try { localStorage.setItem(SUMMARY_LS_KEY, html); } catch (e) { /* ignore */ }
       }
+      if (isDoneAll) markSendIdleIfSettled();
       if (isDoneAll && !batchStats.finalLogged && c.total > 0) {
         batchStats.finalLogged = true;
         try { localStorage.setItem(SUMMARY_LS_KEY, html); } catch (e) { /* ignore */ }
@@ -4674,6 +4675,7 @@
     // không chặn đúp ở đây thì bấm lần 2 chạy song song lần 1 (log hiện 2 dòng lọc)
     state.sending = true;
     state.stopRequested = false;
+    applyRunStopButtons();
     batchSkipApi = false;
     windowBlocked = 0;
     // trạng thái theo LƯỢT gửi: chat đã đến nơi trong lượt này không bao giờ bị gửi lại;
@@ -5145,18 +5147,17 @@
       logLine('⚠ Gửi lỗi giữa chừng (' + (e && e.message || e) + ') — vẫn xóa câu đã gửi + bỏ chọn để không gửi trùng.');
     }
 
-    state.sending = false;
     batchStats.loopFinished = true;
     if (state.stopRequested && done < totalAll) {
       logLine('⏸ Đã dừng sớm sau ' + done + '/' + totalAll + ' chat.');
     }
-    // Chạy xong tự nhiên (không phải dừng sớm do người dùng) → reset 2 nút về chế độ ban đầu:
-    // nút chạy về '▶ Charging', nút bên cạnh về '⏹ Dừng' (khóa). Chỉ giữ sentIds khi dừng
-    // giữa chừng để '▶ Charging tiếp' gửi phần còn lại (không gửi trùng, không chạy lại từ đầu).
+    // Chỉ giữ sentIds khi dừng giữa chừng. Nút ▶/⏹ không hạ ngay — còn tin đang xác nhận
+    // thì vẫn Đang gửi, ⏹ Dừng vẫn bấm được (tránh xám Dừng / hiện lại Chạy giữa chừng).
     if (!(state.stopRequested && done < totalAll)) {
       state.sentIds.clear();
       localStorage.removeItem('SSB_SENT_IDS');
     }
+    markSendIdleIfSettled();
     if (!sendErr) {
       // chốt per page: check_inbox + contents/touch (app gọi sau gửi — HAR/file "post")
       try {
@@ -6082,29 +6083,24 @@
       warmUpSockets(pagesArr.map((x) => ({ pageId: x && x.id })));
     } catch (e) { /* ignore */ }
         on('ssb-send', 'click', () => {
+      if (state.sending) return;
       if (state.sentIds && state.sentIds.size > 0) {
         logLine('⏩ Có ' + state.sentIds.size + ' chat đã gửi ở lượt trước — sẽ bỏ qua, chỉ gửi phần còn lại.');
       }
       sendToAll();
     });
-    on('ssb-stop', 'click', () => {
-      if (state.sending) {
-        // Đang gửi → yêu cầu dừng/tạm dừng (các vòng sẽ dứt sau tâche hiện tại)
-        state.stopRequested = true;
-        logLine('⏸ Đang dừng — các vòng lặp sẽ dứt ngay sau tâche hiện tại; nút ▶ sẽ trở về sau khi chốt xong lệnh đang bay');
-        render();
-        return;
-      }
-      // Không gửi → nếu có tiến độ đã dừng thì reset hẳn về chế độ ban đầu
-      if (state.sentIds && state.sentIds.size > 0) {
-        state.sentIds.clear();
-        localStorage.removeItem('SSB_SENT_IDS');
-        state.stopRequested = false;
-        logLine('⏹ Đã reset — sẵn sàng chạy lại từ đầu');
-      } else {
-        state.stopRequested = false;
-      }
-      render();
+    const requestStop = () => {
+      if (!state.sending) return;
+      state.stopRequested = true;
+      logLine('⏸ Đã bấm Dừng — ngắt lượt gửi, không bắn thêm.');
+      applyRunStopButtons();
+      if (batchStats.loopFinished) markSendIdleIfSettled();
+    };
+    on('ssb-stop', 'click', requestStop);
+    on('ssb-stop', 'pointerdown', (e) => {
+      if (!state.sending) return;
+      try { e.preventDefault(); } catch (err) { /* ignore */ }
+      requestStop();
     });
     // kéo thả panel (header) VÀ bong bóng logo — di chuyển >4px mới tính là KÉO
     // (để bấm vào bóng vẫn mở panel, kéo bóng chỉ dời chỗ)
@@ -6179,6 +6175,44 @@
     }
     if (logFlushTimer) { clearTimeout(logFlushTimer); logFlushTimer = null; }
     flushLogUI();
+  }
+
+  function applyRunStopButtons() {
+    if (!shadow) return;
+    const send = shadow.getElementById('ssb-send');
+    const stop = shadow.getElementById('ssb-stop');
+    const busy = !!state.sending;
+    if (send) {
+      send.disabled = busy;
+      send.textContent = busy
+        ? (state.stopRequested ? '⏳ Đang dừng…' : '⏳ Đang gửi…')
+        : '▶ Chạy';
+    }
+    if (stop) {
+      stop.disabled = !busy;
+      stop.textContent = '⏹ Dừng';
+      stop.style.opacity = busy ? '1' : '';
+      stop.style.pointerEvents = busy ? 'auto' : '';
+      stop.style.cursor = busy ? 'pointer' : '';
+    }
+  }
+
+  function markSendIdleIfSettled() {
+    if (!state.sending) return;
+    if (!batchStats.loopFinished && !state.stopRequested) return;
+    if (state.stopRequested) {
+      state.sending = false;
+      applyRunStopButtons();
+      return;
+    }
+    let pending = 0;
+    try { pending = getBatchSummaryCounts().pending; } catch (e) { pending = 0; }
+    if (pending > 0) {
+      applyRunStopButtons();
+      return;
+    }
+    state.sending = false;
+    applyRunStopButtons();
   }
 
   function setProgress(done, total, ok) {
@@ -6267,32 +6301,7 @@
         }
       }
     }
-    const send = shadow.getElementById('ssb-send');
-    const stop = shadow.getElementById('ssb-stop');
-    if (send) {
-      send.disabled = state.sending;
-      if (state.sending) {
-        send.textContent = state.stopRequested ? '⏳ Đang dừng…' : '⏳ Đang gửi…';
-      } else {
-        send.textContent = (state.sentIds && state.sentIds.size > 0 ? '▶ Charging tiếp' : '▶ Charging');
-      }
-    }
-    if (stop) {
-      if (state.sending) {
-        stop.disabled = false;
-        stop.textContent = '⏹ Dừng';
-      } else if (state.sentIds && state.sentIds.size > 0) {
-        stop.disabled = false;
-        stop.textContent = '↺ Reset';
-      } else {
-        stop.disabled = true;
-        stop.textContent = '⏹ Dừng';
-      }
-    }
-
-    if (send) send.textContent = state.sending
-      ? (state.stopRequested ? '⏳ Đang dừng…' : '⏳ Đang gửi…')
-      : (state.sentIds && state.sentIds.size > 0 ? '▶ Chạy tiếp' : '▶ Chạy');
+    applyRunStopButtons();
 
     const el = shadow.getElementById('ssb-log');
     if (el) {
