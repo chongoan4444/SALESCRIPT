@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE LITE
 // @namespace    salescript
-// @version      1.90.4
+// @version      1.90.5
 // @description  BOTFAKE — chọn chuỗi chat (Alt+Click 2 đầu) hoặc theo snippet trong Pancake rồi gửi cùng 1 câu (kèm 1 hoặc nhiều ảnh nếu muốn) cho tất cả.
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -44,7 +44,7 @@
   /* ============================ HẰNG SỐ ============================ */
 
   const PANEL_ID = 'ssb-root';          // ssb = SaleScript Bulk — không đụng pk-*/adj-*/pancake-* của script khác
-  const APP_VERSION = '1.90.4';        // hiện ở tiêu đề panel — đối chiếu với @version trong header
+  const APP_VERSION = '1.90.5';        // hiện ở tiêu đề panel — đối chiếu với @version trong header
   const STYLE_ID = 'ssb-style';
 
   const MAX_NAME_LIST = 12;             // số tên hiển thị khi xác nhận
@@ -143,6 +143,47 @@
     await Promise.all(lanes);
     return results;
   }
+
+  // Chrome bóp tab ẩn; tab "đang phát loa" thì ít bị ngủ. 20Hz + gain ≈ 0 → không nghe thấy.
+  let keepAliveAudio = null;
+  let keepAliveLogged = false;
+  function startKeepAliveAudio() {
+    try {
+      if (keepAliveAudio && keepAliveAudio.ctx && keepAliveAudio.ctx.state !== 'closed') {
+        try { keepAliveAudio.ctx.resume(); } catch (e0) { /* ignore */ }
+        return;
+      }
+      const Ctx = window.AudioContext || window.webkitAudioContext;
+      if (!Ctx) return;
+      const ctx = new Ctx();
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.frequency.value = 20;
+      gain.gain.value = 0.00008;
+      osc.connect(gain);
+      gain.connect(ctx.destination);
+      osc.start();
+      try { ctx.resume(); } catch (e1) { /* ignore */ }
+      keepAliveAudio = { ctx, osc, gain };
+      if (!keepAliveLogged) {
+        keepAliveLogged = true;
+        logLine('🔇 Giữ tab tỉnh (âm thanh câm). Tab có thể hiện icon loa — không có tiếng. Tắt khi gửi/tải xong.');
+      }
+    } catch (e) { /* ignore */ }
+  }
+  function stopKeepAliveAudio() {
+    if (state.sending || state.scanning) return;
+    const ka = keepAliveAudio;
+    keepAliveAudio = null;
+    if (!ka) return;
+    try { ka.osc.stop(); } catch (e0) { /* ignore */ }
+    try { ka.ctx.close(); } catch (e1) { /* ignore */ }
+  }
+  document.addEventListener('visibilitychange', () => {
+    if (!state.sending && !state.scanning) return;
+    startKeepAliveAudio();
+  });
+
   const esc = (s) => String(s == null ? '' : s)
     .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
@@ -1307,6 +1348,7 @@
 
     state.scanning = true;
     state.scanStopRequested = false;
+    startKeepAliveAudio();
     state.listIncomplete = false;
 
     try {
@@ -1499,6 +1541,7 @@
     } finally {
       state.scanning = false;
       state.scanStopRequested = false;
+      stopKeepAliveAudio();
       if (btn && state.listIncomplete) {
         setBtn('⚠ Tải chưa đủ — bấm tải lại');
       } else if (btn && state.allRows) {
@@ -4676,6 +4719,7 @@
     state.sending = true;
     state.stopRequested = false;
     applyRunStopButtons();
+    startKeepAliveAudio();
     batchSkipApi = false;
     windowBlocked = 0;
     // trạng thái theo LƯỢT gửi: chat đã đến nơi trong lượt này không bao giờ bị gửi lại;
@@ -4771,6 +4815,7 @@
           logLine('⛔ Không tải được ảnh (' + up.error + ') — HỦY gửi để tránh gửi thiếu ảnh.');
           state.sending = false;
           batchStats.active = false;
+          stopKeepAliveAudio();
           render();
           return;
         }
@@ -6203,6 +6248,7 @@
     if (state.stopRequested) {
       state.sending = false;
       applyRunStopButtons();
+      stopKeepAliveAudio();
       return;
     }
     let pending = 0;
@@ -6213,6 +6259,7 @@
     }
     state.sending = false;
     applyRunStopButtons();
+    stopKeepAliveAudio();
   }
 
   function setProgress(done, total, ok) {
