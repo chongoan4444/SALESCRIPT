@@ -15,6 +15,10 @@
     "https://*/*",
     "http://*/*"
   ],
+  "action": {
+    "default_title": "BOTFAKE LITE",
+    "default_popup": "popup.html"
+  },
   "background": {
     "service_worker": "background.js"
   },
