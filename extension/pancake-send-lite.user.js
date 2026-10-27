@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE LITE
 // @namespace    salescript
-// @version      1.91.23
+// @version      1.91.30
 // @description  BOTFAKE — panel hiện mọi website; gửi/tải list qua extension background.
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -2244,12 +2244,26 @@
       const makeFetchOpts = (rObj) => (rObj.isJson
         ? { method: 'POST', body: JSON.stringify(rObj.jsonBody), headers: { Accept: 'application/json', 'Content-Type': 'application/json' }, credentials: 'include' }
         : { method: 'POST', body: rObj.fd, headers: { Accept: 'application/json' }, credentials: 'include' });
-      let res = await fetch(req.url, makeFetchOpts(req));
+      // fetch CÓ HẠN 20s: request treo (mạng chập / tab bị bóp) phải tự văng lỗi để chốt,
+      // không kẹt "đang xác nhận nền" vĩnh viễn (lỗi làm TỔNG HỢP không bao giờ chốt)
+      const timedFetch = async (rObj) => {
+        const opts = makeFetchOpts(rObj);
+        let ctl = null;
+        let abTimer = null;
+        if (typeof AbortController !== 'undefined') {
+          ctl = new AbortController();
+          opts.signal = ctl.signal;
+          abTimer = setTimeout(() => { try { ctl.abort(); } catch (e0) { /* ignore */ } }, 20000);
+        }
+        try { return await fetch(req.url, opts); }
+        finally { if (abTimer) clearTimeout(abTimer); }
+      };
+      let res = await timedFetch(req);
       if (res && res.status === 429 && myRun === runSeq && !state.stopRequested) {
         await sleep(600);
         const req2 = buildInboxSend(conv, text, photo);
         if (!req2.error) {
-          res = await fetch(req2.url, makeFetchOpts(req2));
+          res = await timedFetch(req2);
         }
       }
       if (myRun !== runSeq) return;
@@ -3423,7 +3437,11 @@
           if (myRun !== runSeq) return;
           settleSocketResult(rawKind)
             .then((res) => { if (myRun === runSeq) finalizeSockBg(res); })
-            .catch(() => { sockFiredPending.delete(conv.id); });
+            .catch(() => {
+              sockFiredPending.delete(conv.id);
+              // lỗi khi chờ ACK Socket: phải chốt ⚠, chỉ xóa cờ chờ thì chat kẹt pending vĩnh viễn
+              if (myRun === runSeq && window && typeof window.__botfakeTrackStatus__ === 'function') window.__botfakeTrackStatus__(conv.id, 'uncertain');
+            });
         };
         pageLane(() => socketPublishSend(helper, pageId, gid, text, attFbIds, settleAndFinalize))
           .then((imm) => {
@@ -4713,6 +4731,7 @@
 
   function markDelivered(convId, via) {
     if (!convId) return;
+    clearBgPending(convId);
     const ch = (via === 'ext' || via === 'extension') ? 'ext' : (via === 'socket' ? 'socket' : 'api');
     const prev = deliveredIds[convId];
     if (prev === ch) { updateBatchSummaryUI(); return; }
@@ -4732,6 +4751,7 @@
 
   window.__botfakeTrackStatus__ = function (convId, kind) {
     if (!convId || deliveredIds[convId]) return;
+    clearBgPending(convId);
     if (kind === 'fail') {
       // đã từng bị watchdog chốt ⚠ mà sau đó bù chốt lỗi hẳn → chuyển nhóm, không đếm 2 lần
       if (uncertainIds[convId]) { delete uncertainIds[convId]; summaryCounters.unsure = Math.max(0, summaryCounters.unsure - 1); }
@@ -4819,7 +4839,12 @@
           : await sendViaSocket(conv, text, photo, buCtx);
         return { ch, r };
       }).then((out) => {
-        if (!out || !out.ch) return;
+        if (!out || !out.ch) {
+          // bước chuẩn bị bù văng lỗi (lane trả {ok:false}) — phải chốt, không im lặng kẹt pending
+          if (window && typeof window.__botfakeTrackStatus__ === 'function') window.__botfakeTrackStatus__(conv.id, 'fail');
+          logLine('❌ ' + name + ' — bù lỗi: ' + clip((out && out.error) || 'không rõ', 90));
+          return;
+        }
         const ch = out.ch;
         const r = out.r;
         if (r && r.ok) {
@@ -5216,7 +5241,7 @@
         // kết quả fired sẽ chặn nhầm bước bù nền → "báo gửi nhưng không gửi gì" (bug v1.39.0).
         // Chỉ đánh dấu khi kênh XÁC NHẬN thành công thật (kể cả xác nhận nền — fireApiAndWatch).
         if (!r.fired) { markDelivered(c.id, r.sendBy || 'api'); postSendSideEffects(c); }
-        if (r.fired) firedN++;
+        if (r.fired) { firedN++; noteBgPending(c, r.sendBy); } // vào sổ watchdog — quá 90s tự chốt, không kẹt
         logLine('✅ [' + done + '/' + totalAll + '] ' + (c.name || c.id) + ' — đã gửi' + via
           + (r.fired ? ' (đang xác nhận nền — nếu bị từ chối sẽ tự bù và báo)' : ''));
       } else if (r.uncertain) {
