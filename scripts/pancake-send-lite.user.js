@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE LITE
 // @namespace    salescript
-// @version      1.91.0
+// @version      1.91.1
 // @description  BOTFAKE — chọn chuỗi chat (Alt+Click 2 đầu) hoặc theo snippet trong Pancake rồi gửi cùng 1 câu (kèm 1 hoặc nhiều ảnh nếu muốn) cho tất cả.
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -44,7 +44,7 @@
   /* ============================ HẰNG SỐ ============================ */
 
   const PANEL_ID = 'ssb-root';          // ssb = SaleScript Bulk — không đụng pk-*/adj-*/pancake-* của script khác
-  const APP_VERSION = '1.91.0';        // hiện ở tiêu đề panel — đối chiếu với @version trong header
+  const APP_VERSION = '1.91.1';        // hiện ở tiêu đề panel — đối chiếu với @version trong header
   const STYLE_ID = 'ssb-style';
 
   const MAX_NAME_LIST = 12;             // số tên hiển thị khi xác nhận
@@ -237,11 +237,19 @@
     };
   }
 
+  let lastBgConvById = {};
+  let lastBgPhoto = null;
+  let lastBgText = '';
+
   function runExtensionBgSend(sendGroups, pack) {
     return new Promise((resolve, reject) => {
+      lastBgConvById = {};
+      lastBgPhoto = pack && pack.photo ? pack.photo : null;
+      lastBgText = (sendGroups[0] && sendGroups[0].text) || '';
       const targets = [];
       (sendGroups || []).forEach((g) => {
         (g.list || []).forEach((c) => {
+          lastBgConvById[c.id] = c;
           targets.push({
             id: c.id,
             pageId: c.pageId || String(c.id || '').split('_')[0],
@@ -261,6 +269,14 @@
       const onMsg = (msg) => {
         if (!msg || !msg.type) return;
         if (msg.type === 'BOTFAKE_BG_LOG' && msg.line) logLine(msg.line);
+        if (msg.type === 'BOTFAKE_BG_FALLBACK' && msg.item && msg.item.id) {
+          const conv = lastBgConvById[msg.item.id];
+          if (conv && typeof scheduleBuRetry === 'function') {
+            const nm = conv.name || conv.id;
+            const tx = msg.item.text != null ? msg.item.text : lastBgText;
+            scheduleBuRetry(conv, tx, lastBgPhoto, nm, 'API từ chối (' + clip(msg.error || '', 90) + ')', ['api']);
+          }
+        }
         if (msg.type === 'BOTFAKE_BG_PROGRESS') {
           summaryCounters.okApi = msg.ok || 0;
           summaryCounters.fail = msg.fail || 0;
@@ -5284,7 +5300,7 @@
         await waitInitialGidWarmup(targets, 1500);
       } catch (e) { /* làm nóng lỗi không được làm hỏng lô */ }
       if (extBgAvailable()) {
-        logLine('🚀 Gửi NỀN qua extension — đổi tab không bị Chrome bóp (kênh API).');
+        logLine('🚀 Gửi NỀN qua extension (API). Chat API từ chối sẽ bù Socket/Ext trên tab Pancake.');
         const bg = await runExtensionBgSend(sendGroups, {
           photo: photo,
           qrPhotoByPage: qrPhotoByPage,

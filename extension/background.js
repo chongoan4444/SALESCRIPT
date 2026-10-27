@@ -162,11 +162,20 @@ async function runBgSend(tabId, job) {
       try {
         const { res, data } = await postInbox(apiBase, token, item, text, photo);
         const success = !!(res && res.ok && data && data.success);
+        const errMsg = (data && (data.message || data.error)) || ('HTTP ' + (res && res.status));
+        const certainFail = !success && res && ((res.status >= 400 && res.status < 500) || (res.ok && data && data.success === false));
         if (success) ok++;
-        else {
+        else if (certainFail) {
+          tell(tabId, {
+            type: 'BOTFAKE_BG_FALLBACK',
+            item: item,
+            text: text,
+            error: String(errMsg || ''),
+          });
+          tell(tabId, { type: 'BOTFAKE_BG_LOG', line: '⚠ ' + (item.name || item.id) + ' — API từ chối (' + String(errMsg).slice(0, 90) + ') — bù Socket/Ext trên tab Pancake' });
+        } else {
           fail++;
-          const msg = (data && (data.message || data.error)) || ('HTTP ' + (res && res.status));
-          tell(tabId, { type: 'BOTFAKE_BG_LOG', line: '❌ ' + (item.name || item.id) + ' — ' + String(msg).slice(0, 120) });
+          tell(tabId, { type: 'BOTFAKE_BG_LOG', line: '❌ ' + (item.name || item.id) + ' — ' + String(errMsg).slice(0, 120) });
         }
       } catch (e) {
         fail++;
