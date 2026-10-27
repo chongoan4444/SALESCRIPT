@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE LITE
 // @namespace    salescript
-// @version      1.91.31
+// @version      1.91.32
 // @description  BOTFAKE — panel hiện mọi website; gửi/tải list qua extension background.
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -44,7 +44,7 @@
   /* ============================ HẰNG SỐ ============================ */
 
   const PANEL_ID = 'ssb-root';          // ssb = SaleScript Bulk — không đụng pk-*/adj-*/pancake-* của script khác
-  const APP_VERSION = '1.91.31';        // hiện ở tiêu đề panel — đối chiếu với @version trong header
+  const APP_VERSION = '1.91.32';        // hiện ở tiêu đề panel — đối chiếu với @version trong header
   const STYLE_ID = 'ssb-style';
 
   const MAX_NAME_LIST = 12;             // số tên hiển thị khi xác nhận
@@ -122,8 +122,14 @@
   const norm = (s) => (s || '').normalize('NFC').replace(/\s+/g, ' ').trim();
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+  let sentIdsSaveTimer = null;
   function saveSentIds() {
-    try { localStorage.setItem('SSB_SENT_IDS', JSON.stringify(Array.from(state.sentIds))); } catch (e) { /* ignore */ }
+    // Gộp ghi: markDelivered chạy mỗi tin — ghi đồng bộ cả tập id mỗi lần là O(N^2), đơ UI lô lớn
+    if (sentIdsSaveTimer) return;
+    sentIdsSaveTimer = setTimeout(() => {
+      sentIdsSaveTimer = null;
+      try { localStorage.setItem('SSB_SENT_IDS', JSON.stringify(Array.from(state.sentIds))); } catch (e) { /* ignore */ }
+    }, 500);
   }
 
   // Chạy song song tối đa `limit` task cùng lúc (limit = items.length ⇒ "1 phát" tất cả)
@@ -221,6 +227,7 @@
 
   let extJobAt = 0;
   function reportExtJob(extra) {
+    if (!extBgAvailable()) return; // không có bridge extension → khỏi tạo listener/timer vô ích
     extra = extra || {};
     const now = Date.now();
     // Lượt phát lệnh xong → ẩn overlay (không để kẹt 100% vì tin còn xác nhận/bù).
@@ -239,10 +246,10 @@
       done: extra.done,
       pageName: getPageDisplayName(),
     };
-    extCall(payload);
+    extCall(payload, 3000); // báo tiến độ — không cần chờ lâu
   }
 
-  function extCall(payload) {
+  function extCall(payload, waitMs) {
     return new Promise((resolve) => {
       try {
         if (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.sendMessage) {
@@ -263,7 +270,7 @@
       setTimeout(() => {
         window.removeEventListener('message', on);
         resolve({ res: null, err: 'timeout' });
-      }, 120000);
+      }, waitMs || 120000);
     });
   }
   function extListen(fn) {
@@ -859,19 +866,24 @@
       method: (reqOpts && reqOpts.method) || 'GET',
       bodyObj: (reqOpts && reqOpts.bodyObj) || null,
       timeoutMs: (reqOpts && reqOpts.timeoutMs) || 15000,
-    }).then((out) => {
+    }, ((reqOpts && reqOpts.timeoutMs) || 15000) * (tries || 3) + 8000).then((out) => {
       if (out && out.res) return out.res;
       return { ok: false, error: (out && out.err) || 'SW fetch lỗi' };
     });
   }
 
   // GET/POST an toàn cho tải danh sách: tự thử lại khi bị rate-limit (429)/5xx/lỗi mạng; trả lỗi kèm chi tiết
+  let bgDeadUntil = 0; // mốc SW fetch chết → tạm fetch thẳng trên trang
   async function fetchJson(url, tries, reqOpts) {
     // Tab đang mở: fetch ngay trên trang (đúng cookie/token như app).
     // Tab ẩn: mới chuyển SW để khỏi bị Chrome bóp.
     // Đổi tab → Chrome bóp fetch trên trang. SW (1.91.11) gắn cookie jwt của pancake.vn.
-    if (extBgAvailable()) {
-      return bgFetchJson(url, tries, reqOpts);
+    if (extBgAvailable() && Date.now() >= bgDeadUntil) {
+      const r = await bgFetchJson(url, tries, reqOpts);
+      const transport = r && !r.ok
+        && /^(timeout|SW fetch lỗi|The message port|Could not establish|Extension context)/i.test(String(r.error || ''));
+      if (!transport) return r;
+      bgDeadUntil = Date.now() + 60000; // SW chết/mất bridge → 60s tới fetch trên trang, không treo 120s/lần gọi
     }
     const max = tries || 3;
     const isPost = !!(reqOpts && String(reqOpts.method || '').toUpperCase() === 'POST');
@@ -1492,6 +1504,7 @@
         const before = seg0.items.length;
         const res = await fetchPage(seg0.pageCount, seg0.cursor, seg0.items.length, { forceMulti: forceMultiEndpoint, tries: 3, timeoutMs: 12000 });
         if (!res.ok) {
+          if (stopped() || res.error === 'stopped') break; // người dùng bấm dừng — không phải lỗi
           // v1.84.0: luồng gốc gặp lỗi lẻ (mạng chập chờn/server ì) thì nghỉ rồi tải tiếp ĐÚNG
           // cursor, tối đa 8 lần — danh sách chỉ thật sự hết khi server báo hết dữ liệu.
           seg0.errRetry = (seg0.errRetry || 0) + 1;
@@ -2312,6 +2325,16 @@
     return { ok: true, id: '', sendBy: 'api', sent: true, fired: true };
   }
 
+  // fetch CÓ HẠN cho đường đồng bộ: kết nối treo phải tự văng lỗi (rơi vào catch có sẵn
+  // của caller → 'maybe'/thử lại), không giữ worker/lane vô hạn
+  async function fetchT(url, opts, ms) {
+    if (typeof AbortController === 'undefined') return fetch(url, opts);
+    const ctl = new AbortController();
+    const t = setTimeout(() => { try { ctl.abort(); } catch (e) { /* ignore */ } }, ms || 30000);
+    try { return await fetch(url, Object.assign({}, opts, { signal: ctl.signal })); }
+    finally { clearTimeout(t); }
+  }
+
   // Đúng request mà _app-...js gửi khi nhắn tin thường (executeByApi + buildRequestBody):
   //   POST /api/v1/pages/{page_id}/conversations/{conversation.id}/messages?access_token=...
   //   multipart/form-data (1 ảnh / text) hoặc JSON (>= 2 ảnh): action=reply_inbox, message=<text>
@@ -2325,12 +2348,12 @@
       const makeFetchOpts = (rObj) => (rObj.isJson
         ? { method: 'POST', body: JSON.stringify(rObj.jsonBody), headers: { Accept: 'application/json', 'Content-Type': 'application/json' }, credentials: 'include' }
         : { method: 'POST', body: rObj.fd, headers: { Accept: 'application/json' }, credentials: 'include' });
-      let res = await fetch(req.url, makeFetchOpts(req));
+      let res = await fetchT(req.url, makeFetchOpts(req), 30000);
       if (res && res.status === 429 && !state.stopRequested) {
         await sleep(600);
         const req2 = buildInboxSend(conv, text, photo);
         if (!req2.error) {
-          res = await fetch(req2.url, makeFetchOpts(req2));
+          res = await fetchT(req2.url, makeFetchOpts(req2), 30000);
         }
       }
       let data = {};
@@ -2500,7 +2523,7 @@
       const cc = key && convCtxCache[key];
       const cached = (key && ((g1 && g1.get(key)) || (g2 && g2.get(key)) || persistentGidMap[key] || (cc && cc.gid)))
         || (tKey && ((g1 && g1.get(tKey)) || (g2 && g2.get(tKey)) || persistentGidMap[tKey]));
-      if (cached && String(cached) !== badGid) return String(cached);
+      if (cached && String(cached) !== badGid && !/^\[object /.test(String(cached))) return String(cached);
       const rawGData = gidFromPayload(f) || f.globalId || (conv && conv.globalId)
         || (f.customers && f.customers[0] && f.customers[0].global_id) || '';
       if (rawGData && String(rawGData) !== badGid) {
@@ -3678,10 +3701,10 @@
     let lastErr = '';
     for (let attempt = 1; attempt <= 3; attempt++) {
       try {
-        const res = await fetch(url, {
+        const res = await fetchT(url, {
           method: 'POST', body: JSON.stringify(body), credentials: 'include',
           headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
-        });
+        }, 20000);
         const j = await res.json().catch(() => null);
         if (res.ok && j && j.success && Array.isArray(j.fb_ids) && j.fb_ids.length) {
           return { ok: true, fbId: String(j.fb_ids[0]), fbIds: j.fb_ids.map((x) => String(x)) };
@@ -4629,12 +4652,29 @@
     if (!bgWatchdogTimer) bgWatchdogTimer = setInterval(sweepBgPending, 5000);
   }
   function clearBgPending(convId) { if (convId) delete pendingBg[convId]; }
+  let bgLaneBusyAt = 0;
+  function sendLanesBusy() {
+    try {
+      const lanes = [apiSendLane, extPrepLane, extSendLane, photoUploadLane, gidExtLane];
+      for (let i = 0; i < lanes.length; i++) {
+        if (lanes[i].waitingCount() > 0 || lanes[i].activeCount() > 0) return true;
+      }
+      const ks = Object.keys(pageSocketLanes);
+      for (let i = 0; i < ks.length; i++) if (pageSocketLanes[ks[i]].waitingCount() > 0) return true;
+    } catch (e) { /* ignore */ }
+    return false;
+  }
   function sweepBgPending() {
     const now = Date.now();
+    // Lô lớn: tin ở đuôi hàng đợi lane có thể chờ >90s mới tới lượt bắn — lane còn việc
+    // thì KHÔNG được coi là treo (chốt oan + TỔNG HỢP chốt sai + nhả nút Chạy sớm)
+    if (sendLanesBusy()) bgLaneBusyAt = now;
     let forced = 0;
     Object.keys(pendingBg).forEach((id) => {
       const e = pendingBg[id];
-      if (e && now - (e.at || 0) >= BG_SETTLE_DEADLINE_MS) {
+      if (!e) return;
+      if (deliveredIds[id] || finalFailedIds[id] || uncertainIds[id] || skippedLateIds[id]) { delete pendingBg[id]; return; }
+      if (now - Math.max(e.at || 0, bgLaneBusyAt) >= BG_SETTLE_DEADLINE_MS) {
         delete pendingBg[id];
         try { sockFiredPending.delete(id); } catch (e0) { /* ignore */ }
         if (window && typeof window.__botfakeTrackStatus__ === 'function') window.__botfakeTrackStatus__(id, 'uncertain');
@@ -4764,8 +4804,12 @@
     if (finalFailedIds[convId]) { delete finalFailedIds[convId]; summaryCounters.fail = Math.max(0, summaryCounters.fail - 1); }
     if (uncertainIds[convId]) { delete uncertainIds[convId]; summaryCounters.unsure = Math.max(0, summaryCounters.unsure - 1); }
     deliveredIds[convId] = ch;
-    if (convId) state.sentIds.add(convId);
-    saveSentIds();
+    // Lượt đã kết thúc bình thường (không bấm Dừng) thì sentIds đã được dọn ở cuối sendToAll —
+    // ACK trễ KHÔNG được nạp lại, nếu không lượt sau bỏ qua oan gần hết chat (mất tin im lặng)
+    if (convId && !(batchStats.loopFinished && !state.stopRequested)) {
+      state.sentIds.add(convId);
+      saveSentIds();
+    }
     if (ch === 'ext') summaryCounters.okExt++;
     else if (ch === 'socket') summaryCounters.okSocket++;
     else summaryCounters.okApi++;
@@ -4970,7 +5014,6 @@
     state.stopRequested = false;
     applyRunStopButtons();
     startKeepAliveAudio();
-    reportExtJob({ phase: 'send', pct: 0, ok: 0, total: 0 });
     batchSkipApi = false;
     windowBlocked = 0;
     // trạng thái theo LƯỢT gửi: chat đã đến nơi trong lượt này không bao giờ bị gửi lại;
@@ -5001,6 +5044,7 @@
     batchStats.startedAt = Date.now();
     batchStats.loopFinished = false;
     batchStats.finalLogged = false;
+    reportExtJob({ phase: 'send', pct: 0, ok: 0, total: 0 }); // sau reset — không bị lượt cũ đổi thành idle
     render();
     // Khởi động warmUpSockets + BATCH_GET_GLOBAL_ID NGAY TỪ ĐẦU (chạy song song với lọc tag + upload ảnh)
     try { warmUpSockets(targets); } catch (e) { /* ignore */ }
@@ -5067,6 +5111,7 @@
           logLine('⛔ Không tải được ảnh (' + up.error + ') — HỦY gửi để tránh gửi thiếu ảnh.');
           state.sending = false;
           batchStats.active = false;
+          reportExtJob({ phase: 'idle' });
           stopKeepAliveAudio();
           render();
           return;
@@ -5161,13 +5206,14 @@
         const pArg = (pt.items && pt.items.length)
           ? { items: pt.items, url: pt.items[0].url, id: pt.items[0].id, fbId: (pt.apiFbIds && pt.apiFbIds[0]) || '', fbIds: pt.apiFbIds || [], w: pt.items[0].w || 0, h: pt.items[0].h || 0 }
           : null;
-        // CÂU NHIỀU ĐOẠN: phải gửi ĐỒNG BỘ từng đoạn (đoạn trước xác nhận xong mới bắn đoạn kế).
-        // Giữ bắn-nhả (fired) thì đoạn 1 giữ outboundLock/sockFiredPending → sendOne đoạn 2+
-        // trả ok GIẢ (dup-block) mà không gửi gì — khách chỉ nhận đoạn đầu. Nhả khóa giữa các
-        // đoạn; đoạn 2+ tắt quick/sockFired/fastOnly để chờ xác nhận thật, đúng thứ tự.
-        const ptOpts = (i === 0) ? sendOpts
-          : Object.assign({}, sendOpts, { quick: false, sockFired: false, fastOnly: false, deferredCtx: null });
+        // CÂU NHIỀU ĐOẠN: MỌI đoạn đều gửi ĐỒNG BỘ (kể cả đoạn 0). Đoạn 0 bắn-nhả sẽ nằm
+        // trong apiSendLane trong khi đoạn 1 đi thẳng → đảo thứ tự; ACK đoạn 0 về còn set
+        // deliveredIds làm đoạn 2+ bị guard chặn trả ok giả. Đồng bộ hết = xác nhận thật,
+        // đúng thứ tự; nhả khóa chống trùng giữa các đoạn.
+        const ptOpts = Object.assign({}, sendOpts, { quick: false, sockFired: false });
         if (i > 0) {
+          ptOpts.fastOnly = false;
+          ptOpts.deferredCtx = null;
           try { sockFiredPending.delete(c.id); } catch (e0) { /* ignore */ }
           releaseOutbound(c.id);
         }
@@ -5322,6 +5368,15 @@
     //     chiếm mất bất kỳ ghế nào của Làn 1!
     const FAST_HTTP_SOCKET_POOL = 192; // v1.80.0: 160→192 worker làn nhanh
     const EXT_BACKLOG_WORKERS = 48;
+    // Worker văng exception → chốt ⚠ cho đúng chat đó rồi ĐI TIẾP, không để sập cả pool
+    // (pool sập = các worker còn lại thành mồ côi, chat kẹt pending vĩnh viễn)
+    const settleInternalError = (c, e) => {
+      done++; unsure++;
+      if (window && typeof window.__botfakeTrackStatus__ === 'function') window.__botfakeTrackStatus__(c.id, 'uncertain');
+      logLine('⚠ ' + (c.name || c.id) + ' — lỗi nội bộ (' + clip(String(e && e.message || e), 80)
+        + ') — không rõ tin đã đi chưa, KHÔNG gửi thêm');
+      return { ok: false, uncertain: true, error: 'lỗi nội bộ' };
+    };
     let gtextRef = '';
     const sendBatch = async (gtext, batch) => {
       gtextRef = gtext;
@@ -5370,10 +5425,13 @@
         while (!state.stopRequested) {
           const item = await popFromExtBacklog();
           if (!item || state.stopRequested) break;
-          const r = await sendOneAndLog(item.c, gtextRef, {
-            fastOnly: false,
-            deferredCtx: item.deferredCtx || null,
-          });
+          let r;
+          try {
+            r = await sendOneAndLog(item.c, gtextRef, {
+              fastOnly: false,
+              deferredCtx: item.deferredCtx || null,
+            });
+          } catch (e) { settleInternalError(item.c, e); continue; }
           if (r && !r.ok && r.error && r.error.indexOf('Token') === 0) {
             logLine('⛔ Dừng sớm vì token không còn hợp lệ.');
             state.stopRequested = true;
@@ -5399,7 +5457,9 @@
 
       const runFastItem = async (c) => {
         if (state.stopRequested) return null;
-        const r = await sendOneAndLog(c, gtextRef, { fastOnly: true });
+        let r;
+        try { r = await sendOneAndLog(c, gtextRef, { fastOnly: true }); }
+        catch (e) { return settleInternalError(c, e); }
         if (r && r.deferredToExt) {
           pushToExtBacklog({ c, deferredCtx: r.deferredCtx || null });
           return r;
@@ -6399,7 +6459,15 @@
       if (state.sentIds && state.sentIds.size > 0) {
         logLine('⏩ Có ' + state.sentIds.size + ' chat đã gửi ở lượt trước — sẽ bỏ qua, chỉ gửi phần còn lại.');
       }
-      sendToAll();
+      sendToAll().catch((err) => {
+        // Đường chốt cuối: exception nào thoát khỏi sendToAll cũng phải nhả nút + tắt overlay
+        logLine('⛔ Lỗi ngoài dự kiến khi gửi: ' + (err && err.message || err) + ' — dừng lượt.');
+        state.stopRequested = true;
+        batchStats.loopFinished = true;
+        markSendIdleIfSettled();
+        reportExtJob({ phase: 'idle' });
+        render();
+      });
     });
     const requestStop = () => {
       if (!state.sending) return;
