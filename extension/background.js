@@ -67,18 +67,25 @@ function resolvePhoto(item, photo) {
 
 async function postInbox(apiBase, token, item, text, photo) {
   const pageId = item.pageId || String(item.id || '').split('_')[0];
-  const url = String(apiBase).replace(/\/$/, '') + '/v1/pages/' + pageId
+  let url = String(apiBase).replace(/\/$/, '') + '/v1/pages/' + pageId
     + '/conversations/' + encodeURIComponent(item.id)
     + '/messages?access_token=' + encodeURIComponent(token);
+  const auth = await pancakeCookieJar(url);
+  if (auth.jwt) url = urlWithJwt(url, auth.jwt);
   const items = (photo && Array.isArray(photo.items) && photo.items.length) ? photo.items : (photo ? [photo] : []);
   const fbIds = (photo && Array.isArray(photo.fbIds) && photo.fbIds.length)
     ? photo.fbIds
     : items.map((x) => x.fbId || (photo && photo.fbId) || '');
 
   const doFetch = async (body, isJson) => {
-    const res = await fetch(url, isJson
-      ? { method: 'POST', credentials: 'include', headers: { Accept: 'application/json', 'Content-Type': 'application/json' }, body: JSON.stringify(body) }
-      : { method: 'POST', credentials: 'include', headers: { Accept: 'application/json' }, body: body });
+    const headers = { Accept: 'application/json' };
+    if (isJson) headers['Content-Type'] = 'application/json';
+    const res = await fetch(url, {
+      method: 'POST',
+      credentials: 'include',
+      headers,
+      body: isJson ? JSON.stringify(body) : body,
+    });
     let data = null;
     try { data = await res.json(); } catch (e) { data = null; }
     return { res, data };
