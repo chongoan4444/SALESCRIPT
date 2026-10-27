@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE LITE
 // @namespace    salescript
-// @version      1.91.22
+// @version      1.91.23
 // @description  BOTFAKE — panel hiện mọi website; gửi/tải list qua extension background.
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -44,7 +44,7 @@
   /* ============================ HẰNG SỐ ============================ */
 
   const PANEL_ID = 'ssb-root';          // ssb = SaleScript Bulk — không đụng pk-*/adj-*/pancake-* của script khác
-  const APP_VERSION = '1.91.22';        // hiện ở tiêu đề panel — đối chiếu với @version trong header
+  const APP_VERSION = '1.91.23';        // hiện ở tiêu đề panel — đối chiếu với @version trong header
   const STYLE_ID = 'ssb-style';
 
   const MAX_NAME_LIST = 12;             // số tên hiển thị khi xác nhận
@@ -5336,14 +5336,25 @@
         warmUpSockets(targets);
         await waitInitialGidWarmup(targets, 1500);
       } catch (e) { /* làm nóng lỗi không được làm hỏng lô */ }
-      // Tab Pancake như 1.90.5: cookie_session. SW jwt hay trả (#551) rồi bù Ext từng con.
-      for (let gi = 0; gi < sendGroups.length && !state.stopRequested; gi++) {
-        const g = sendGroups[gi];
-        if (sendGroups.length > 1) {
-          logLine('📤 [' + (gi + 1) + '/' + sendGroups.length + '] nội dung “' + clip(g.text, 50) + '” → ' + g.list.length + ' chat');
+      if (extBgAvailable()) {
+        logLine('🚀 Gửi NỀN: SW + cookie jar (giữ cookie_session, không thế JWT). #551 hàng loạt → báo để quay tab.');
+        const bg = await runExtensionBgSend(sendGroups, {
+          photo: photo,
+          qrPhotoByPage: qrPhotoByPage,
+          apiFbIdsByPage: apiFbIdsByPage,
+          fbIdByPage: fbIdByPage,
+        });
+        done = (bg && bg.done) || done;
+        if (bg && bg.stopped) state.stopRequested = true;
+      } else {
+        for (let gi = 0; gi < sendGroups.length && !state.stopRequested; gi++) {
+          const g = sendGroups[gi];
+          if (sendGroups.length > 1) {
+            logLine('📤 [' + (gi + 1) + '/' + sendGroups.length + '] nội dung “' + clip(g.text, 50) + '” → ' + g.list.length + ' chat');
+          }
+          if (useWaves) await runWaves(g.text, g.list);
+          else await sendBatch(g.text, g.list);
         }
-        if (useWaves) await runWaves(g.text, g.list);
-        else await sendBatch(g.text, g.list);
       }
     } catch (e) {
       sendErr = e;

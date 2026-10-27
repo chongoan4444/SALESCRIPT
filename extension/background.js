@@ -65,13 +65,45 @@ function resolvePhoto(item, photo) {
   return photo;
 }
 
-async function postInbox(apiBase, token, item, text, photo) {
+const DNR_COOKIE_RULE = 91723;
+
+async function setSwCookieRule(cookieHeader, apiBase) {
+  if (!cookieHeader || !chrome.declarativeNetRequest) return;
+  let domain = 'pancake.vn';
+  try { domain = new URL(apiBase).hostname; } catch (e0) { /* keep */ }
+  try {
+    await chrome.declarativeNetRequest.updateDynamicRules({
+      removeRuleIds: [DNR_COOKIE_RULE],
+      addRules: [{
+        id: DNR_COOKIE_RULE,
+        priority: 1,
+        action: {
+          type: 'modifyHeaders',
+          requestHeaders: [{ header: 'cookie', operation: 'set', value: cookieHeader }],
+        },
+        condition: {
+          requestDomains: [domain],
+          resourceTypes: ['xmlhttprequest', 'other'],
+        },
+      }],
+    });
+  } catch (e1) { /* DNR không gắn Cookie được thì fetch tự thử header */ }
+}
+
+async function clearSwCookieRule() {
+  try {
+    if (chrome.declarativeNetRequest) {
+      await chrome.declarativeNetRequest.updateDynamicRules({ removeRuleIds: [DNR_COOKIE_RULE], addRules: [] });
+    }
+  } catch (e0) { /* ignore */ }
+}
+
+async function postInbox(apiBase, token, item, text, photo, cookieHeader) {
   const pageId = item.pageId || String(item.id || '').split('_')[0];
-  let url = String(apiBase).replace(/\/$/, '') + '/v1/pages/' + pageId
+  // Giữ access_token=cookie_session như HAR — không thế JWT (jwt query → #551).
+  const url = String(apiBase).replace(/\/$/, '') + '/v1/pages/' + pageId
     + '/conversations/' + encodeURIComponent(item.id)
-    + '/messages?access_token=' + encodeURIComponent(token);
-  const auth = await pancakeCookieJar(url);
-  if (auth.jwt) url = urlWithJwt(url, auth.jwt);
+    + '/messages?access_token=' + encodeURIComponent(token || 'cookie_session');
   const items = (photo && Array.isArray(photo.items) && photo.items.length) ? photo.items : (photo ? [photo] : []);
   const fbIds = (photo && Array.isArray(photo.fbIds) && photo.fbIds.length)
     ? photo.fbIds
@@ -80,12 +112,20 @@ async function postInbox(apiBase, token, item, text, photo) {
   const doFetch = async (body, isJson) => {
     const headers = { Accept: 'application/json' };
     if (isJson) headers['Content-Type'] = 'application/json';
-    const res = await fetch(url, {
+    const opts = {
       method: 'POST',
       credentials: 'include',
       headers,
       body: isJson ? JSON.stringify(body) : body,
-    });
+    };
+    let res;
+    try {
+      if (cookieHeader) opts.headers = Object.assign({}, headers, { Cookie: cookieHeader });
+      res = await fetch(url, opts);
+    } catch (hdrErr) {
+      opts.headers = headers;
+      res = await fetch(url, opts);
+    }
     let data = null;
     try { data = await res.json(); } catch (e) { data = null; }
     return { res, data };
@@ -156,8 +196,10 @@ async function runBgSend(tabId, job) {
     return;
   }
 
+  const auth = await pancakeCookieJar(String(apiBase).replace(/\/$/, '') + '/');
+  await setSwCookieRule(auth.cookieHeader, apiBase);
   await bump();
-  tell(tabId, { type: 'BOTFAKE_BG_LOG', line: '🚀 Gửi NỀN ' + total + ' chat (API, ' + CONCURRENCY + ' luồng) — đổi tab không bị bóp.' });
+  tell(tabId, { type: 'BOTFAKE_BG_LOG', line: '🚀 Gửi NỀN ' + total + ' chat (API + cookie jar, giữ cookie_session, ' + CONCURRENCY + ' luồng).' });
 
   const worker = async () => {
     while (true) {
@@ -168,7 +210,7 @@ async function runBgSend(tabId, job) {
       const text = item.text != null ? item.text : (job.text || '');
       const photo = resolvePhoto(item, job.photo);
       try {
-        const { res, data } = await postInbox(apiBase, token, item, text, photo);
+        const { res, data } = await postInbox(apiBase, token, item, text, photo, auth.cookieHeader);
         const success = !!(res && res.ok && data && data.success);
         const errMsg = (data && (data.message || data.error)) || ('HTTP ' + (res && res.status));
         const certainFail = !success && res && ((res.status >= 400 && res.status < 500) || (res.ok && data && data.success === false));
@@ -194,21 +236,25 @@ async function runBgSend(tabId, job) {
     }
   };
 
-  const n = Math.max(1, Math.min(CONCURRENCY, total));
-  await Promise.all(Array.from({ length: n }, () => worker()));
-  await bump();
-  const stopped = !!(bgCtl[tabId] && bgCtl[tabId].stop);
-  tell(tabId, {
-    type: 'BOTFAKE_BG_DONE',
-    ok: true,
-    stopped,
-    okN: ok,
-    fail,
-    total,
-    done,
-  });
-  bgCtl[tabId].running = false;
-  await upsert(tabId, { phase: 'idle', sending: false, scanning: false });
+  try {
+    const n = Math.max(1, Math.min(CONCURRENCY, total));
+    await Promise.all(Array.from({ length: n }, () => worker()));
+    await bump();
+    const stopped = !!(bgCtl[tabId] && bgCtl[tabId].stop);
+    tell(tabId, {
+      type: 'BOTFAKE_BG_DONE',
+      ok: true,
+      stopped,
+      okN: ok,
+      fail,
+      total,
+      done,
+    });
+  } finally {
+    bgCtl[tabId].running = false;
+    await clearSwCookieRule();
+    await upsert(tabId, { phase: 'idle', sending: false, scanning: false });
+  }
 }
 
 function formFromObj(obj) {
@@ -229,9 +275,14 @@ async function pancakeCookieJar(url) {
   const out = { cookieHeader: '', jwt: '' };
   try {
     const u = new URL(url);
-    const list = await chrome.cookies.getAll({ url: u.origin + '/' });
-    out.cookieHeader = (list || []).map((c) => c.name + '=' + c.value).join('; ');
-    const jwtC = (list || []).find((c) => c.name === 'jwt');
+    const byName = {};
+    const add = (list) => { (list || []).forEach((c) => { if (c && c.name) byName[c.name] = c.value; }); };
+    add(await chrome.cookies.getAll({ url: u.origin + '/' }));
+    add(await chrome.cookies.getAll({ domain: u.hostname }));
+    const parts = u.hostname.split('.');
+    if (parts.length >= 2) add(await chrome.cookies.getAll({ domain: parts.slice(-2).join('.') }));
+    out.cookieHeader = Object.keys(byName).map((n) => n + '=' + byName[n]).join('; ');
+    const jwtC = byName.jwt ? { name: 'jwt', value: byName.jwt } : null;
     if (jwtC && jwtC.value) {
       let v = jwtC.value;
       try { v = decodeURIComponent(v); } catch (e) { /* raw */ }
