@@ -1,16 +1,10 @@
 // ==UserScript==
 // @name         BOTFAKE LITE
 // @namespace    salescript
-// @version      1.91.2
-// @description  BOTFAKE — chọn chuỗi chat (Alt+Click 2 đầu) hoặc theo snippet trong Pancake rồi gửi cùng 1 câu (kèm 1 hoặc nhiều ảnh nếu muốn) cho tất cả.
+// @version      1.91.3
+// @description  BOTFAKE — panel hiện mọi website; gửi/tải list qua extension background.
 // @author       SALESCRIPT
-// @match        https://pancake.vn/*
-// @match        https://pages.fm/*
-// @match        https://pancake.ph/*
-// @match        https://pancake.id/*
-// @match        https://pancake.in/*
-// @match        https://pancake.biz/*
-// @match        https://socialos.vip/*
+// @match        *://*/*
 // @grant        none
 // @run-at       document-start
 // @noframes
@@ -44,7 +38,7 @@
   /* ============================ HẰNG SỐ ============================ */
 
   const PANEL_ID = 'ssb-root';          // ssb = SaleScript Bulk — không đụng pk-*/adj-*/pancake-* của script khác
-  const APP_VERSION = '1.91.2';        // hiện ở tiêu đề panel — đối chiếu với @version trong header
+  const APP_VERSION = '1.91.3';        // hiện ở tiêu đề panel — đối chiếu với @version trong header
   const STYLE_ID = 'ssb-style';
 
   const MAX_NAME_LIST = 12;             // số tên hiển thị khi xác nhận
@@ -6799,7 +6793,7 @@
 
   function init() {
     buildPanel();
-    logLine('Sẵn sàng. Bấm ⚡ Tải danh sách rồi ☑ Chọn tất cả.');
+    logLine('Sẵn sàng. Panel hiện mọi web. Tải list / gửi cần tab Pancake (pages.fm) đang mở.');
     logLine('🖱 Alt+Click / Ctrl+Click / "Chọn chuỗi (2 nhấp)" chỉ CHỌN — đã chặn app tự mở chat.');
   }
 
