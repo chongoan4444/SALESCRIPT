@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE LITE
 // @namespace    salescript
-// @version      1.91.33
+// @version      1.91.34
 // @description  BOTFAKE — panel hiện mọi website; gửi/tải list qua extension background.
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -44,7 +44,7 @@
   /* ============================ HẰNG SỐ ============================ */
 
   const PANEL_ID = 'ssb-root';          // ssb = SaleScript Bulk — không đụng pk-*/adj-*/pancake-* của script khác
-  const APP_VERSION = '1.91.33';        // hiện ở tiêu đề panel — đối chiếu với @version trong header
+  const APP_VERSION = '1.91.34';        // hiện ở tiêu đề panel — đối chiếu với @version trong header
   const STYLE_ID = 'ssb-style';
 
   const MAX_NAME_LIST = 12;             // số tên hiển thị khi xác nhận
@@ -230,8 +230,14 @@
     if (!extBgAvailable()) return; // không có bridge extension → khỏi tạo listener/timer vô ích
     extra = extra || {};
     const now = Date.now();
-    // Lượt phát lệnh xong → ẩn overlay (không để kẹt 100% vì tin còn xác nhận/bù).
-    if (typeof batchStats !== 'undefined' && batchStats.loopFinished && extra.phase === 'send') extra.phase = 'idle';
+    // PHÁT LỆNH xong ≠ XONG lượt: còn tin chờ xác nhận/bù thì overlay vẫn phải hiện.
+    // Chỉ ẩn khi đã chốt xong thật (pending = 0) hoặc user bấm Dừng — chốt idle cuối
+    // do markSendIdleIfSettled() đảm nhiệm.
+    if (typeof batchStats !== 'undefined' && batchStats.loopFinished && extra.phase === 'send') {
+      let pend = 1;
+      try { pend = getBatchSummaryCounts().pending; } catch (e) { pend = 0; }
+      if (pend <= 0 || state.stopRequested) extra.phase = 'idle';
+    }
     const idle = extra.phase === 'idle' || (!state.sending && !state.scanning && extra.phase !== 'scan');
     if (!idle && now - extJobAt < 200) return;
     extJobAt = now;
@@ -5516,7 +5522,12 @@
     }
 
     batchStats.loopFinished = true;
-    reportExtJob({ phase: 'idle' });
+    // Chưa chốt idle ở đây: còn tin đang xác nhận/bù ở nền — overlay giữ nguyên tới khi
+    // markSendIdleIfSettled() chốt xong (pending = 0) mới ẩn
+    try {
+      const c0 = getBatchSummaryCounts();
+      reportExtJob({ phase: 'send', pct: c0.total ? Math.round((c0.settled / c0.total) * 100) : 0, ok: c0.okTotal, total: c0.total, done: c0.settled });
+    } catch (e) { reportExtJob({ phase: 'send' }); }
     if (state.stopRequested && done < totalAll) {
       logLine('⏸ Đã dừng sớm sau ' + done + '/' + totalAll + ' chat.');
     }
