@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE LITE
 // @namespace    salescript
-// @version      1.91.10
+// @version      1.91.11
 // @description  BOTFAKE — panel hiện mọi website; gửi/tải list qua extension background.
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -44,7 +44,7 @@
   /* ============================ HẰNG SỐ ============================ */
 
   const PANEL_ID = 'ssb-root';          // ssb = SaleScript Bulk — không đụng pk-*/adj-*/pancake-* của script khác
-  const APP_VERSION = '1.91.10';        // hiện ở tiêu đề panel — đối chiếu với @version trong header
+  const APP_VERSION = '1.91.11';        // hiện ở tiêu đề panel — đối chiếu với @version trong header
   const STYLE_ID = 'ssb-style';
 
   const MAX_NAME_LIST = 12;             // số tên hiển thị khi xác nhận
@@ -831,7 +831,8 @@
   async function fetchJson(url, tries, reqOpts) {
     // Tab đang mở: fetch ngay trên trang (đúng cookie/token như app).
     // Tab ẩn: mới chuyển SW để khỏi bị Chrome bóp.
-    if (extBgAvailable() && typeof document !== 'undefined' && document.hidden) {
+    // Đổi tab → Chrome bóp fetch trên trang. SW (1.91.11) gắn cookie jwt của pancake.vn.
+    if (extBgAvailable()) {
       return bgFetchJson(url, tries, reqOpts);
     }
     const max = tries || 3;

@@ -217,8 +217,37 @@ function formFromObj(obj) {
   return fd;
 }
 
+async function pancakeCookieJar(url) {
+  const out = { cookieHeader: '', jwt: '' };
+  try {
+    const u = new URL(url);
+    const list = await chrome.cookies.getAll({ url: u.origin + '/' });
+    out.cookieHeader = (list || []).map((c) => c.name + '=' + c.value).join('; ');
+    const jwtC = (list || []).find((c) => c.name === 'jwt');
+    if (jwtC && jwtC.value) {
+      let v = jwtC.value;
+      try { v = decodeURIComponent(v); } catch (e) { /* raw */ }
+      v = String(v).replace(/^"|"$/g, '');
+      if (v.indexOf('eyJ') === 0 && v.split('.').length === 3) out.jwt = v;
+    }
+  } catch (e) { /* no cookies perm */ }
+  return out;
+}
+
+function urlWithJwt(url, jwt) {
+  if (!jwt) return url;
+  if (/access_token=cookie_session/.test(url)) {
+    return url.replace(/access_token=cookie_session/, 'access_token=' + encodeURIComponent(jwt));
+  }
+  return url;
+}
+
 async function swFetchJson(msg) {
-  const url = msg.url;
+  let url = msg.url;
+  const auth = await pancakeCookieJar(url);
+  // SW không gửi cookie phiên như tab pancake.vn → cookie_session = Invalid access_token.
+  // Gắn Cookie + thay access_token bằng jwt HttpOnly (chrome.cookies đọc được).
+  if (auth.jwt) url = urlWithJwt(url, auth.jwt);
   const max = msg.tries || 3;
   const isPost = String(msg.method || 'GET').toUpperCase() === 'POST';
   const timeoutMs = msg.timeoutMs || 15000;
@@ -227,13 +256,23 @@ async function swFetchJson(msg) {
     const ctl = new AbortController();
     const timer = setTimeout(() => ctl.abort(), timeoutMs);
     try {
-      const r = await fetch(url, {
+      const headers = { Accept: 'application/json' };
+      const opts = {
         method: isPost ? 'POST' : 'GET',
         body: (isPost && msg.bodyObj) ? formFromObj(msg.bodyObj) : undefined,
         credentials: 'include',
         cache: 'no-store',
         signal: ctl.signal,
-      });
+        headers,
+      };
+      let r;
+      try {
+        if (auth.cookieHeader) opts.headers = Object.assign({}, headers, { Cookie: auth.cookieHeader });
+        r = await fetch(url, opts);
+      } catch (hdrErr) {
+        opts.headers = headers;
+        r = await fetch(url, opts);
+      }
       clearTimeout(timer);
       if (r.status === 429 || r.status >= 500) {
         lastErr = 'HTTP ' + r.status;
