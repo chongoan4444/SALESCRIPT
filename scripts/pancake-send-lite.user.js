@@ -5336,25 +5336,14 @@
         warmUpSockets(targets);
         await waitInitialGidWarmup(targets, 1500);
       } catch (e) { /* làm nóng lỗi không được làm hỏng lô */ }
-      if (extBgAvailable()) {
-        logLine('🚀 Gửi NỀN: SW + cookie jar (giữ cookie_session, không thế JWT). #551 hàng loạt → báo để quay tab.');
-        const bg = await runExtensionBgSend(sendGroups, {
-          photo: photo,
-          qrPhotoByPage: qrPhotoByPage,
-          apiFbIdsByPage: apiFbIdsByPage,
-          fbIdByPage: fbIdByPage,
-        });
-        done = (bg && bg.done) || done;
-        if (bg && bg.stopped) state.stopRequested = true;
-      } else {
-        for (let gi = 0; gi < sendGroups.length && !state.stopRequested; gi++) {
-          const g = sendGroups[gi];
-          if (sendGroups.length > 1) {
-            logLine('📤 [' + (gi + 1) + '/' + sendGroups.length + '] nội dung “' + clip(g.text, 50) + '” → ' + g.list.length + ' chat');
-          }
-          if (useWaves) await runWaves(g.text, g.list);
-          else await sendBatch(g.text, g.list);
+      // SW gửi inbox thất bại: jwt → #551; cookie jar → Invalid access_token. Chỉ tab pancake.vn.
+      for (let gi = 0; gi < sendGroups.length && !state.stopRequested; gi++) {
+        const g = sendGroups[gi];
+        if (sendGroups.length > 1) {
+          logLine('📤 [' + (gi + 1) + '/' + sendGroups.length + '] nội dung “' + clip(g.text, 50) + '” → ' + g.list.length + ' chat');
         }
+        if (useWaves) await runWaves(g.text, g.list);
+        else await sendBatch(g.text, g.list);
       }
     } catch (e) {
       sendErr = e;
