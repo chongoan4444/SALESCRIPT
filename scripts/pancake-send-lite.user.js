@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE LITE
 // @namespace    salescript
-// @version      1.91.3
+// @version      1.91.4
 // @description  BOTFAKE — panel hiện mọi website; gửi/tải list qua extension background.
 // @author       SALESCRIPT
 // @match        *://*/*
@@ -38,7 +38,7 @@
   /* ============================ HẰNG SỐ ============================ */
 
   const PANEL_ID = 'ssb-root';          // ssb = SaleScript Bulk — không đụng pk-*/adj-*/pancake-* của script khác
-  const APP_VERSION = '1.91.3';        // hiện ở tiêu đề panel — đối chiếu với @version trong header
+  const APP_VERSION = '1.91.4';        // hiện ở tiêu đề panel — đối chiếu với @version trong header
   const STYLE_ID = 'ssb-style';
 
   const MAX_NAME_LIST = 12;             // số tên hiển thị khi xác nhận
@@ -6793,7 +6793,7 @@
 
   function init() {
     buildPanel();
-    logLine('Sẵn sàng. Panel hiện mọi web. Tải list / gửi cần tab Pancake (pages.fm) đang mở.');
+    logLine('Sẵn sàng. Dùng trên pancake.vn (tab page). Đổi web khác vẫn thấy panel.');
     logLine('🖱 Alt+Click / Ctrl+Click / "Chọn chuỗi (2 nhấp)" chỉ CHỌN — đã chặn app tự mở chat.');
   }
 
