@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE LITE
 // @namespace    salescript
-// @version      1.91.40
+// @version      1.91.41
 // @description  BOTFAKE — panel hiện mọi website; gửi/tải list qua extension background.
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -44,7 +44,7 @@
   /* ============================ HẰNG SỐ ============================ */
 
   const PANEL_ID = 'ssb-root';          // ssb = SaleScript Bulk — không đụng pk-*/adj-*/pancake-* của script khác
-  const APP_VERSION = '1.91.40';        // hiện ở tiêu đề panel — đối chiếu với @version trong header
+  const APP_VERSION = '1.91.41';        // hiện ở tiêu đề panel — đối chiếu với @version trong header
   const STYLE_ID = 'ssb-style';
 
   const MAX_NAME_LIST = 12;             // số tên hiển thị khi xác nhận
@@ -3310,6 +3310,7 @@
           probePhotoUp = await uploadOneTimePhoto(pageId, photo, conv.id, ctx, true);
           if (probePhotoUp && probePhotoUp.ok && probePhotoUp.fbId) {
             ctx.nonReusableFbId = null;
+            sendDiag.photoRetry++;
             sendPhotoRes = await pageLane(() => socketPublishSend(helper, pageId, gid, '', (probePhotoUp.fbIds && probePhotoUp.fbIds.length) ? probePhotoUp.fbIds : [probePhotoUp.fbId]));
             if (sendPhotoRes && sendPhotoRes.kind === 'ok') {
               recordSocketGidSuccess();
@@ -3332,6 +3333,7 @@
         const freshPhotoUp = await uploadOneTimePhoto(pageId, photo, conv.id, ctx, true);
         if (freshPhotoUp && freshPhotoUp.ok && freshPhotoUp.fbId) {
           ctx.nonReusableFbId = null;
+          sendDiag.photoRetry++;
           const retryPhotoOnly = await pageLane(() => socketPublishSend(helper, pageId, gid, '', (freshPhotoUp.fbIds && freshPhotoUp.fbIds.length) ? freshPhotoUp.fbIds : [freshPhotoUp.fbId]));
           if (retryPhotoOnly && retryPhotoOnly.kind === 'ok') {
             recordSocketGidSuccess();
@@ -3363,6 +3365,7 @@
         // Chat đã được kênh khác xác nhận đến nơi trong lúc chờ ACK → dừng, không bắn lại (chống trùng)
         if (deliveredIds[conv.id]) return { ok: true, id: gid, sendBy: 'socket', sent: true };
         ctx.socketRetriedOnce = true;
+        sendDiag.sockRetry++;
         await sleep(100);
         // Kiểm tra xem trong 100ms đó WebSocket threadMappingStoreV2 có nạp được global_id mới hơn không
         if (threadId && pageId) {
@@ -3400,6 +3403,11 @@
         }
       }
       if (raw && raw.ok === false && raw.sent === false && raw.error) {
+        // Lane bọc exception thành 'Lỗi kênh:' = không rõ publish đã đi chưa → "không rõ"
+        // như mọi đường khác; passthrough sent:false ở đây sẽ cho kênh khác bắn lần 2 (LẶP)
+        if (String(raw.error).indexOf('Lỗi kênh:') === 0) {
+          return { ok: false, sent: 'maybe', error: 'Socket lỗi giữa chừng — không gửi thêm để tránh trùng' };
+        }
         return { ok: false, sent: false, error: raw.error };
       }
       if (raw.kind === 'ok') {
@@ -4660,6 +4668,9 @@
   // ở lô lớn — đếm theo lý do kích hoạt + số lượt bù bị HỦY vì tin đã đến nơi trong lúc
   // chờ lane, để khỏi phải mò trong log vài nghìn dòng khi truy nguyên nhân lặp
   const buStats = { ok: 0, cancelled: 0, byWhy: {} };
+  // Đếm các lần BẮN LẠI cùng nội dung ngay trong 1 lần gửi Socket (retry khi FB báo
+  // rejected + bắn lại riêng ảnh) — in vào TỔNG HỢP để đối chiếu với phản ánh lặp của khách
+  const sendDiag = { sockRetry: 0, photoRetry: 0 };
   function buWhyBucket(why) {
     const w = String(why || '');
     if (w.indexOf('API từ chối') === 0) return 'API tu choi';
@@ -4818,6 +4829,9 @@
           + (c.skipTotal ? ' | 🧹 Bỏ qua: ' + c.skipTotal : '')
           + ((buStats.ok || buStats.cancelled)
             ? ' | 🔁 Bù OK: ' + buStats.ok + ' (' + Object.keys(buStats.byWhy).map((k) => k + ': ' + buStats.byWhy[k]).join(' · ') + ') · hủy bù tránh trùng: ' + buStats.cancelled
+            : '')
+          + ((sendDiag.sockRetry || sendDiag.photoRetry)
+            ? ' | 🔂 Socket bắn lại sau rejected: ' + sendDiag.sockRetry + ' · bắn lại ảnh: ' + sendDiag.photoRetry
             : '')
           + ' | ⏱ Tổng thời gian: ' + elapsedSec + 's');
       }
@@ -5112,6 +5126,7 @@
     batchStats.startedAt = Date.now();
     batchStats.loopFinished = false;
     buStats.ok = 0; buStats.cancelled = 0; buStats.byWhy = {};
+    sendDiag.sockRetry = 0; sendDiag.photoRetry = 0;
     batchStats.finalLogged = false;
     reportExtJob({ phase: 'send', pct: 0, ok: 0, total: 0 }); // sau reset — không bị lượt cũ đổi thành idle
     render();
