@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE LITE
 // @namespace    salescript
-// @version      1.91.39
+// @version      1.91.40
 // @description  BOTFAKE — panel hiện mọi website; gửi/tải list qua extension background.
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -44,7 +44,7 @@
   /* ============================ HẰNG SỐ ============================ */
 
   const PANEL_ID = 'ssb-root';          // ssb = SaleScript Bulk — không đụng pk-*/adj-*/pancake-* của script khác
-  const APP_VERSION = '1.91.39';        // hiện ở tiêu đề panel — đối chiếu với @version trong header
+  const APP_VERSION = '1.91.40';        // hiện ở tiêu đề panel — đối chiếu với @version trong header
   const STYLE_ID = 'ssb-style';
 
   const MAX_NAME_LIST = 12;             // số tên hiển thị khi xác nhận
@@ -4656,6 +4656,19 @@
 
   /* ===== BÙ VÒNG 2 — chống mất tin khi server nghẽn ngay sau khi bắn dồn ===== */
   const BU_RETRY_EXT_MS = 50;   // Ext: bù TỨC THÌ (50ms) — không chờ 1s
+  // THỐNG KÊ BÙ theo lượt (in vào dòng TỔNG HỢP cuối log): bù là đường dễ gây LẶP nhất
+  // ở lô lớn — đếm theo lý do kích hoạt + số lượt bù bị HỦY vì tin đã đến nơi trong lúc
+  // chờ lane, để khỏi phải mò trong log vài nghìn dòng khi truy nguyên nhân lặp
+  const buStats = { ok: 0, cancelled: 0, byWhy: {} };
+  function buWhyBucket(why) {
+    const w = String(why || '');
+    if (w.indexOf('API từ chối') === 0) return 'API tu choi';
+    if (w.indexOf('Socket bị từ chối') === 0) return 'Socket tu choi';
+    if (w.indexOf('gửi thẳng') === 0) return 'Gui thang fail';
+    if (w.indexOf('gửi chưa được') === 0) return 'Lan dau fail';
+    if (w.indexOf('bù ') === 0) return 'Chuoi bu';
+    return 'Khac';
+  }
   const BU_RETRY_MS = 1000;     // Socket: kênh dự phòng cuối (1s)
   const BU_SPREAD_MS = 50;      // rải nhẹ 50ms — hàng đợi Socket/Ext vốn đã tự điều tiết
   const buRetryDone = {}; // convId → đã bù trong lượt này
@@ -4803,6 +4816,9 @@
           + ' | ❌ Lỗi: ' + c.failTotal
           + (c.unsureTotal ? ' | ⚠ Không rõ: ' + c.unsureTotal : '')
           + (c.skipTotal ? ' | 🧹 Bỏ qua: ' + c.skipTotal : '')
+          + ((buStats.ok || buStats.cancelled)
+            ? ' | 🔁 Bù OK: ' + buStats.ok + ' (' + Object.keys(buStats.byWhy).map((k) => k + ': ' + buStats.byWhy[k]).join(' · ') + ') · hủy bù tránh trùng: ' + buStats.cancelled
+            : '')
           + ' | ⏱ Tổng thời gian: ' + elapsedSec + 's');
       }
     } catch (e) { /* ignore */ }
@@ -4934,10 +4950,12 @@
         // lô lớn), ACK của lần đầu có thể đã về hoặc watchdog đã chốt — kiểm tra ở timer
         // là chưa đủ, cứ bắn là LẶP (đây là nguồn của đoàn "bù thành công" cuối log)
         if (deliveredIds[conv.id]) {
+          buStats.cancelled++;
           logLine('✓ ' + name + ' — tin đã đến nơi trong lúc chờ bù — hủy bù (tránh trùng).');
           return { ch: null, delivered: true };
         }
         if (uncertainIds[conv.id] || finalFailedIds[conv.id]) {
+          buStats.cancelled++;
           logLine('✓ ' + name + ' — đã chốt trạng thái cuối trong lúc chờ bù — hủy bù (tránh trùng).');
           return { ch: null, delivered: true };
         }
@@ -4966,6 +4984,8 @@
           markDelivered(conv.id, ch);
           postSendSideEffects(conv);
           markChannel(conv.id, ch); // lần gửi sau vào thẳng kênh vừa thắng
+          buStats.ok++;
+          buStats.byWhy[buWhyBucket(why)] = (buStats.byWhy[buWhyBucket(why)] || 0) + 1;
           logLine('✅ ' + name + ' — bù THÀNH CÔNG qua ' + (ch === 'ext' ? 'Extension' : 'Socket'));
         } else if (r && r.sent === 'maybe') {
           if (window && typeof window.__botfakeTrackStatus__ === 'function') window.__botfakeTrackStatus__(conv.id, 'uncertain');
@@ -5091,6 +5111,7 @@
     batchStats.skippedPre = 0;
     batchStats.startedAt = Date.now();
     batchStats.loopFinished = false;
+    buStats.ok = 0; buStats.cancelled = 0; buStats.byWhy = {};
     batchStats.finalLogged = false;
     reportExtJob({ phase: 'send', pct: 0, ok: 0, total: 0 }); // sau reset — không bị lượt cũ đổi thành idle
     render();
