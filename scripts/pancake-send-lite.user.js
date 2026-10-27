@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE LITE
 // @namespace    salescript
-// @version      1.91.1
+// @version      1.91.2
 // @description  BOTFAKE — chọn chuỗi chat (Alt+Click 2 đầu) hoặc theo snippet trong Pancake rồi gửi cùng 1 câu (kèm 1 hoặc nhiều ảnh nếu muốn) cho tất cả.
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -44,7 +44,7 @@
   /* ============================ HẰNG SỐ ============================ */
 
   const PANEL_ID = 'ssb-root';          // ssb = SaleScript Bulk — không đụng pk-*/adj-*/pancake-* của script khác
-  const APP_VERSION = '1.91.1';        // hiện ở tiêu đề panel — đối chiếu với @version trong header
+  const APP_VERSION = '1.91.2';        // hiện ở tiêu đề panel — đối chiếu với @version trong header
   const STYLE_ID = 'ssb-style';
 
   const MAX_NAME_LIST = 12;             // số tên hiển thị khi xác nhận
@@ -266,16 +266,42 @@
         photo: serializeBgPhoto(pack.photo, pack.qrPhotoByPage, pack.apiFbIdsByPage, pack.fbIdByPage),
         targets: targets,
       };
+      let buLeft = 0;
+      let doneMsg = null;
+      const finishIfReady = () => {
+        if (!doneMsg || buLeft > 0) return;
+        try { chrome.runtime.onMessage.removeListener(onMsg); } catch (e1) { /* ignore */ }
+        summaryCounters.okApi = doneMsg.okN || 0;
+        summaryCounters.fail = doneMsg.fail || 0;
+        if (doneMsg.stopped) state.stopRequested = true;
+        resolve(doneMsg);
+      };
       const onMsg = (msg) => {
         if (!msg || !msg.type) return;
         if (msg.type === 'BOTFAKE_BG_LOG' && msg.line) logLine(msg.line);
         if (msg.type === 'BOTFAKE_BG_FALLBACK' && msg.item && msg.item.id) {
           const conv = lastBgConvById[msg.item.id];
-          if (conv && typeof scheduleBuRetry === 'function') {
-            const nm = conv.name || conv.id;
-            const tx = msg.item.text != null ? msg.item.text : lastBgText;
-            scheduleBuRetry(conv, tx, lastBgPhoto, nm, 'API từ chối (' + clip(msg.error || '', 90) + ')', ['api']);
-          }
+          if (!conv) return;
+          const nm = conv.name || conv.id;
+          const tx = msg.item.text != null ? msg.item.text : lastBgText;
+          buLeft++;
+          Promise.resolve()
+            .then(() => sendOne(conv, tx, lastBgPhoto, { skipApi: true, awaitDirect: true, quick: true }))
+            .then((r) => {
+              if (r && r.ok) {
+                if (r.sendBy === 'socket') summaryCounters.okSocket++;
+                else if (r.sendBy === 'extension' || r.sendBy === 'ext') summaryCounters.okExt++;
+                logLine('✅ ' + nm + ' — bù THÀNH CÔNG qua ' + (r.sendBy === 'socket' ? 'Socket' : 'Extension'));
+              } else if (r && r.recipientUnavailable) {
+                summaryCounters.fail++;
+                logLine('❌ ' + nm + ' — bù không được: ' + clip((r && r.error) || '', 90));
+              } else if (r && !r.ok) {
+                logLine('⚠ ' + nm + ' — bù: ' + clip((r && r.error) || 'không rõ', 90));
+                scheduleBuRetry(conv, tx, lastBgPhoto, nm, 'API từ chối (' + clip(msg.error || '', 90) + ')', ['api']);
+              }
+            })
+            .catch((e) => { logLine('❌ ' + nm + ' — bù lỗi: ' + (e && e.message || e)); })
+            .then(() => { buLeft--; finishIfReady(); });
         }
         if (msg.type === 'BOTFAKE_BG_PROGRESS') {
           summaryCounters.okApi = msg.ok || 0;
@@ -285,11 +311,8 @@
           try { updateBatchSummaryUI(); } catch (e0) { /* ignore */ }
         }
         if (msg.type === 'BOTFAKE_BG_DONE') {
-          try { chrome.runtime.onMessage.removeListener(onMsg); } catch (e1) { /* ignore */ }
-          summaryCounters.okApi = msg.okN || 0;
-          summaryCounters.fail = msg.fail || 0;
-          if (msg.stopped) state.stopRequested = true;
-          resolve(msg);
+          doneMsg = msg;
+          finishIfReady();
         }
       };
       try { chrome.runtime.onMessage.addListener(onMsg); } catch (e) { reject(e); return; }
@@ -753,8 +776,32 @@
     return fd;
   }
 
+  function bgFetchJson(url, tries, reqOpts) {
+    return new Promise((resolve) => {
+      try {
+        chrome.runtime.sendMessage({
+          type: 'BOTFAKE_BG_FETCH',
+          url: url,
+          tries: tries || 3,
+          method: (reqOpts && reqOpts.method) || 'GET',
+          bodyObj: (reqOpts && reqOpts.bodyObj) || null,
+          timeoutMs: (reqOpts && reqOpts.timeoutMs) || 15000,
+        }, (res) => {
+          if (chrome.runtime.lastError || !res) {
+            resolve({ ok: false, error: (chrome.runtime.lastError && chrome.runtime.lastError.message) || 'SW fetch lỗi' });
+            return;
+          }
+          resolve(res);
+        });
+      } catch (e) {
+        resolve({ ok: false, error: String(e && e.message || e) });
+      }
+    });
+  }
+
   // GET/POST an toàn cho tải danh sách: tự thử lại khi bị rate-limit (429)/5xx/lỗi mạng; trả lỗi kèm chi tiết
   async function fetchJson(url, tries, reqOpts) {
+    if (extBgAvailable()) return bgFetchJson(url, tries, reqOpts);
     const max = tries || 3;
     const isPost = !!(reqOpts && String(reqOpts.method || '').toUpperCase() === 'POST');
     let lastErr = '';

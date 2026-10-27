@@ -203,9 +203,72 @@ async function runBgSend(tabId, job) {
   await upsert(tabId, { phase: 'idle', sending: false, scanning: false });
 }
 
+function formFromObj(obj) {
+  const fd = new FormData();
+  if (!obj || typeof obj !== 'object') return fd;
+  Object.keys(obj).forEach((k) => {
+    const val = obj[k];
+    if (val !== null && typeof val === 'object' && !(val instanceof File)) {
+      Object.keys(val).forEach((sub) => { fd.append(k + '[' + sub + ']', String(val[sub])); });
+    } else if (val !== undefined) {
+      fd.append(k, String(val));
+    }
+  });
+  return fd;
+}
+
+async function swFetchJson(msg) {
+  const url = msg.url;
+  const max = msg.tries || 3;
+  const isPost = String(msg.method || 'GET').toUpperCase() === 'POST';
+  const timeoutMs = msg.timeoutMs || 15000;
+  let lastErr = '';
+  for (let t = 1; t <= max; t++) {
+    const ctl = new AbortController();
+    const timer = setTimeout(() => ctl.abort(), timeoutMs);
+    try {
+      const r = await fetch(url, {
+        method: isPost ? 'POST' : 'GET',
+        body: (isPost && msg.bodyObj) ? formFromObj(msg.bodyObj) : undefined,
+        credentials: 'include',
+        cache: 'no-store',
+        signal: ctl.signal,
+      });
+      clearTimeout(timer);
+      if (r.status === 429 || r.status >= 500) {
+        lastErr = 'HTTP ' + r.status;
+        if (t < max) { await new Promise((x) => setTimeout(x, 400 * t)); continue; }
+        return { ok: false, error: lastErr };
+      }
+      if (!r.ok) {
+        const body = (await r.text().catch(() => '')).slice(0, 140);
+        return { ok: false, error: 'HTTP ' + r.status + (body ? ' · ' + body : '') };
+      }
+      const txt = await r.text();
+      if (!txt || !txt.trim()) return { ok: true, data: { conversations: [] } };
+      try { return { ok: true, data: JSON.parse(txt) }; } catch (e) {
+        try { return { ok: true, data: JSON.parse(atob(txt)) }; } catch (e2) {
+          return { ok: false, error: 'Phản hồi không phải JSON' };
+        }
+      }
+    } catch (e) {
+      clearTimeout(timer);
+      lastErr = (e && e.name === 'AbortError') ? 'timeout' : ('Lỗi mạng: ' + (e && e.message || e));
+      if (t < max) { await new Promise((x) => setTimeout(x, 400 * t)); continue; }
+      return { ok: false, error: lastErr };
+    }
+  }
+  return { ok: false, error: lastErr || 'Không tải được' };
+}
+
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   const tabId = sender.tab && sender.tab.id;
   if (!msg || !msg.type) return;
+
+  if (msg.type === 'BOTFAKE_BG_FETCH') {
+    swFetchJson(msg).then((r) => sendResponse(r)).catch((e) => sendResponse({ ok: false, error: String(e) }));
+    return true;
+  }
 
   if (msg.type === 'BOTFAKE_JOB') {
     if (!tabId) { sendResponse && sendResponse({ ok: false }); return; }
