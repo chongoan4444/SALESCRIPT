@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE LITE
 // @namespace    salescript
-// @version      1.91.35
+// @version      1.91.36
 // @description  BOTFAKE — panel hiện mọi website; gửi/tải list qua extension background.
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -44,7 +44,7 @@
   /* ============================ HẰNG SỐ ============================ */
 
   const PANEL_ID = 'ssb-root';          // ssb = SaleScript Bulk — không đụng pk-*/adj-*/pancake-* của script khác
-  const APP_VERSION = '1.91.35';        // hiện ở tiêu đề panel — đối chiếu với @version trong header
+  const APP_VERSION = '1.91.36';        // hiện ở tiêu đề panel — đối chiếu với @version trong header
   const STYLE_ID = 'ssb-style';
 
   const MAX_NAME_LIST = 12;             // số tên hiển thị khi xác nhận
@@ -150,7 +150,9 @@
     return results;
   }
 
-  // Chrome bóp tab ẩn; tab "đang phát loa" thì ít bị ngủ. 20Hz + gain ≈ 0 → không nghe thấy.
+  // Chrome bóp tab ẩn; tab "đang phát loa" thì ít bị ngủ. Sóng 18Hz: loa thường không
+  // tái tạo thành tiếng nghe được, nhưng biên độ phải đủ lớn để Chrome ghi nhận tab
+  // "đang phát âm" (hiện icon loa + miễn bóp) — gain ≈ 0 thì Chrome coi như im lặng.
   let keepAliveAudio = null;
   let keepAliveLogged = false;
   function startKeepAliveAudio() {
@@ -164,13 +166,20 @@
       const ctx = new Ctx();
       const osc = ctx.createOscillator();
       const gain = ctx.createGain();
-      osc.frequency.value = 20;
-      gain.gain.value = 0.00008;
+      osc.frequency.value = 18;
+      gain.gain.value = 0.03;
       osc.connect(gain);
       gain.connect(ctx.destination);
       osc.start();
       try { ctx.resume(); } catch (e1) { /* ignore */ }
       keepAliveAudio = { ctx, osc, gain };
+      setTimeout(() => {
+        try {
+          if (keepAliveAudio && keepAliveAudio.ctx === ctx && ctx.state !== 'running') {
+            logLine('⚠ Âm giữ tab chưa chạy (trạng thái: ' + ctx.state + ') — Chrome đang chặn phát âm; bấm vào trang 1 cái rồi gửi tiếp, hoặc giữ tab Pancake ở phía trước.');
+          }
+        } catch (e2) { /* ignore */ }
+      }, 400);
       if (!keepAliveLogged) {
         keepAliveLogged = true;
         logLine('🔇 Giữ tab tỉnh (âm thanh câm). Tab có thể hiện icon loa — không có tiếng. Tắt khi gửi/tải xong.');
