@@ -1,5 +1,7 @@
 /* Isolated world: cầu chrome.runtime ↔ script MAIN (Redux Pancake) */
 (function () {
+  if (window.__BOTFAKE_BRIDGE__) return;
+  window.__BOTFAKE_BRIDGE__ = true;
   try { document.documentElement.setAttribute('data-botfake-ext', '1'); } catch (e) { /* ignore */ }
   window.addEventListener('message', (ev) => {
     if (ev.source !== window) return;

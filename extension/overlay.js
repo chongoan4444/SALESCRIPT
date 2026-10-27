@@ -58,4 +58,12 @@
   chrome.runtime.onMessage.addListener((msg) => {
     if (msg && msg.type === 'BOTFAKE_OVERLAY') render(msg.jobs || [], msg.running);
   });
+
+  // Tự xin trạng thái hiện tại: tab mở giữa chừng lúc đang gửi, hoặc SW vừa ngủ dậy
+  // làm lỡ các broadcast trước đó — không phải chờ đợt broadcast kế tiếp mới hiện
+  function pull() {
+    try { chrome.runtime.sendMessage({ type: 'BOTFAKE_GET_JOBS' }, () => void chrome.runtime.lastError); } catch (e) { /* ignore */ }
+  }
+  pull();
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) pull(); });
 })();

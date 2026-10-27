@@ -28,16 +28,36 @@ async function pancakeNumber(tabId) {
 }
 
 function listJobs() {
-  return Object.keys(jobs).map((k) => jobs[Number(k)]).filter(Boolean);
+  // job quá 3 phút không cập nhật = lượt đã chết (tab treo/script lỗi) → không hiện overlay ma
+  const now = Date.now();
+  return Object.keys(jobs)
+    .map((k) => jobs[Number(k)])
+    .filter((j) => j && now - (j.at || 0) < 180000);
+}
+
+let jobsHydrated = false;
+async function hydrateJobs() {
+  if (jobsHydrated) return;
+  jobsHydrated = true;
+  try {
+    const s = await chrome.storage.session.get('bfJobs');
+    const saved = s && s.bfJobs;
+    if (saved) Object.keys(saved).forEach((k) => { if (!jobs[k]) jobs[k] = saved[k]; });
+  } catch (e) { /* ignore */ }
+}
+function persistJobs() {
+  try { chrome.storage.session.set({ bfJobs: jobs }); } catch (e) { /* ignore */ }
 }
 
 async function upsert(tabId, data) {
+  await hydrateJobs();
   const n = await pancakeNumber(tabId);
   const prev = jobs[tabId] || {};
   const pageName = String((data && data.pageName) || prev.pageName || '').trim();
   const label = pageName || (n ? ('Pancake #' + n) : ('Tab ' + tabId));
   jobs[tabId] = Object.assign({}, prev, data, { tabId, n, pageName, label, at: Date.now() });
   if (data.phase === 'idle' && !data.sending && !data.scanning) delete jobs[tabId];
+  persistJobs(); // SW ngủ dậy vẫn còn job để phát lại (biến trong RAM mất khi SW tắt)
   await broadcast();
 }
 
@@ -368,6 +388,13 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     return true;
   }
 
+  if (msg.type === 'BOTFAKE_GET_JOBS') {
+    // overlay ở tab khác tự xin trạng thái (mới mở / vừa quay lại tab) → phát lại cho mọi tab
+    hydrateJobs().then(() => broadcast());
+    sendResponse && sendResponse({ ok: true });
+    return;
+  }
+
   if (msg.type === 'BOTFAKE_JOB') {
     if (!tabId) { sendResponse && sendResponse({ ok: false }); return; }
     upsert(tabId, msg).then(() => sendResponse && sendResponse({ ok: true }));
@@ -396,10 +423,25 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
 chrome.tabs.onRemoved.addListener((tabId) => {
   if (bgCtl[tabId]) bgCtl[tabId].stop = true;
-  if (jobs[tabId]) { delete jobs[tabId]; broadcast(); }
+  if (jobs[tabId]) { delete jobs[tabId]; persistJobs(); broadcast(); }
 });
 
 chrome.tabs.onMoved.addListener(() => broadcast());
 chrome.tabs.onUpdated.addListener((tabId, info) => {
   if (info.status === 'complete' || info.url) broadcast();
+});
+
+chrome.runtime.onInstalled.addListener(async () => {
+  // Tiêm overlay/bridge vào các tab ĐANG MỞ SẴN: content script chỉ tự chạy khi tab tải lại,
+  // nên sau mỗi lần reload extension mà không tiêm tay, chuyển qua tab cũ sẽ không thấy overlay
+  try {
+    const tabs = await chrome.tabs.query({});
+    for (const t of tabs) {
+      if (!t.id || !/^https?:/.test(t.url || '')) continue;
+      try { await chrome.scripting.executeScript({ target: { tabId: t.id }, files: ['overlay.js'] }); } catch (e) { /* ignore */ }
+      if (/pancake\.(vn|ph|id|in|biz)|pages\.fm|socialos\.vip/.test(t.url || '')) {
+        try { await chrome.scripting.executeScript({ target: { tabId: t.id }, files: ['bridge.js'] }); } catch (e) { /* ignore */ }
+      }
+    }
+  } catch (e) { /* ignore */ }
 });
