@@ -14,8 +14,10 @@
     el.style.cssText = [
       'position:fixed', 'right:16px', 'bottom:16px', 'z-index:2147483646',
       'width:280px', 'font:13px/1.4 system-ui,Segoe UI,sans-serif',
-      'background:#0f172a', 'color:#e2e8f0', 'border-radius:12px',
-      'box-shadow:0 8px 28px rgba(0,0,0,.4)', 'padding:12px 14px',
+      'background:rgba(15,23,42,.42)', 'color:#e2e8f0', 'border-radius:12px',
+      'border:1px solid rgba(148,163,184,.35)',
+      'box-shadow:none', 'padding:12px 14px',
+      'backdrop-filter:blur(2px)', '-webkit-backdrop-filter:blur(2px)',
       'display:none', 'pointer-events:none',
     ].join(';');
     (document.body || document.documentElement).appendChild(el);
