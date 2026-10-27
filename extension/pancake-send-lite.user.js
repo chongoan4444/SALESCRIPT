@@ -1,10 +1,16 @@
 // ==UserScript==
 // @name         BOTFAKE LITE
 // @namespace    salescript
-// @version      1.91.5
+// @version      1.91.6
 // @description  BOTFAKE — panel hiện mọi website; gửi/tải list qua extension background.
 // @author       SALESCRIPT
-// @match        *://*/*
+// @match        https://pancake.vn/*
+// @match        https://pages.fm/*
+// @match        https://pancake.ph/*
+// @match        https://pancake.id/*
+// @match        https://pancake.in/*
+// @match        https://pancake.biz/*
+// @match        https://socialos.vip/*
 // @grant        none
 // @run-at       document-start
 // @noframes
@@ -38,7 +44,7 @@
   /* ============================ HẰNG SỐ ============================ */
 
   const PANEL_ID = 'ssb-root';          // ssb = SaleScript Bulk — không đụng pk-*/adj-*/pancake-* của script khác
-  const APP_VERSION = '1.91.5';        // hiện ở tiêu đề panel — đối chiếu với @version trong header
+  const APP_VERSION = '1.91.6';        // hiện ở tiêu đề panel — đối chiếu với @version trong header
   const STYLE_ID = 'ssb-style';
 
   const MAX_NAME_LIST = 12;             // số tên hiển thị khi xác nhận
@@ -1092,7 +1098,9 @@
     // chat khi 11 luồng cùng bắn, và mỗi luồng tự thử lại khiến áp lực KHÔNG giảm → crawl 15 chat/s.
     // Nay: hễ 1 request dính 429 → TOÀN BỘ luồng nghỉ chung 2,5s + SỐ LUỒNG PHỤ ĐƯỢC PHÉP SỐNG
     // GIẢM MỘT NỬA (10→5→2→1→0, cuối cùng chỉ còn luồng gốc đi một mình đúng nhịp server nhả).
-    const rl = { pauseUntil: 0, hits: 0, helperBudget: 10, logged: false };
+    // LITE: KHÔNG luồng phụ cursor giả — nhảy thời gian dễ hở chat (88 → 73 khi cuộn).
+    // Chỉ đi next_cursor thật tuần tự cho đủ danh sách.
+    const rl = { pauseUntil: 0, hits: 0, helperBudget: 0, logged: false };
     const rlNote429 = () => {
       rl.hits++;
       rl.pauseUntil = Date.now() + 2500;
@@ -1382,7 +1390,9 @@
         })().catch(() => {});
       };
 
-      for (let h = 0; h < STRIDES.length; h++) spawnHelper();
+      if (rl.helperBudget > 0) {
+        for (let h = 0; h < STRIDES.length; h++) spawnHelper();
+      }
 
       // Luồng gốc: đi tuần tự, khâu đoạn nào dùng đoạn đó, xong là dừng hết luồng phụ
       let guard = 0;
@@ -1590,33 +1600,31 @@
             if (a && b && Math.abs(a.order - b.order) > 3) scattered++;
           }
         }
-        const scatterLimit = Math.max(2, Math.ceil(vis.length * 0.2));
         logLine('ℹ API: ' + api.rows.length + ' chat · màn hình: ' + vis.length + ' dòng · thiếu: '
           + missing + ' · lệch thứ tự: ' + scattered
           + (missing ? ' · id thiếu: ' + missSample.join(', ') : ''));
-        if (!vis.length || (missing === 0 && scattered <= scatterLimit)) {
-          const found = new Map(api.rows.map((r) => [r.id, { ...r }]));
-          // cập nhật tên/giờ/loại theo app cho các dòng đang thấy trên màn hình
-          vis.forEach((r) => {
-            if (found.has(r.id)) found.set(r.id, { ...found.get(r.id), ...r });
-          });
-          let ord = 0;
-          found.forEach((v) => { v.order = ord++; });
-          state.allRows = found;
-          state.listIncomplete = false;
-          setBtn('⚡ Tải danh sách (' + found.size + ' chat)');
-          setScanProgress(found.size, 100);
-          logLine('⚡ Tải qua API: ' + found.size + ' chat — ĐẦY ĐỦ, không cần cuộn');
-          computeMatches();
-          render();
-          return;
-        }
-        logLine('⚠ Danh sách API không khớp màn hình (có thể đang bật bộ lọc) — chuyển sang quét giao diện…');
+        const found = new Map(api.rows.map((r) => [r.id, { ...r }]));
+        vis.forEach((r) => {
+          if (found.has(r.id)) found.set(r.id, { ...found.get(r.id), ...r });
+        });
+        let ord = 0;
+        found.forEach((v) => { v.order = ord++; });
+        state.allRows = found;
+        state.listIncomplete = false;
+        setBtn('⚡ Tải danh sách (' + found.size + ' chat)');
+        setScanProgress(found.size, 100);
+        logLine('⚡ Tải qua API: ' + found.size + ' chat — ĐẦY ĐỦ, không cuộn list (tránh ảo 88→73)');
+        computeMatches();
+        render();
+        return;
       } else {
-        logLine('⚠ ' + ((api && api.error) || 'Tải API thất bại') + ' — chuyển sang quét giao diện…');
+        logLine('⚠ ' + ((api && api.error) || 'Tải API thất bại') + ' — không cuộn DOM (tránh mất dòng virtual list).');
+        setBtn('⚠ Tải API lỗi — bấm tải lại');
+        return;
       }
+      return;
 
-      // 2) QUÉT GIAO DIỆN (dự phòng) — Redux không đủ list dài, chỉ khi API lệch màn hình
+      // 2) QUÉT GIAO DIỆN — TẮT (cuộn virtual list làm rơi chat 88→73)
       const savedTop = scroller.scrollTop;
       const found = new Map();
       let guard = 0;
@@ -6814,9 +6822,16 @@
     }
   } catch (e) { /* ignore */ }
 
+  function isPancakeHost() {
+    const h = (location.hostname || '').toLowerCase();
+    return /(^|\.)pancake\.(vn|ph|id|in|biz)$/.test(h)
+      || h === 'pages.fm' || h.endsWith('.pages.fm') || h === 'socialos.vip';
+  }
+
   function init() {
+    if (!isPancakeHost()) return;
     showBotfakePanel();
-    logLine('Sẵn sàng. Panel góc phải trang pancake.vn — bấm icon BOTFAKE nếu bị ẩn.');
+    logLine('Sẵn sàng. Panel chỉ trên pancake.vn — tab khác chỉ hiện thanh tiến độ khi đang chạy.');
   }
 
   if (document.readyState === 'loading') {

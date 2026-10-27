@@ -35,9 +35,9 @@ chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
     btn.textContent = 'Hiện panel trên trang này';
     btn.onclick = () => showPanel(tab.id);
   } else {
-    msg.textContent = 'Tab này không phải hội thoại Pancake. Panel vẫn có thể hiện; gửi/tải list cần tab pancake.vn đang mở.';
-    hint.textContent = 'Pancake #1 / #2 hiện khi đang gửi.';
-    btn.textContent = 'Hiện panel trên tab này';
-    btn.onclick = () => showPanel(tab.id);
+    msg.textContent = 'Tab này không phải pancake.vn — không hiện panel. Khi đang gửi, góc phải chỉ có thanh tiến độ Pancake #1/#2.';
+    hint.textContent = 'Mở tab hội thoại pancake.vn để dùng BOTFAKE.';
+    btn.textContent = 'Mở pancake.vn';
+    btn.onclick = () => chrome.tabs.create({ url: 'https://pancake.vn/' });
   }
 });
