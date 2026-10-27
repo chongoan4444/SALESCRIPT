@@ -1,16 +1,22 @@
-# BOTFAKE LITE — Chrome extension
+# Cài BOTFAKE LITE (Chrome extension)
 
-**v1.91.0 — gửi NỀN:** bấm ▶ Chạy trên tab Pancake, lệnh **POST API chạy trong service worker**. Đổi tab / ẩn cửa sổ **không bị Chrome bóp** tốc độ gửi.
+**Load unpacked đúng thư mục `extension`** (thư mục có `manifest.json` + `background.js` + `overlay.js` + `pancake-send-lite.user.js` **cùng cấp**).
 
-Overlay khi đổi tab: `BOTFAKE đang chạy ở 2 tab` + **Pancake #1** / **#2** + `%`.
-
-Kênh nền = **API**. Bù Socket/Extension (#551 / nick khóa) **không** chạy ở SW. Tampermonkey (không load extension) vẫn gửi trong tab như cũ.
+Không dùng `manifest.json` ở gốc repo nếu bạn chỉ copy 4 file ra folder khác — file gốc đang trỏ `scripts/...` và `extension/...` nên Chrome báo thiếu file.
 
 ## Cài
 
-1. Chrome → `chrome://extensions` → Bật **Developer mode**.
-2. **Load unpacked** → chọn **thư mục gốc repo** `SALESCRIPT` (file `manifest.json` ở gốc).
-3. Tắt Tampermonkey cho script LITE trên `pages.fm` (tránh chạy 2 lần).
-4. Mở 1–2 tab Pancake, bấm ▶ Chạy, đổi sang Google/Facebook → góc phải dưới có thanh.
+1. `chrome://extensions` → bật Developer mode.
+2. **Load unpacked** → chọn folder **`extension`** (không chọn file, không chọn cả repo trừ khi dùng manifest gốc).
+3. Tắt Tampermonkey LITE trên Pancake.
+4. Reload extension mỗi lần cập nhật.
 
-Tắt extension thì dùng lại Tampermonkey như cũ.
+Trong folder phải thấy:
+
+```
+extension/
+  manifest.json
+  background.js
+  overlay.js
+  pancake-send-lite.user.js
+```
