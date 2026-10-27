@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE LITE
 // @namespace    salescript
-// @version      1.91.6
+// @version      1.91.7
 // @description  BOTFAKE — panel hiện mọi website; gửi/tải list qua extension background.
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -44,7 +44,7 @@
   /* ============================ HẰNG SỐ ============================ */
 
   const PANEL_ID = 'ssb-root';          // ssb = SaleScript Bulk — không đụng pk-*/adj-*/pancake-* của script khác
-  const APP_VERSION = '1.91.6';        // hiện ở tiêu đề panel — đối chiếu với @version trong header
+  const APP_VERSION = '1.91.7';        // hiện ở tiêu đề panel — đối chiếu với @version trong header
   const STYLE_ID = 'ssb-style';
 
   const MAX_NAME_LIST = 12;             // số tên hiển thị khi xác nhận
@@ -1498,18 +1498,11 @@
       || $('.conversation-list');
   }
 
-  // Danh sách là virtual list (rc-virtual-list): chỉ render các dòng đang thấy.
-  // Khi người dùng bấm "⚡ Tải danh sách": PHẢI XÓA SẠCH DANH SÁCH CŨ (state.allRows = null)
-  // rồi tải lại danh sách mới hoàn toàn từ đầu. Nếu đang tải dở mà bấm lần 2 → dừng ngay & dùng số chat đã tải!
+  // ⚡ Tải danh sách: CHỈ API next_cursor tuần tự. Không cuộn DOM / virtual list.
   async function scanFullList() {
     if (state.scanning) {
       state.scanStopRequested = true;
       logLine('⏹ Đã yêu cầu dừng tải danh sách — dùng ngay số chat vừa tải!');
-      return;
-    }
-    const scroller = getScroller();
-    if (!scroller) {
-      logLine('⚠ Không tìm thấy khung danh sách đoạn chat (#conversationList)');
       return;
     }
     const btn = shadow && shadow.getElementById('ssb-scan');
@@ -1521,16 +1514,12 @@
     state.listIncomplete = false;
 
     try {
-      // XÓA SẠCH DANH SÁCH CŨ TRƯỚC KHI TẢI LẠI — tránh giữ lại dữ liệu/thứ tự cũ gây lỗi
       state.allRows = null;
-      if (state.mode !== 'saved') {
-        state.matches = [];
-      }
+      if (state.mode !== 'saved') state.matches = [];
       highlightRows();
       render();
 
-      // 1) TẢI ĐA LUỒNG QUA API — siêu nhanh, không cuộn. Redux chỉ ~cửa sổ list (~19/200) → không mồi.
-      logLine('⚡ Đã xóa danh sách cũ — đang tải lại danh sách mới đa luồng qua API (bấm nút lần nữa nếu muốn dừng & dùng ngay)…');
+      logLine('⚡ Đang tải danh sách qua API (next_cursor, không cuộn)…');
       setBtn('⏹ Dừng tải (0 chat)');
       setScanProgress(0, 0);
       let lastLiveSync = 0;
@@ -1540,9 +1529,6 @@
         const now = Date.now();
         if (now - lastLiveSync < 400) return;
         lastLiveSync = now;
-        // NỐI THÊM PHẦN MỚI (incremental): seg0.items chỉ NỐI DÀI ở đuôi nên chỉ việc
-        // thêm các dòng từ vị trí đã đồng bộ — không dựng lại Map toàn bộ sau mỗi chặng
-        // (trước đây danh sách 20–30k chat bị dựng lại từ đầu mỗi 220ms → chậm dần theo độ dài).
         if (!state.allRows || rowsArr.length < lastSyncedLen) {
           state.allRows = new Map();
           lastSyncedLen = 0;
@@ -1553,9 +1539,6 @@
           state.allRows.set(r.id, r);
         }
         lastSyncedLen = rowsArr.length;
-        // v1.84.0: KHÔNG computeMatches() trong lúc tải — quét toàn bộ danh sách (30k dòng) mỗi
-        // 400ms trên luồng giao diện, giành CPU với việc xử lý dữ liệu tải về (máy yếu càng rõ).
-        // Lúc tải chỉ đếm O(1); khớp 1 lần duy nhất khi tải xong (ở cuối scanFullList).
         const cntEl = shadow && shadow.getElementById('ssb-count');
         if (cntEl) cntEl.textContent = String(state.allRows.size);
       };
@@ -1567,8 +1550,7 @@
       };
       let api = await loadListViaApi(apiProgress);
       if (api && api.ok && api.incomplete && !api.stopped) {
-        // Tải thiếu mà dùng để gửi là gửi sai — tự tải lại từ đầu 1 lần nữa
-        logLine('⚠ Danh sách tải lần 1 CHƯA đầy đủ (' + api.rows.length + ' chat) — đang tải lại từ đầu…');
+        logLine('⚠ Lần 1 chưa hết cursor (' + api.rows.length + ' chat) — tải lại từ đầu…');
         lastSyncedLen = 0;
         state.allRows = null;
         const api2 = await loadListViaApi(apiProgress);
@@ -1577,132 +1559,28 @@
       if (api && api.ok && api.incomplete && !api.stopped) {
         state.listIncomplete = true;
         state.allRows = null;
-        logLine('⛔ Tải 2 lần vẫn CHƯA đầy đủ (' + api.rows.length + ' chat) — KHÔNG dùng danh sách thiếu để gửi (gửi sẽ sai). Kiểm tra mạng rồi bấm ⚡ Tải danh sách lại.');
+        logLine('⛔ Tải 2 lần vẫn chưa hết cursor (' + api.rows.length + ' chat) — không dùng list thiếu. Bấm ⚡ lại.');
         setBtn('⚠ Tải chưa đủ — bấm tải lại');
         setScanProgress(api.rows.length, null);
         return;
       }
-      if (api && api.ok && api.rows.length) {
-        // kiểm tra khớp với các dòng đang thấy trên màn hình:
-        //  - thiếu dòng nào → API khác màn hình → quét giao diện
-        //  - các dòng liền nhau trên màn hình mà lệch thứ tự xa trong API → có bộ lọc → quét giao diện
-        const vis = visibleRows();
-        const byId = new Map(api.rows.map((r) => [r.id, r]));
-        let missing = 0, scattered = 0;
-        const missSample = [];
-        for (let i = 0; i < vis.length; i++) {
-          if (!byId.has(vis[i].id)) {
-            missing++;
-            if (missSample.length < 3) missSample.push(vis[i].id);
-          }
-          if (i > 0) {
-            const a = byId.get(vis[i - 1].id), b = byId.get(vis[i].id);
-            if (a && b && Math.abs(a.order - b.order) > 3) scattered++;
-          }
-        }
-        logLine('ℹ API: ' + api.rows.length + ' chat · màn hình: ' + vis.length + ' dòng · thiếu: '
-          + missing + ' · lệch thứ tự: ' + scattered
-          + (missing ? ' · id thiếu: ' + missSample.join(', ') : ''));
-        const found = new Map(api.rows.map((r) => [r.id, { ...r }]));
-        vis.forEach((r) => {
-          if (found.has(r.id)) found.set(r.id, { ...found.get(r.id), ...r });
-        });
-        let ord = 0;
-        found.forEach((v) => { v.order = ord++; });
-        state.allRows = found;
-        state.listIncomplete = false;
-        setBtn('⚡ Tải danh sách (' + found.size + ' chat)');
-        setScanProgress(found.size, 100);
-        logLine('⚡ Tải qua API: ' + found.size + ' chat — ĐẦY ĐỦ, không cuộn list (tránh ảo 88→73)');
-        computeMatches();
-        render();
-        return;
-      } else {
-        logLine('⚠ ' + ((api && api.error) || 'Tải API thất bại') + ' — không cuộn DOM (tránh mất dòng virtual list).');
+      if (!(api && api.ok && api.rows.length)) {
+        logLine('⚠ ' + ((api && api.error) || 'Tải API thất bại'));
         setBtn('⚠ Tải API lỗi — bấm tải lại');
         return;
       }
-      return;
-
-      // 2) QUÉT GIAO DIỆN — TẮT (cuộn virtual list làm rơi chat 88→73)
-      const savedTop = scroller.scrollTop;
-      const found = new Map();
-      let guard = 0;
-      logLine('⚡ Đang quét danh sách trên giao diện…');
-
-      const collect = () => {
-        let added = 0;
-        visibleRows().forEach((r) => {
-          if (!found.has(r.id)) {
-            const rdx = getReduxConvById(r.id, 0);
-            const extra = rdx ? convApiRow(rdx, found.size) : {};
-            found.set(r.id, { ...extra, ...r }); // thứ tự Map = thứ tự trên→dưới
-            added++;
-          }
-        });
-        return added;
-      };
-
-      scroller.scrollTop = 0;
-      await sleep(60);
-      collect();
-      setBtn('⏹ Dừng tải (' + found.size + ' chat)');
-
-      const step = Math.max(320, Math.round(scroller.clientHeight * 1.5));
-      let noNewStreak = 0;
-      while (guard++ < 5000 && !state.scanStopRequested) {
-        const prevTop = scroller.scrollTop;
-        scroller.scrollTop = prevTop + step;
-        let atBottom = false;
-        if (scroller.scrollTop === prevTop) {
-          try {
-            scroller.dispatchEvent(new WheelEvent('wheel', { deltaY: step, bubbles: true, cancelable: true }));
-          } catch (e) { /* ignore */ }
-          await sleep(60);
-          atBottom = scroller.scrollTop === prevTop;
-        }
-        await sleep(45);
-        const added = collect();
-        if (state.mode === 'range' && state.rangeStart && state.rangeEnd && found.has(state.rangeStart.id) && found.has(state.rangeEnd.id)) {
-          break;
-        }
-        if (atBottom) {
-          const t0 = Date.now();
-          while (Date.now() - t0 < 260 && !state.scanStopRequested) {
-            await sleep(65);
-            if (collect() > 0) { setBtn('⏹ Dừng tải (' + found.size + ' chat)'); }
-          }
-          break;
-        }
-        if (added === 0) {
-          noNewStreak++;
-          if (noNewStreak >= 2) {
-            await sleep(140);
-            collect();
-            noNewStreak = 0;
-          }
-        } else {
-          noNewStreak = 0;
-        }
-        if (guard % 6 === 0) {
-          setBtn('⏹ Dừng tải (' + found.size + ' chat)');
-          const maxS = Math.max(1, scroller.scrollHeight - scroller.clientHeight);
-          setScanProgress(found.size, Math.min(99, Math.round((scroller.scrollTop / maxS) * 100)));
-        }
-      }
-
-      scroller.scrollTop = savedTop;
-      await sleep(60);
-
-      visibleRows().forEach((r) => {
+      const vis = visibleRows();
+      const found = new Map(api.rows.map((r) => [r.id, { ...r }]));
+      vis.forEach((r) => {
         if (found.has(r.id)) found.set(r.id, { ...found.get(r.id), ...r });
       });
       let ord = 0;
       found.forEach((v) => { v.order = ord++; });
       state.allRows = found;
+      state.listIncomplete = false;
       setBtn('⚡ Tải danh sách (' + found.size + ' chat)');
       setScanProgress(found.size, 100);
-      logLine('⚡ Tải xong: ' + found.size + ' chat trong danh sách');
+      logLine('⚡ API: ' + found.size + ' chat (next_cursor hết) — không cuộn list');
       computeMatches();
       render();
     } finally {
