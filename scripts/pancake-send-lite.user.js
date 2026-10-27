@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE LITE
 // @namespace    salescript
-// @version      1.91.8
+// @version      1.91.9
 // @description  BOTFAKE — panel hiện mọi website; gửi/tải list qua extension background.
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -44,7 +44,7 @@
   /* ============================ HẰNG SỐ ============================ */
 
   const PANEL_ID = 'ssb-root';          // ssb = SaleScript Bulk — không đụng pk-*/adj-*/pancake-* của script khác
-  const APP_VERSION = '1.91.8';        // hiện ở tiêu đề panel — đối chiếu với @version trong header
+  const APP_VERSION = '1.91.9';        // hiện ở tiêu đề panel — đối chiếu với @version trong header
   const STYLE_ID = 'ssb-style';
 
   const MAX_NAME_LIST = 12;             // số tên hiển thị khi xác nhận
@@ -403,14 +403,28 @@
     if (m && m[1] && m[1].split('.').length === 3) capturedToken = m[1]; // JWT dạng a.b.c
   }
 
+  function isJwt(t) {
+    t = String(t || '');
+    return t.indexOf('eyJ') === 0 && t.split('.').length === 3 && t.length > 40;
+  }
   function getToken() {
-    // app lấy token = cookie 'jwt' (getAccessToken trong _app) — đọc TRỰC TIẾP trước,
-    // tránh dính token cũ đã nuốt từ URL lúc mới tải trang
+    try {
+      const st = getReduxState();
+      const auth = st && st.auth;
+      const cand = auth && (auth.accessToken || auth.access_token || auth.token || auth.jwt
+        || (auth.user && (auth.user.accessToken || auth.user.access_token)));
+      if (isJwt(cand)) { capturedToken = String(cand); return capturedToken; }
+    } catch (e) { /* ignore */ }
     try {
       const m = /(?:^|;\s*)jwt=([^;]+)/.exec(document.cookie || '');
-      if (m && m[1]) { capturedToken = decodeURIComponent(m[1]); return capturedToken; }
+      if (m && m[1]) {
+        let t = m[1];
+        try { t = decodeURIComponent(t); } catch (e2) { /* keep raw */ }
+        t = t.replace(/^"|"$/g, '').replace(/^Bearer\s+/i, '');
+        if (isJwt(t)) { capturedToken = t; return capturedToken; }
+      }
     } catch (e) { /* ignore */ }
-    if (capturedToken) return capturedToken;
+    if (isJwt(capturedToken)) return capturedToken;
     try {
       const entries = performance.getEntriesByType('resource');
       for (let i = entries.length - 1; i >= 0; i--) {
@@ -830,7 +844,11 @@
 
   // GET/POST an toàn cho tải danh sách: tự thử lại khi bị rate-limit (429)/5xx/lỗi mạng; trả lỗi kèm chi tiết
   async function fetchJson(url, tries, reqOpts) {
-    if (extBgAvailable()) return bgFetchJson(url, tries, reqOpts);
+    // Tab đang mở: fetch ngay trên trang (đúng cookie/token như app).
+    // Tab ẩn: mới chuyển SW để khỏi bị Chrome bóp.
+    if (extBgAvailable() && typeof document !== 'undefined' && document.hidden) {
+      return bgFetchJson(url, tries, reqOpts);
+    }
     const max = tries || 3;
     const isPost = !!(reqOpts && String(reqOpts.method || '').toUpperCase() === 'POST');
     let lastErr = '';
@@ -1596,6 +1614,12 @@
         setScanProgress(n, null);
       };
       let api = await loadListViaApi(apiProgress);
+      if (api && !api.ok && /access_token|token/i.test(String(api.error || ''))) {
+        logLine('⚠ Token lần 1 không nhận (' + api.error + ') — chờ app hydrate rồi thử lại…');
+        capturedToken = null;
+        await sleep(700);
+        api = await loadListViaApi(apiProgress);
+      }
       if (api && api.ok && api.incomplete && !api.stopped) {
         logLine('⚠ Lần 1 chưa hết cursor (' + api.rows.length + ' chat) — tải lại từ đầu…');
         lastSyncedLen = 0;
