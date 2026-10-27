@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE LITE
 // @namespace    salescript
-// @version      1.90.5
+// @version      1.90.6
 // @description  BOTFAKE — chọn chuỗi chat (Alt+Click 2 đầu) hoặc theo snippet trong Pancake rồi gửi cùng 1 câu (kèm 1 hoặc nhiều ảnh nếu muốn) cho tất cả.
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -44,7 +44,7 @@
   /* ============================ HẰNG SỐ ============================ */
 
   const PANEL_ID = 'ssb-root';          // ssb = SaleScript Bulk — không đụng pk-*/adj-*/pancake-* của script khác
-  const APP_VERSION = '1.90.5';        // hiện ở tiêu đề panel — đối chiếu với @version trong header
+  const APP_VERSION = '1.90.6';        // hiện ở tiêu đề panel — đối chiếu với @version trong header
   const STYLE_ID = 'ssb-style';
 
   const MAX_NAME_LIST = 12;             // số tên hiển thị khi xác nhận
@@ -183,6 +183,30 @@
     if (!state.sending && !state.scanning) return;
     startKeepAliveAudio();
   });
+
+  let extJobAt = 0;
+  function reportExtJob(extra) {
+    extra = extra || {};
+    const now = Date.now();
+    const idle = extra.phase === 'idle' || (!state.sending && !state.scanning);
+    if (!idle && now - extJobAt < 200) return;
+    extJobAt = now;
+    const payload = {
+      type: 'BOTFAKE_JOB',
+      sending: !!state.sending,
+      scanning: !!state.scanning,
+      phase: extra.phase || (state.sending ? 'send' : (state.scanning ? 'scan' : 'idle')),
+      pct: extra.pct != null ? extra.pct : 0,
+      ok: extra.ok,
+      total: extra.total,
+      done: extra.done,
+    };
+    try {
+      if (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.id && chrome.runtime.sendMessage) {
+        chrome.runtime.sendMessage(payload, function () { void chrome.runtime.lastError; });
+      }
+    } catch (e) { /* Tampermonkey / không phải extension */ }
+  }
 
   const esc = (s) => String(s == null ? '' : s)
     .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
@@ -1542,6 +1566,7 @@
       state.scanning = false;
       state.scanStopRequested = false;
       stopKeepAliveAudio();
+      if (!state.sending) reportExtJob({ phase: 'idle' });
       if (btn && state.listIncomplete) {
         setBtn('⚠ Tải chưa đủ — bấm tải lại');
       } else if (btn && state.allRows) {
@@ -4720,6 +4745,7 @@
     state.stopRequested = false;
     applyRunStopButtons();
     startKeepAliveAudio();
+    reportExtJob({ phase: 'send', pct: 0, ok: 0, total: 0 });
     batchSkipApi = false;
     windowBlocked = 0;
     // trạng thái theo LƯỢT gửi: chat đã đến nơi trong lượt này không bao giờ bị gửi lại;
@@ -6249,6 +6275,7 @@
       state.sending = false;
       applyRunStopButtons();
       stopKeepAliveAudio();
+      reportExtJob({ phase: 'idle' });
       return;
     }
     let pending = 0;
@@ -6260,6 +6287,7 @@
     state.sending = false;
     applyRunStopButtons();
     stopKeepAliveAudio();
+    reportExtJob({ phase: 'idle' });
   }
 
   function setProgress(done, total, ok) {
@@ -6271,6 +6299,7 @@
       const okN = (ok != null) ? ok : done;
       st.textContent = pct + '% · ✅ ' + (okN || 0) + '/' + (total || 0);
     }
+    reportExtJob({ phase: 'send', pct: pct, ok: (ok != null) ? ok : done, total: total, done: done });
   }
 
   function setScanProgress(n, pct) {
@@ -6286,6 +6315,8 @@
         ? ('Tải DS: ' + p + '% · ' + (n || 0) + ' chat')
         : ('Tải DS: đang chạy · ' + (n || 0) + ' chat');
     }
+    const shown = (p != null) ? p : Math.min(95, 8 + Math.round(Math.log10(Math.max(1, n) + 1) * 28));
+    reportExtJob({ phase: 'scan', pct: shown, done: n, total: n });
   }
 
   function render() {

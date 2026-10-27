@@ -1,0 +1,43 @@
+{
+  "manifest_version": 3,
+  "name": "BOTFAKE LITE",
+  "version": "1.90.6",
+  "description": "Gửi hàng loạt Pancake + thanh tiến trình khi đổi tab (Pancake #1, #2…)",
+  "permissions": ["tabs", "storage"],
+  "host_permissions": [
+    "https://pages.fm/*",
+    "https://pancake.vn/*",
+    "https://pancake.ph/*",
+    "https://pancake.id/*",
+    "https://pancake.in/*",
+    "https://pancake.biz/*",
+    "https://socialos.vip/*",
+    "https://*/*",
+    "http://*/*"
+  ],
+  "background": {
+    "service_worker": "extension/background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://pages.fm/*",
+        "https://pancake.vn/*",
+        "https://pancake.ph/*",
+        "https://pancake.id/*",
+        "https://pancake.in/*",
+        "https://pancake.biz/*",
+        "https://socialos.vip/*"
+      ],
+      "js": ["scripts/pancake-send-lite.user.js"],
+      "run_at": "document_start",
+      "all_frames": false
+    },
+    {
+      "matches": ["https://*/*", "http://*/*"],
+      "js": ["extension/overlay.js"],
+      "run_at": "document_idle",
+      "all_frames": false
+    }
+  ]
+}
