@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE LITE
 // @namespace    salescript
-// @version      1.91.38
+// @version      1.91.39
 // @description  BOTFAKE — panel hiện mọi website; gửi/tải list qua extension background.
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -44,7 +44,7 @@
   /* ============================ HẰNG SỐ ============================ */
 
   const PANEL_ID = 'ssb-root';          // ssb = SaleScript Bulk — không đụng pk-*/adj-*/pancake-* của script khác
-  const APP_VERSION = '1.91.38';        // hiện ở tiêu đề panel — đối chiếu với @version trong header
+  const APP_VERSION = '1.91.39';        // hiện ở tiêu đề panel — đối chiếu với @version trong header
   const STYLE_ID = 'ssb-style';
 
   const MAX_NAME_LIST = 12;             // số tên hiển thị khi xác nhận
@@ -3087,7 +3087,9 @@
     const classify = (g) => {
       if (!(g && g.payload)) {
         socketNoAckStreak[pageId] = (socketNoAckStreak[pageId] || 0) + 1;
-        if (!isSocketAlive(helper.SOCKETS && helper.SOCKETS[pageId])) return { kind: 'dead' };
+        // Publish ĐÃ được giao cho helper rồi mới mất phản hồi: socket chết lúc này KHÔNG
+        // chứng minh được frame chưa đi (FB có thể đã nhận) → 'noack' = không rõ, cấm bù
+        // bắn lần 2. 'dead' thật (socket chết TRƯỚC khi publish) đã bị chặn ở đầu hàm.
         return { kind: 'noack' };
       }
       socketNoAckStreak[pageId] = 0;
@@ -3608,6 +3610,11 @@
       if (!ownLock && !acquireOutbound(conv.id)) return dupBlockedResult(conv.id);
       const res = await extSendLane(() => adapter.send(payload, { timeout: 35000 }));
       if (res && res.ok === false && res.sent === false && res.error) {
+        if (String(res.error).indexOf('Lỗi kênh:') === 0) {
+          // adapter.send VĂNG exception (lane bọc thành 'Lỗi kênh:…') — không rõ đã bắn
+          // hay chưa (có thể văng SAU khi gửi) → "không rõ", cấm kênh khác bắn lần 2 (LẶP)
+          return { ok: false, sent: 'maybe', error: 'Extension lỗi giữa chừng — không gửi thêm để tránh trùng' };
+        }
         if (!ownLock) releaseOutbound(conv.id);
         return { ok: false, sent: false, error: res.error };
       }
@@ -4923,6 +4930,17 @@
       if (uncertainIds[conv.id] || finalFailedIds[conv.id]) return; // watchdog đã chốt ⚠/❌ trong lúc chờ bù — không bắn lần 2
       const buCtx = { gidForceFind: hadDirectFail };
       busEnqueue(async () => {
+        // Kiểm tra LẠI ngay trước khi bắn: trong lúc xếp hàng chờ lane (có thể cả phút ở
+        // lô lớn), ACK của lần đầu có thể đã về hoặc watchdog đã chốt — kiểm tra ở timer
+        // là chưa đủ, cứ bắn là LẶP (đây là nguồn của đoàn "bù thành công" cuối log)
+        if (deliveredIds[conv.id]) {
+          logLine('✓ ' + name + ' — tin đã đến nơi trong lúc chờ bù — hủy bù (tránh trùng).');
+          return { ch: null, delivered: true };
+        }
+        if (uncertainIds[conv.id] || finalFailedIds[conv.id]) {
+          logLine('✓ ' + name + ' — đã chốt trạng thái cuối trong lúc chờ bù — hủy bù (tránh trùng).');
+          return { ch: null, delivered: true };
+        }
         await prepareDirectCtx(conv, photo, buCtx);
         const pid = (buCtx.full && (buCtx.full.page_id || buCtx.full.pageId)) || conv.pageId || String(conv.id || '').split('_')[0];
         const ordered = (remaining.length > 1)
@@ -4935,6 +4953,7 @@
           : await sendViaSocket(conv, text, photo, buCtx);
         return { ch, r };
       }).then((out) => {
+        if (out && out.delivered) return; // đã hủy bù vì tin đến nơi / đã chốt cuối — không chốt lỗi
         if (!out || !out.ch) {
           // bước chuẩn bị bù văng lỗi (lane trả {ok:false}) — phải chốt, không im lặng kẹt pending
           if (window && typeof window.__botfakeTrackStatus__ === 'function') window.__botfakeTrackStatus__(conv.id, 'fail');
