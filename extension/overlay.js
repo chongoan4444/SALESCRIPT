@@ -8,7 +8,7 @@
   const BOX =
     'position:fixed;right:10px;top:50%;transform:translateY(-50%);bottom:auto;left:auto;' +
     'z-index:2147483646;width:188px;font:11px/1.35 system-ui,Segoe UI,sans-serif;' +
-    'background:rgba(15,23,42,.42);color:#e2e8f0;border-radius:10px;' +
+    'background:rgba(15,23,42,.62);color:#e2e8f0;border-radius:10px;' +
     'border:1px solid rgba(148,163,184,.35);box-shadow:none;padding:8px 10px;' +
     'backdrop-filter:blur(2px);-webkit-backdrop-filter:blur(2px);pointer-events:none;';
 
