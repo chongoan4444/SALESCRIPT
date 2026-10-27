@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE LITE
 // @namespace    salescript
-// @version      1.91.12
+// @version      1.91.13
 // @description  BOTFAKE — panel hiện mọi website; gửi/tải list qua extension background.
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -44,7 +44,7 @@
   /* ============================ HẰNG SỐ ============================ */
 
   const PANEL_ID = 'ssb-root';          // ssb = SaleScript Bulk — không đụng pk-*/adj-*/pancake-* của script khác
-  const APP_VERSION = '1.91.12';        // hiện ở tiêu đề panel — đối chiếu với @version trong header
+  const APP_VERSION = '1.91.13';        // hiện ở tiêu đề panel — đối chiếu với @version trong header
   const STYLE_ID = 'ssb-style';
 
   const MAX_NAME_LIST = 12;             // số tên hiển thị khi xác nhận
@@ -1233,6 +1233,9 @@
       while (guard++ < 1500 && !stopped()) {
         const res = await fetchPage(seg.pageCount, seg.cursor, seg.items.length, { forceMulti });
         if (!res.ok) {
+          if (stopped() || res.error === 'stopped') {
+            return { ok: true, rows: seg.items, stopped: true, incomplete: false };
+          }
           if (guard === 1 && !forceMulti) { forceMulti = true; guard--; continue; }
           return guard === 1 ? { ok: false, error: 'API danh sách lỗi trang 1: ' + res.error } : { ok: true, rows: seg.items, incomplete: true };
         }
@@ -1245,7 +1248,7 @@
         if (!seg.cursor || !convs.length || !added || (opts && opts.maxPages && guard >= opts.maxPages)) break;
       }
       // hết vòng lặp mà cursor vẫn còn = còn dữ liệu chưa tải → CHƯA đầy đủ (trừ khi user tự dừng / giới hạn trang có chủ đích)
-      return { ok: true, rows: seg.items, incomplete: !!(seg.cursor && !stopped() && !(opts && opts.maxPages)) };
+      return { ok: true, rows: seg.items, incomplete: !!(seg.cursor && !stopped() && !(opts && opts.maxPages)), stopped: stopped() };
     };
 
     if (!plainMode) return loadSequential();
@@ -1597,6 +1600,7 @@
 
     state.scanning = true;
     state.scanStopRequested = false;
+    applyScanButtons();
     startKeepAliveAudio();
     state.listIncomplete = false;
 
@@ -1636,6 +1640,22 @@
         setScanProgress(n, null);
       };
       let api = await loadListViaApi(apiProgress);
+      if (state.scanStopRequested || (api && api.stopped)) {
+        const nStop = (api && api.rows && api.rows.length) || (state.allRows && state.allRows.size) || 0;
+        if (api && api.rows && api.rows.length) {
+          const foundStop = new Map(api.rows.map((r) => [r.id, { ...r }]));
+          let oStop = 0;
+          foundStop.forEach((v) => { v.order = oStop++; });
+          state.allRows = foundStop;
+        }
+        state.listIncomplete = false;
+        logLine('⏹ Đã dừng tải — dùng ' + nStop + ' chat đã lấy.');
+        setBtn('⚡ Tải danh sách (' + nStop + ' chat)');
+        setScanProgress(nStop, 100);
+        computeMatches();
+        render();
+        return;
+      }
       if (api && api.ok && api.incomplete && !api.stopped) {
         logLine('⚠ Lần 1 chưa hết cursor (' + api.rows.length + ' chat) — tải lại từ đầu…');
         lastSyncedLen = 0;
@@ -1673,6 +1693,7 @@
     } finally {
       state.scanning = false;
       state.scanStopRequested = false;
+      applyScanButtons();
       stopKeepAliveAudio();
       if (!state.sending) reportExtJob({ phase: 'idle' });
       if (btn && state.listIncomplete) {
@@ -5653,7 +5674,8 @@
             </div>
           </div>
           <div class="row" style="margin:2px 0 4px;align-items:center">
-            <button class="b b-gray" id="ssb-scan">⚡ Tải danh sách</button>
+            <button class="b b-gray" id="ssb-scan" style="flex:1">⚡ Tải danh sách</button>
+            <button class="b b-red" id="ssb-scan-stop" disabled style="flex:1">⏹ Dừng tải</button>
             <span class="hint">đã chọn: <span class="count" id="ssb-count">0</span></span>
           </div>
           <div class="prog scan"><i id="ssb-scanbar"></i></div>
@@ -6162,11 +6184,20 @@
       render();
     });
     on('ssb-scan', 'click', async () => {
-      const btn = root.getElementById('ssb-scan');
-      btn.disabled = true;
+      if (state.scanning) {
+        state.scanStopRequested = true;
+        logLine('⏹ Đã yêu cầu dừng tải danh sách — dùng ngay số chat vừa tải!');
+        applyScanButtons();
+        return;
+      }
       await scanFullList();
-      btn.disabled = false;
       render();
+    });
+    on('ssb-scan-stop', 'click', () => {
+      if (!state.scanning) return;
+      state.scanStopRequested = true;
+      logLine('⏹ Đã yêu cầu dừng tải danh sách — dùng ngay số chat vừa tải!');
+      applyScanButtons();
     });
     // Nhóm chat của lượt gửi gần nhất — chọn lại tại chỗ, không quét lại danh sách
     // ===== KHÔI PHỤC SAU F5: câu đang tick + ô nội dung đang gõ + nhật ký — dữ liệu không mất =====
@@ -6371,6 +6402,24 @@
     flushLogUI();
   }
 
+  function applyScanButtons() {
+    if (!shadow) return;
+    const scan = shadow.getElementById('ssb-scan');
+    const stop = shadow.getElementById('ssb-scan-stop');
+    const busy = !!state.scanning;
+    if (scan) {
+      scan.disabled = false;
+      if (busy) scan.textContent = state.scanStopRequested ? '⏳ Đang dừng tải…' : ('⏹ Dừng tải' + (state.allRows && state.allRows.size ? ' (' + state.allRows.size + ' chat)' : ''));
+    }
+    if (stop) {
+      stop.disabled = !busy;
+      stop.textContent = '⏹ Dừng tải';
+      stop.style.opacity = busy ? '1' : '';
+      stop.style.pointerEvents = busy ? 'auto' : '';
+      stop.style.cursor = busy ? 'pointer' : '';
+    }
+  }
+
   function applyRunStopButtons() {
     if (!shadow) return;
     const send = shadow.getElementById('ssb-send');
@@ -6503,6 +6552,7 @@
       }
     }
     applyRunStopButtons();
+    applyScanButtons();
 
     const el = shadow.getElementById('ssb-log');
     if (el) {
