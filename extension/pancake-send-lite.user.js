@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE LITE
 // @namespace    salescript
-// @version      1.91.13
+// @version      1.91.14
 // @description  BOTFAKE — panel hiện mọi website; gửi/tải list qua extension background.
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -44,7 +44,7 @@
   /* ============================ HẰNG SỐ ============================ */
 
   const PANEL_ID = 'ssb-root';          // ssb = SaleScript Bulk — không đụng pk-*/adj-*/pancake-* của script khác
-  const APP_VERSION = '1.91.13';        // hiện ở tiêu đề panel — đối chiếu với @version trong header
+  const APP_VERSION = '1.91.14';        // hiện ở tiêu đề panel — đối chiếu với @version trong header
   const STYLE_ID = 'ssb-style';
 
   const MAX_NAME_LIST = 12;             // số tên hiển thị khi xác nhận
@@ -5674,8 +5674,7 @@
             </div>
           </div>
           <div class="row" style="margin:2px 0 4px;align-items:center">
-            <button class="b b-gray" id="ssb-scan" style="flex:1">⚡ Tải danh sách</button>
-            <button class="b b-red" id="ssb-scan-stop" disabled style="flex:1">⏹ Dừng tải</button>
+            <button class="b b-gray" id="ssb-scan">⚡ Tải danh sách</button>
             <span class="hint">đã chọn: <span class="count" id="ssb-count">0</span></span>
           </div>
           <div class="prog scan"><i id="ssb-scanbar"></i></div>
@@ -6193,12 +6192,6 @@
       await scanFullList();
       render();
     });
-    on('ssb-scan-stop', 'click', () => {
-      if (!state.scanning) return;
-      state.scanStopRequested = true;
-      logLine('⏹ Đã yêu cầu dừng tải danh sách — dùng ngay số chat vừa tải!');
-      applyScanButtons();
-    });
     // Nhóm chat của lượt gửi gần nhất — chọn lại tại chỗ, không quét lại danh sách
     // ===== KHÔI PHỤC SAU F5: câu đang tick + ô nội dung đang gõ + nhật ký — dữ liệu không mất =====
     try {
@@ -6405,18 +6398,12 @@
   function applyScanButtons() {
     if (!shadow) return;
     const scan = shadow.getElementById('ssb-scan');
-    const stop = shadow.getElementById('ssb-scan-stop');
-    const busy = !!state.scanning;
-    if (scan) {
-      scan.disabled = false;
-      if (busy) scan.textContent = state.scanStopRequested ? '⏳ Đang dừng tải…' : ('⏹ Dừng tải' + (state.allRows && state.allRows.size ? ' (' + state.allRows.size + ' chat)' : ''));
-    }
-    if (stop) {
-      stop.disabled = !busy;
-      stop.textContent = '⏹ Dừng tải';
-      stop.style.opacity = busy ? '1' : '';
-      stop.style.pointerEvents = busy ? 'auto' : '';
-      stop.style.cursor = busy ? 'pointer' : '';
+    if (!scan) return;
+    scan.disabled = false;
+    if (state.scanning) {
+      scan.textContent = state.scanStopRequested
+        ? '⏳ Đang dừng tải…'
+        : ('⏹ Dừng tải' + (state.allRows && state.allRows.size ? ' (' + state.allRows.size + ' chat)' : ''));
     }
   }
 
