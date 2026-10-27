@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE LITE
 // @namespace    salescript
-// @version      1.91.4
+// @version      1.91.5
 // @description  BOTFAKE — panel hiện mọi website; gửi/tải list qua extension background.
 // @author       SALESCRIPT
 // @match        *://*/*
@@ -38,7 +38,7 @@
   /* ============================ HẰNG SỐ ============================ */
 
   const PANEL_ID = 'ssb-root';          // ssb = SaleScript Bulk — không đụng pk-*/adj-*/pancake-* của script khác
-  const APP_VERSION = '1.91.4';        // hiện ở tiêu đề panel — đối chiếu với @version trong header
+  const APP_VERSION = '1.91.5';        // hiện ở tiêu đề panel — đối chiếu với @version trong header
   const STYLE_ID = 'ssb-style';
 
   const MAX_NAME_LIST = 12;             // số tên hiển thị khi xác nhận
@@ -6791,10 +6791,32 @@
   }, true);
   window.addEventListener('blur', () => { modState.altAt = 0; modState.ctrlAt = 0; });
 
-  function init() {
+  function showBotfakePanel() {
     buildPanel();
-    logLine('Sẵn sàng. Dùng trên pancake.vn (tab page). Đổi web khác vẫn thấy panel.');
-    logLine('🖱 Alt+Click / Ctrl+Click / "Chọn chuỗi (2 nhấp)" chỉ CHỌN — đã chặn app tự mở chat.');
+    const host = document.getElementById(PANEL_ID);
+    if (host) host.style.display = '';
+    if (shadow) {
+      const wrapEl = shadow.getElementById('ssb-wrap');
+      const bubble = shadow.getElementById('ssb-bubble');
+      if (wrapEl) wrapEl.style.display = '';
+      if (bubble) bubble.style.display = 'none';
+    }
+  }
+
+  try {
+    if (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.onMessage) {
+      chrome.runtime.onMessage.addListener((m, _s, sendResponse) => {
+        if (m && m.type === 'BOTFAKE_SHOW_PANEL') {
+          showBotfakePanel();
+          sendResponse && sendResponse({ ok: true });
+        }
+      });
+    }
+  } catch (e) { /* ignore */ }
+
+  function init() {
+    showBotfakePanel();
+    logLine('Sẵn sàng. Panel góc phải trang pancake.vn — bấm icon BOTFAKE nếu bị ẩn.');
   }
 
   if (document.readyState === 'loading') {

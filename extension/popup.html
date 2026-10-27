@@ -7,18 +7,18 @@
     .h { padding: 12px 14px 8px; font-weight: 800; color: #93c5fd; }
     .b { padding: 0 14px 14px; }
     p { margin: 0 0 8px; color: #cbd5e1; }
-    a, button { display: block; width: 100%; box-sizing: border-box; text-align: center;
+    button { display: block; width: 100%; box-sizing: border-box; text-align: center;
       background: #5865F2; color: #fff; border: 0; border-radius: 8px; padding: 10px;
-      font-weight: 700; text-decoration: none; cursor: pointer; margin-top: 8px; }
+      font-weight: 700; cursor: pointer; margin-top: 8px; }
     .hint { font-size: 11px; color: #94a3b8; }
   </style>
 </head>
 <body>
   <div class="h">BOTFAKE LITE</div>
   <div class="b">
-    <p>Panel chạy trên <b>pancake.vn</b> (ví dụ pancake.vn/448189508385420).</p>
-    <p class="hint">Đổi tab khi đang gửi: thanh % góc phải (Pancake #1, #2).</p>
-    <button id="go" type="button">Mở pancake.vn</button>
+    <p id="msg">Đang kiểm tra tab…</p>
+    <p class="hint" id="hint"></p>
+    <button id="go" type="button">Hiện panel</button>
   </div>
   <script src="popup.js"></script>
 </body>
