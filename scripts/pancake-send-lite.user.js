@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE LITE
 // @namespace    salescript
-// @version      1.91.34
+// @version      1.91.35
 // @description  BOTFAKE — panel hiện mọi website; gửi/tải list qua extension background.
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -44,7 +44,7 @@
   /* ============================ HẰNG SỐ ============================ */
 
   const PANEL_ID = 'ssb-root';          // ssb = SaleScript Bulk — không đụng pk-*/adj-*/pancake-* của script khác
-  const APP_VERSION = '1.91.34';        // hiện ở tiêu đề panel — đối chiếu với @version trong header
+  const APP_VERSION = '1.91.35';        // hiện ở tiêu đề panel — đối chiếu với @version trong header
   const STYLE_ID = 'ssb-style';
 
   const MAX_NAME_LIST = 12;             // số tên hiển thị khi xác nhận
@@ -4865,6 +4865,13 @@
       logLine('✓ ' + name + ' — tin đã đến nơi (xác nhận) — không bù.');
       return;
     }
+    if (uncertainIds[conv.id] || finalFailedIds[conv.id]) {
+      // Đã có nơi chốt cuối cho chat này (watchdog chốt ⚠ quá hạn / đã chốt ❌) — chốt đó là
+      // TUYỆT ĐỐI theo luật chống trùng: kết quả Socket về muộn không được kích bù nữa,
+      // nếu không sẽ bắn lần 2 lên tin có thể đã đến nơi (lặp ít, chủ yếu tin ảnh chốt chậm)
+      logLine('✓ ' + name + ' — đã chốt trạng thái cuối (⚠/❌) — không bù thêm để tránh trùng.');
+      return;
+    }
     if (pendingBg[conv.id]) pendingBg[conv.id].at = Date.now(); // chuỗi bù còn đang chạy — gia hạn watchdog
     const triedCh = (tried || []).slice();
     const done = buRetryDone[conv.id] || (buRetryDone[conv.id] = []); // kênh ĐÃ bù trong lượt
@@ -4898,6 +4905,7 @@
         return;
       }
       if (deliveredIds[conv.id]) return; // trong lúc chờ, tin đã đến nơi qua đường khác — thôi
+      if (uncertainIds[conv.id] || finalFailedIds[conv.id]) return; // watchdog đã chốt ⚠/❌ trong lúc chờ bù — không bắn lần 2
       const buCtx = { gidForceFind: hadDirectFail };
       busEnqueue(async () => {
         await prepareDirectCtx(conv, photo, buCtx);
