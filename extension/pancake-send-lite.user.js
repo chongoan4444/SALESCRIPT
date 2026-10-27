@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE LITE
 // @namespace    salescript
-// @version      1.91.9
+// @version      1.91.10
 // @description  BOTFAKE — panel hiện mọi website; gửi/tải list qua extension background.
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -44,7 +44,7 @@
   /* ============================ HẰNG SỐ ============================ */
 
   const PANEL_ID = 'ssb-root';          // ssb = SaleScript Bulk — không đụng pk-*/adj-*/pancake-* của script khác
-  const APP_VERSION = '1.91.9';        // hiện ở tiêu đề panel — đối chiếu với @version trong header
+  const APP_VERSION = '1.91.10';        // hiện ở tiêu đề panel — đối chiếu với @version trong header
   const STYLE_ID = 'ssb-style';
 
   const MAX_NAME_LIST = 12;             // số tên hiển thị khi xác nhận
@@ -400,31 +400,15 @@
 
   function grabTokenFromUrl(url) {
     const m = /access_token=([A-Za-z0-9._-]+)/.exec(url || '');
-    if (m && m[1] && m[1].split('.').length === 3) capturedToken = m[1]; // JWT dạng a.b.c
+    if (!m || !m[1]) return;
+    // HAR taidanhsach.har: access_token=cookie_session (không phải JWT).
+    // pancake.vn2.har (multi_pages): JWT a.b.c.
+    if (m[1] === 'cookie_session' || m[1].split('.').length === 3) capturedToken = m[1];
   }
 
-  function isJwt(t) {
-    t = String(t || '');
-    return t.indexOf('eyJ') === 0 && t.split('.').length === 3 && t.length > 40;
-  }
   function getToken() {
-    try {
-      const st = getReduxState();
-      const auth = st && st.auth;
-      const cand = auth && (auth.accessToken || auth.access_token || auth.token || auth.jwt
-        || (auth.user && (auth.user.accessToken || auth.user.access_token)));
-      if (isJwt(cand)) { capturedToken = String(cand); return capturedToken; }
-    } catch (e) { /* ignore */ }
-    try {
-      const m = /(?:^|;\s*)jwt=([^;]+)/.exec(document.cookie || '');
-      if (m && m[1]) {
-        let t = m[1];
-        try { t = decodeURIComponent(t); } catch (e2) { /* keep raw */ }
-        t = t.replace(/^"|"$/g, '').replace(/^Bearer\s+/i, '');
-        if (isJwt(t)) { capturedToken = t; return capturedToken; }
-      }
-    } catch (e) { /* ignore */ }
-    if (isJwt(capturedToken)) return capturedToken;
+    // HAR taidanhsach.har + guicau.har: access_token=cookie_session (không gửi JWT).
+    if (/(^|\.)pancake\.vn$/i.test(location.hostname || '')) return 'cookie_session';
     try {
       const entries = performance.getEntriesByType('resource');
       for (let i = entries.length - 1; i >= 0; i--) {
@@ -432,6 +416,7 @@
         if (capturedToken) return capturedToken;
       }
     } catch (e) { /* ignore */ }
+    if (capturedToken) return capturedToken;
     try {
       const nd = document.getElementById('__NEXT_DATA__');
       if (nd) {
@@ -1614,12 +1599,6 @@
         setScanProgress(n, null);
       };
       let api = await loadListViaApi(apiProgress);
-      if (api && !api.ok && /access_token|token/i.test(String(api.error || ''))) {
-        logLine('⚠ Token lần 1 không nhận (' + api.error + ') — chờ app hydrate rồi thử lại…');
-        capturedToken = null;
-        await sleep(700);
-        api = await loadListViaApi(apiProgress);
-      }
       if (api && api.ok && api.incomplete && !api.stopped) {
         logLine('⚠ Lần 1 chưa hết cursor (' + api.rows.length + ' chat) — tải lại từ đầu…');
         lastSyncedLen = 0;
