@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE LITE
 // @namespace    salescript
-// @version      1.91.19
+// @version      1.91.20
 // @description  BOTFAKE — panel hiện mọi website; gửi/tải list qua extension background.
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -44,7 +44,7 @@
   /* ============================ HẰNG SỐ ============================ */
 
   const PANEL_ID = 'ssb-root';          // ssb = SaleScript Bulk — không đụng pk-*/adj-*/pancake-* của script khác
-  const APP_VERSION = '1.91.19';        // hiện ở tiêu đề panel — đối chiếu với @version trong header
+  const APP_VERSION = '1.91.20';        // hiện ở tiêu đề panel — đối chiếu với @version trong header
   const STYLE_ID = 'ssb-style';
 
   const MAX_NAME_LIST = 12;             // số tên hiển thị khi xác nhận
@@ -223,14 +223,16 @@
   function reportExtJob(extra) {
     extra = extra || {};
     const now = Date.now();
-    const idle = extra.phase === 'idle' || (!state.sending && !state.scanning);
+    // Lượt phát lệnh xong → ẩn overlay (không để kẹt 100% vì tin còn xác nhận/bù).
+    if (typeof batchStats !== 'undefined' && batchStats.loopFinished && extra.phase === 'send') extra.phase = 'idle';
+    const idle = extra.phase === 'idle' || (!state.sending && !state.scanning && extra.phase !== 'scan');
     if (!idle && now - extJobAt < 200) return;
     extJobAt = now;
     const payload = {
       type: 'BOTFAKE_JOB',
-      sending: !!state.sending,
-      scanning: !!state.scanning,
-      phase: extra.phase || (state.sending ? 'send' : (state.scanning ? 'scan' : 'idle')),
+      sending: idle ? false : !!state.sending,
+      scanning: idle ? false : !!state.scanning,
+      phase: idle ? 'idle' : (extra.phase || (state.sending ? 'send' : (state.scanning ? 'scan' : 'idle'))),
       pct: extra.pct != null ? extra.pct : 0,
       ok: extra.ok,
       total: extra.total,
@@ -5350,6 +5352,7 @@
     }
 
     batchStats.loopFinished = true;
+    reportExtJob({ phase: 'idle' });
     if (state.stopRequested && done < totalAll) {
       logLine('⏸ Đã dừng sớm sau ' + done + '/' + totalAll + ' chat.');
     }
