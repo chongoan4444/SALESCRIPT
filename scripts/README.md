@@ -17,7 +17,7 @@ Phù hợp khi nhiều khách nhắn cùng 1 câu hỏi / cùng 1 tin tự độ
 
 Bản **copy riêng**, không đụng file gốc v1.82.10. Gửi **hết** chat đã chọn — **không** lọc tag chốt/chặn, **không** lọc icon điện thoại, **không** xác minh tag lần 2. **Không** có tạo câu / chọn chuỗi / snippet. Panel thu nhỏ. Vẫn: ⚡ tải danh sách, ☑ Chọn tất cả, gửi chữ/ảnh/câu nhanh.
 
-**Chrome extension (v1.90.6):** load unpacked thư mục repo (`manifest.json`). Đổi tab khác vẫn thấy overlay `%` theo Pancake #1, #2. Chi tiết `extension/README.md`.
+**Chrome extension (v1.91.0):** load unpacked thư mục repo (`manifest.json`). ▶ Chạy → gửi **API trong background** (đổi tab không bóp). Overlay `%` Pancake #1/#2. Chi tiết `extension/README.md`.
 
 ## Cài đặt
 

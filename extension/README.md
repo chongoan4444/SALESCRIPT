@@ -1,8 +1,10 @@
 # BOTFAKE LITE — Chrome extension
 
-Thanh tiến trình khi **đổi tab**: `BOTFAKE đang chạy ở 2 tab` + **Pancake #1** / **Pancake #2** + `%`.
+**v1.91.0 — gửi NỀN:** bấm ▶ Chạy trên tab Pancake, lệnh **POST API chạy trong service worker**. Đổi tab / ẩn cửa sổ **không bị Chrome bóp** tốc độ gửi.
 
-Gửi **vẫn trong tab Pancake** (API/Socket như LITE). Background chỉ **gom %** để hiện overlay. Tab ẩn Chrome vẫn có thể bóp JS — overlay thì thấy được.
+Overlay khi đổi tab: `BOTFAKE đang chạy ở 2 tab` + **Pancake #1** / **#2** + `%`.
+
+Kênh nền = **API**. Bù Socket/Extension (#551 / nick khóa) **không** chạy ở SW. Tampermonkey (không load extension) vẫn gửi trong tab như cũ.
 
 ## Cài
 

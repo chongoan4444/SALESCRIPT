@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE LITE
 // @namespace    salescript
-// @version      1.90.6
+// @version      1.91.0
 // @description  BOTFAKE — chọn chuỗi chat (Alt+Click 2 đầu) hoặc theo snippet trong Pancake rồi gửi cùng 1 câu (kèm 1 hoặc nhiều ảnh nếu muốn) cho tất cả.
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -44,7 +44,7 @@
   /* ============================ HẰNG SỐ ============================ */
 
   const PANEL_ID = 'ssb-root';          // ssb = SaleScript Bulk — không đụng pk-*/adj-*/pancake-* của script khác
-  const APP_VERSION = '1.90.6';        // hiện ở tiêu đề panel — đối chiếu với @version trong header
+  const APP_VERSION = '1.91.0';        // hiện ở tiêu đề panel — đối chiếu với @version trong header
   const STYLE_ID = 'ssb-style';
 
   const MAX_NAME_LIST = 12;             // số tên hiển thị khi xác nhận
@@ -206,6 +206,84 @@
         chrome.runtime.sendMessage(payload, function () { void chrome.runtime.lastError; });
       }
     } catch (e) { /* Tampermonkey / không phải extension */ }
+  }
+
+  function extBgAvailable() {
+    try {
+      return !!(typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.id && chrome.runtime.sendMessage);
+    } catch (e) { return false; }
+  }
+
+  function serializeBgPhoto(photo, qrPhotoByPage, apiFbIdsByPage, fbIdByPage) {
+    if (!photo) return null;
+    if (photo.qr) {
+      const byPage = {};
+      Object.keys(qrPhotoByPage || {}).forEach((pid) => {
+        const q = qrPhotoByPage[pid];
+        if (!q) return;
+        byPage[pid] = {
+          id: q.id || '', url: q.url || '', w: q.w || 0, h: q.h || 0,
+          fbId: (apiFbIdsByPage && apiFbIdsByPage[pid] && apiFbIdsByPage[pid][0]) || fbIdByPage[pid] || '',
+          fbIds: (apiFbIdsByPage && apiFbIdsByPage[pid]) || [],
+          items: (q.items || []).map((it) => ({ id: it.id || '', url: it.url || '', w: it.w || 0, h: it.h || 0, fbId: it.fbId || '' })),
+        };
+      });
+      return { qr: true, shortcut: photo.shortcut || '', byPage: byPage };
+    }
+    return {
+      id: photo.id || '', url: photo.url || '', w: photo.w || 0, h: photo.h || 0,
+      fbId: photo.fbId || '', fbIds: photo.fbIds || [],
+      items: (photo.items || []).map((it) => ({ id: it.id || '', url: it.url || '', w: it.w || 0, h: it.h || 0, fbId: it.fbId || '' })),
+    };
+  }
+
+  function runExtensionBgSend(sendGroups, pack) {
+    return new Promise((resolve, reject) => {
+      const targets = [];
+      (sendGroups || []).forEach((g) => {
+        (g.list || []).forEach((c) => {
+          targets.push({
+            id: c.id,
+            pageId: c.pageId || String(c.id || '').split('_')[0],
+            name: c.name || '',
+            type: c.type || '',
+            text: g.text || '',
+          });
+        });
+      });
+      const job = {
+        apiBase: apiBase(),
+        token: getToken(),
+        text: (sendGroups[0] && sendGroups[0].text) || '',
+        photo: serializeBgPhoto(pack.photo, pack.qrPhotoByPage, pack.apiFbIdsByPage, pack.fbIdByPage),
+        targets: targets,
+      };
+      const onMsg = (msg) => {
+        if (!msg || !msg.type) return;
+        if (msg.type === 'BOTFAKE_BG_LOG' && msg.line) logLine(msg.line);
+        if (msg.type === 'BOTFAKE_BG_PROGRESS') {
+          summaryCounters.okApi = msg.ok || 0;
+          summaryCounters.fail = msg.fail || 0;
+          batchStats.total = msg.total || batchStats.total;
+          setProgress(msg.done || 0, msg.total || 0, msg.ok || 0);
+          try { updateBatchSummaryUI(); } catch (e0) { /* ignore */ }
+        }
+        if (msg.type === 'BOTFAKE_BG_DONE') {
+          try { chrome.runtime.onMessage.removeListener(onMsg); } catch (e1) { /* ignore */ }
+          summaryCounters.okApi = msg.okN || 0;
+          summaryCounters.fail = msg.fail || 0;
+          if (msg.stopped) state.stopRequested = true;
+          resolve(msg);
+        }
+      };
+      try { chrome.runtime.onMessage.addListener(onMsg); } catch (e) { reject(e); return; }
+      chrome.runtime.sendMessage({ type: 'BOTFAKE_BG_SEND', job: job }, (res) => {
+        if (chrome.runtime.lastError || !res || !res.ok) {
+          try { chrome.runtime.onMessage.removeListener(onMsg); } catch (e2) { /* ignore */ }
+          reject(new Error((res && res.error) || (chrome.runtime.lastError && chrome.runtime.lastError.message) || 'SW không nhận job'));
+        }
+      });
+    });
   }
 
   const esc = (s) => String(s == null ? '' : s)
@@ -5205,13 +5283,25 @@
         warmUpSockets(targets);
         await waitInitialGidWarmup(targets, 1500);
       } catch (e) { /* làm nóng lỗi không được làm hỏng lô */ }
-      for (let gi = 0; gi < sendGroups.length && !state.stopRequested; gi++) {
-        const g = sendGroups[gi];
-        if (sendGroups.length > 1) {
-          logLine('📤 [' + (gi + 1) + '/' + sendGroups.length + '] nội dung “' + clip(g.text, 50) + '” → ' + g.list.length + ' chat');
+      if (extBgAvailable()) {
+        logLine('🚀 Gửi NỀN qua extension — đổi tab không bị Chrome bóp (kênh API).');
+        const bg = await runExtensionBgSend(sendGroups, {
+          photo: photo,
+          qrPhotoByPage: qrPhotoByPage,
+          apiFbIdsByPage: apiFbIdsByPage,
+          fbIdByPage: fbIdByPage,
+        });
+        done = (bg && bg.done) || done;
+        if (bg && bg.stopped) state.stopRequested = true;
+      } else {
+        for (let gi = 0; gi < sendGroups.length && !state.stopRequested; gi++) {
+          const g = sendGroups[gi];
+          if (sendGroups.length > 1) {
+            logLine('📤 [' + (gi + 1) + '/' + sendGroups.length + '] nội dung “' + clip(g.text, 50) + '” → ' + g.list.length + ' chat');
+          }
+          if (useWaves) await runWaves(g.text, g.list);
+          else await sendBatch(g.text, g.list);
         }
-        if (useWaves) await runWaves(g.text, g.list);
-        else await sendBatch(g.text, g.list);
       }
     } catch (e) {
       sendErr = e;
@@ -6163,6 +6253,9 @@
     const requestStop = () => {
       if (!state.sending) return;
       state.stopRequested = true;
+      try {
+        if (extBgAvailable()) chrome.runtime.sendMessage({ type: 'BOTFAKE_BG_STOP' }, function () { void chrome.runtime.lastError; });
+      } catch (e0) { /* ignore */ }
       logLine('⏸ Đã bấm Dừng — ngắt lượt gửi, không bắn thêm.');
       applyRunStopButtons();
       if (batchStats.loopFinished) markSendIdleIfSettled();
