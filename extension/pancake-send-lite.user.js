@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE LITE
 // @namespace    salescript
-// @version      1.91.36
+// @version      1.91.37
 // @description  BOTFAKE — panel hiện mọi website; gửi/tải list qua extension background.
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -44,7 +44,7 @@
   /* ============================ HẰNG SỐ ============================ */
 
   const PANEL_ID = 'ssb-root';          // ssb = SaleScript Bulk — không đụng pk-*/adj-*/pancake-* của script khác
-  const APP_VERSION = '1.91.36';        // hiện ở tiêu đề panel — đối chiếu với @version trong header
+  const APP_VERSION = '1.91.37';        // hiện ở tiêu đề panel — đối chiếu với @version trong header
   const STYLE_ID = 'ssb-style';
 
   const MAX_NAME_LIST = 12;             // số tên hiển thị khi xác nhận
@@ -166,8 +166,8 @@
       const ctx = new Ctx();
       const osc = ctx.createOscillator();
       const gain = ctx.createGain();
-      osc.frequency.value = 18;
-      gain.gain.value = 0.03;
+      osc.frequency.value = 16;
+      gain.gain.value = 0.01;
       osc.connect(gain);
       gain.connect(ctx.destination);
       osc.start();
