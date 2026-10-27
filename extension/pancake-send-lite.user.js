@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE LITE
 // @namespace    salescript
-// @version      1.91.30
+// @version      1.91.31
 // @description  BOTFAKE — panel hiện mọi website; gửi/tải list qua extension background.
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -44,7 +44,7 @@
   /* ============================ HẰNG SỐ ============================ */
 
   const PANEL_ID = 'ssb-root';          // ssb = SaleScript Bulk — không đụng pk-*/adj-*/pancake-* của script khác
-  const APP_VERSION = '1.91.30';        // hiện ở tiêu đề panel — đối chiếu với @version trong header
+  const APP_VERSION = '1.91.31';        // hiện ở tiêu đề panel — đối chiếu với @version trong header
   const STYLE_ID = 'ssb-style';
 
   const MAX_NAME_LIST = 12;             // số tên hiển thị khi xác nhận
@@ -1916,7 +1916,7 @@
       } catch (e) { /* mạng lỗi — chưa set fetched=true để lần force sau còn thử lại */ }
       entry.inflight = null;
       return entry;
-    });
+    }).then(() => { entry.inflight = null; return entry; }); // lane không chạy fn (bấm Dừng) cũng phải nhả inflight
     return entry.inflight;
   }
 
@@ -2838,7 +2838,11 @@
       })());
     }
 
-    const gid = raceTasks.length ? await firstNonNull(raceTasks) : null;
+    let gid = raceTasks.length ? await firstNonNull(raceTasks) : null;
+    // Khi bấm Dừng, lane resolve {ok:false,error:'Đã dừng'} (OBJECT) thay vì chạy fn —
+    // object đó KHÔNG phải global_id: không lọc thì String(gid) = '[object Object]' sẽ bị
+    // saveCache ghi vào cache bền (localStorage + IndexedDB) và sống qua F5, bắn sai mãi.
+    if (gid && typeof gid !== 'string' && typeof gid !== 'number') gid = null;
     cleanupRace();
     if (gid && String(gid) !== badGid) {
       saveCache(gid);
@@ -3413,6 +3417,7 @@
         }
         if (!acquireOutbound(conv.id)) return dupBlockedResult(conv.id);
         sockFiredPending.add(conv.id);
+        ctx.ownsOutbound = true; // Ext bù ảnh trong settleSocketResult dùng chung khóa này
         const myRun = runSeq;
         const finalizeSockBg = (res) => {
           sockFiredPending.delete(conv.id);
@@ -3453,8 +3458,12 @@
         return { ok: true, id: gid, sendBy: 'socket', sent: true, fired: true };
       }
       if (!acquireOutbound(conv.id)) return dupBlockedResult(conv.id);
-      const rawSync = await pageLane(() => socketPublishSend(helper, pageId, gid, text, attFbIds));
-      const settled = await settleSocketResult(rawSync);
+      ctx.ownsOutbound = true; // Ext bù ảnh trong settleSocketResult dùng chung khóa này
+      let settled;
+      try {
+        const rawSync = await pageLane(() => socketPublishSend(helper, pageId, gid, text, attFbIds));
+        settled = await settleSocketResult(rawSync);
+      } finally { ctx.ownsOutbound = false; }
       if (!(settled && (settled.ok || settled.sent === 'maybe'))) releaseOutbound(conv.id);
       return settled;
     } catch (e) {
@@ -3554,10 +3563,14 @@
       // Tách bước chuẩn bị HTTP (ctxFull + uploadPhotoForPage + resolveGlobalId chạy ở extPrepLane)
       // khỏi bước bắn Extension thật (extSendLane): khi vào adapter.send là đã có sẵn
       // 100% payload (globalUserId + files=[fbId]), không giữ slot Extension trong lúc chờ HTTP!
-      if (!acquireOutbound(conv.id)) return dupBlockedResult(conv.id);
+      // Socket đang giữ khóa của chính chat này (ctx.ownsOutbound — Ext được gọi để BÙ ẢNH
+      // trong settleSocketResult) thì KHÔNG tự acquire nữa: acquire sẽ thua chính khóa Socket
+      // và trả ok GIẢ (dup-block) trong khi ảnh chưa hề được gửi.
+      const ownLock = !!(ctx && ctx.ownsOutbound);
+      if (!ownLock && !acquireOutbound(conv.id)) return dupBlockedResult(conv.id);
       const res = await extSendLane(() => adapter.send(payload, { timeout: 35000 }));
       if (res && res.ok === false && res.sent === false && res.error) {
-        releaseOutbound(conv.id);
+        if (!ownLock) releaseOutbound(conv.id);
         return { ok: false, sent: false, error: res.error };
       }
       if (res && res.success) {
@@ -3599,7 +3612,7 @@
         // Chỉ kết luận khách khóa nick thật (deadUser) khi đã gửi bằng globalUserId thật (khác null, !ctx.gidFromPsid)
         const deadUser = !!globalUserId && (!ctx || !ctx.gidFromPsid)
           && /1545041|Người này hiện không có mặt|Không tìm thấy người dùng/i.test(String(why || ''));
-        releaseOutbound(conv.id);
+        if (!ownLock) releaseOutbound(conv.id);
         return { ok: false, sent: false, recipientUnavailable: deadUser, error: errStr };
       }
       // không có phản hồi (timeout/hủy) → extension có thể đã gửi → KHÔNG rõ
@@ -3846,8 +3859,15 @@
             .catch((e) => ({ ok: false, sent: false, error: 'Lỗi kênh: ' + (e && e.message || e) }))
             .then((r) => {
               active--;
-              const next = waiters.shift();
-              if (next) next(); // giữ thứ tự FIFO cho các lệnh đang chờ
+              if (state.stopRequested) {
+                // Đang Dừng: xả HẾT hàng đợi — mỗi start() tự resolve 'Đã dừng' ngay.
+                // Chỉ xả 1 waiter như cũ thì số waiter còn lại kẹt vĩnh viễn (không còn
+                // task nào xong để kéo tiếp) → runPool không bao giờ xong → UI 'Đang dừng…' mãi.
+                while (waiters.length) { const w = waiters.shift(); w(); }
+              } else {
+                const next = waiters.shift();
+                if (next) next(); // giữ thứ tự FIFO cho các lệnh đang chờ
+              }
               resolve(r);
             });
         };
@@ -4230,7 +4250,10 @@
   const persistentGidMap = {};
   try {
     const rawGids = JSON.parse(localStorage.getItem(GID_LS_KEY) || '{}');
-    if (rawGids && typeof rawGids === 'object') Object.assign(persistentGidMap, rawGids);
+    if (rawGids && typeof rawGids === 'object') {
+      // lọc bỏ gid đã nhiễm '[object Object]' từ các phiên cũ — không nạp lại vào RAM
+      Object.keys(rawGids).forEach((k) => { if (!/^\[object /.test(String(rawGids[k]))) persistentGidMap[k] = rawGids[k]; });
+    }
   } catch (e) { /* ignore */ }
 
   let gidSaveTimer = null;
@@ -4240,7 +4263,7 @@
   }
 
   function putGidToMemCaches(key, val) {
-    if (!key || !val) return;
+    if (!key || !val || /^\[object /.test(String(val))) return; // chặn gid nhiễm '[object Object]'
     const s = String(val);
     persistentGidMap[key] = s;
     try {
@@ -4265,7 +4288,7 @@
   } catch (e) { /* ignore */ }
 
   window.__botfakeSaveGid__ = function (convId, pageId, threadId, gid) {
-    if (!gid) return;
+    if (!gid || /^\[object /.test(String(gid))) return; // chặn gid nhiễm '[object Object]'
     const s = String(gid);
     if (convId) putGidToMemCaches(String(convId), s);
     if (pageId && threadId) putGidToMemCaches(String(pageId) + '_' + String(threadId), s);
@@ -5138,7 +5161,17 @@
         const pArg = (pt.items && pt.items.length)
           ? { items: pt.items, url: pt.items[0].url, id: pt.items[0].id, fbId: (pt.apiFbIds && pt.apiFbIds[0]) || '', fbIds: pt.apiFbIds || [], w: pt.items[0].w || 0, h: pt.items[0].h || 0 }
           : null;
-        const rr = await sendOne(c, pt.text || '', pArg, sendOpts);
+        // CÂU NHIỀU ĐOẠN: phải gửi ĐỒNG BỘ từng đoạn (đoạn trước xác nhận xong mới bắn đoạn kế).
+        // Giữ bắn-nhả (fired) thì đoạn 1 giữ outboundLock/sockFiredPending → sendOne đoạn 2+
+        // trả ok GIẢ (dup-block) mà không gửi gì — khách chỉ nhận đoạn đầu. Nhả khóa giữa các
+        // đoạn; đoạn 2+ tắt quick/sockFired/fastOnly để chờ xác nhận thật, đúng thứ tự.
+        const ptOpts = (i === 0) ? sendOpts
+          : Object.assign({}, sendOpts, { quick: false, sockFired: false, fastOnly: false, deferredCtx: null });
+        if (i > 0) {
+          try { sockFiredPending.delete(c.id); } catch (e0) { /* ignore */ }
+          releaseOutbound(c.id);
+        }
+        const rr = await sendOne(c, pt.text || '', pArg, ptOpts);
         if (rr && rr.ok) {
           sentCount++;
           if (rr.fired) anyFired = true;
