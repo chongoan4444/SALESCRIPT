@@ -44,14 +44,14 @@
             '<span style="color:#4ade80">' + pct + '%</span>' +
           '</div>' +
           '<div style="font-size:11px;color:#94a3b8;margin:2px 0 4px">' + phase + (frac ? ' · ' + frac : '') + '</div>' +
-          '<div style="height:8px;border-radius:99px;background:#1e293b;overflow:hidden">' +
+          '<div style="height:6px;border-radius:99px;background:rgba(30,41,59,.45);overflow:hidden">' +
             '<div style="height:100%;width:' + pct + '%;background:' + barColor + '"></div>' +
           '</div>' +
         '</div>'
       );
     }).join('');
     el.innerHTML =
-      '<div style="font-weight:800;color:#93c5fd">BOTFAKE đang chạy ở ' + n + ' tab</div>' +
+      '<div style="font-weight:800;font-size:11px;color:#93c5fd">BOTFAKE · ' + n + ' tab</div>' +
       rows;
     el.style.display = 'block';
   }
