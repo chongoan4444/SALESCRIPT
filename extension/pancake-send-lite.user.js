@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE LITE
 // @namespace    salescript
-// @version      1.91.7
+// @version      1.91.8
 // @description  BOTFAKE — panel hiện mọi website; gửi/tải list qua extension background.
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -44,7 +44,7 @@
   /* ============================ HẰNG SỐ ============================ */
 
   const PANEL_ID = 'ssb-root';          // ssb = SaleScript Bulk — không đụng pk-*/adj-*/pancake-* của script khác
-  const APP_VERSION = '1.91.7';        // hiện ở tiêu đề panel — đối chiếu với @version trong header
+  const APP_VERSION = '1.91.8';        // hiện ở tiêu đề panel — đối chiếu với @version trong header
   const STYLE_ID = 'ssb-style';
 
   const MAX_NAME_LIST = 12;             // số tên hiển thị khi xác nhận
@@ -201,17 +201,53 @@
       total: extra.total,
       done: extra.done,
     };
-    try {
-      if (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.id && chrome.runtime.sendMessage) {
-        chrome.runtime.sendMessage(payload, function () { void chrome.runtime.lastError; });
-      }
-    } catch (e) { /* Tampermonkey / không phải extension */ }
+    extCall(payload);
   }
 
+  function extCall(payload) {
+    return new Promise((resolve) => {
+      try {
+        if (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.sendMessage) {
+          chrome.runtime.sendMessage(payload, (res) => {
+            resolve({ res: res, err: (chrome.runtime.lastError && chrome.runtime.lastError.message) || null });
+          });
+          return;
+        }
+      } catch (e0) { /* MAIN world: không có chrome */ }
+      const id = 'bf' + Date.now() + Math.random().toString(36).slice(2, 8);
+      const on = (ev) => {
+        if (ev.source !== window || !ev.data || ev.data.__botfake !== 1 || ev.data.dir !== 'from_sw' || ev.data.id !== id) return;
+        window.removeEventListener('message', on);
+        resolve({ res: ev.data.res, err: ev.data.err || null });
+      };
+      window.addEventListener('message', on);
+      window.postMessage({ __botfake: 1, dir: 'to_sw', id: id, payload: payload }, '*');
+      setTimeout(() => {
+        window.removeEventListener('message', on);
+        resolve({ res: null, err: 'timeout' });
+      }, 120000);
+    });
+  }
+  function extListen(fn) {
+    try {
+      if (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.onMessage) {
+        const wrap = (m, s, r) => fn(m, s, r);
+        chrome.runtime.onMessage.addListener(wrap);
+        return () => { try { chrome.runtime.onMessage.removeListener(wrap); } catch (e) { /* ignore */ } };
+      }
+    } catch (e1) { /* MAIN world */ }
+    const on = (ev) => {
+      if (ev.source !== window || !ev.data || ev.data.__botfake !== 1 || ev.data.dir !== 'push') return;
+      fn(ev.data.msg, null, function () {});
+    };
+    window.addEventListener('message', on);
+    return () => window.removeEventListener('message', on);
+  }
   function extBgAvailable() {
     try {
-      return !!(typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.id && chrome.runtime.sendMessage);
-    } catch (e) { return false; }
+      if (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.id) return true;
+    } catch (e) { /* ignore */ }
+    return document.documentElement.getAttribute('data-botfake-ext') === '1';
   }
 
   function serializeBgPhoto(photo, qrPhotoByPage, apiFbIdsByPage, fbIdByPage) {
@@ -268,9 +304,10 @@
       };
       let buLeft = 0;
       let doneMsg = null;
+      let unsubBg = function () {};
       const finishIfReady = () => {
         if (!doneMsg || buLeft > 0) return;
-        try { chrome.runtime.onMessage.removeListener(onMsg); } catch (e1) { /* ignore */ }
+        unsubBg();
         summaryCounters.okApi = doneMsg.okN || 0;
         summaryCounters.fail = doneMsg.fail || 0;
         if (doneMsg.stopped) state.stopRequested = true;
@@ -315,11 +352,12 @@
           finishIfReady();
         }
       };
-      try { chrome.runtime.onMessage.addListener(onMsg); } catch (e) { reject(e); return; }
-      chrome.runtime.sendMessage({ type: 'BOTFAKE_BG_SEND', job: job }, (res) => {
-        if (chrome.runtime.lastError || !res || !res.ok) {
-          try { chrome.runtime.onMessage.removeListener(onMsg); } catch (e2) { /* ignore */ }
-          reject(new Error((res && res.error) || (chrome.runtime.lastError && chrome.runtime.lastError.message) || 'SW không nhận job'));
+      unsubBg = extListen(onMsg);
+      extCall({ type: 'BOTFAKE_BG_SEND', job: job }).then((out) => {
+        const res = out && out.res;
+        if (out && out.err || !res || !res.ok) {
+          unsubBg();
+          reject(new Error((res && res.error) || (out && out.err) || 'SW không nhận job'));
         }
       });
     });
@@ -777,25 +815,16 @@
   }
 
   function bgFetchJson(url, tries, reqOpts) {
-    return new Promise((resolve) => {
-      try {
-        chrome.runtime.sendMessage({
-          type: 'BOTFAKE_BG_FETCH',
-          url: url,
-          tries: tries || 3,
-          method: (reqOpts && reqOpts.method) || 'GET',
-          bodyObj: (reqOpts && reqOpts.bodyObj) || null,
-          timeoutMs: (reqOpts && reqOpts.timeoutMs) || 15000,
-        }, (res) => {
-          if (chrome.runtime.lastError || !res) {
-            resolve({ ok: false, error: (chrome.runtime.lastError && chrome.runtime.lastError.message) || 'SW fetch lỗi' });
-            return;
-          }
-          resolve(res);
-        });
-      } catch (e) {
-        resolve({ ok: false, error: String(e && e.message || e) });
-      }
+    return extCall({
+      type: 'BOTFAKE_BG_FETCH',
+      url: url,
+      tries: tries || 3,
+      method: (reqOpts && reqOpts.method) || 'GET',
+      bodyObj: (reqOpts && reqOpts.bodyObj) || null,
+      timeoutMs: (reqOpts && reqOpts.timeoutMs) || 15000,
+    }).then((out) => {
+      if (out && out.res) return out.res;
+      return { ok: false, error: (out && out.err) || 'SW fetch lỗi' };
     });
   }
 
@@ -856,18 +885,36 @@
     'IS_LIVESTREAM_POST_OFF', 'PERSONAL_MESSAGE', 'GROUP_MESSAGE', 'BIZAI_GENERATING',
     'BIZAI_NOT_GENERATING', 'BIZAI_TRANSFERRED', 'STRANGER_MESSAGE'];
 
+  function getReduxState() {
+    try {
+      const s = window.__pancakeReduxStore__;
+      if (s && typeof s.getState === 'function') return s.getState();
+    } catch (e) { /* isolated / chưa hydrate */ }
+    return null;
+  }
+  function pageIdFromLocation() {
+    const m = String(location.pathname || '').match(/\/(\d{6,})/);
+    return m ? m[1] : '';
+  }
   function buildListRequest(pageCount, cursor, currentCount, token, opts) {
-    const st = window.__pancakeReduxStore__.getState();
+    const st = getReduxState() || {};
     const pgs = st.pages || {};
     const auth = st.auth || {};
     const cs = st.conversations || {};
     const singlePageId = (opts && opts.singlePageId) ? String(opts.singlePageId) : '';
     const multi = !!pgs.multiplePageMode;
-    const ids = singlePageId
+    let ids = singlePageId
       ? [singlePageId]
       : (multi
-        ? (Array.isArray(pgs.multiplePageIds) ? pgs.multiplePageIds : [])
+        ? (Array.isArray(pgs.multiplePageIds) ? pgs.multiplePageIds.slice() : [])
         : (pgs.currentPageId ? [pgs.currentPageId] : []));
+    if (!ids.length) {
+      const fromUrl = pageIdFromLocation();
+      if (fromUrl) ids = [fromUrl];
+    }
+    if (!ids.length) {
+      return { ids: [], url: '', method: 'GET', bodyObj: null, unreadFirst: true };
+    }
     const settings = (multi ? auth.settings : pgs.currentSettings) || {};
     const ftype = Array.isArray(cs.filteredType) ? cs.filteredType : (cs.filteredType ? [cs.filteredType] : []);
     let unreadFirst = (settings.unread_first === undefined || settings.unread_first === null)
@@ -6197,7 +6244,7 @@
       if (!state.sending) return;
       state.stopRequested = true;
       try {
-        if (extBgAvailable()) chrome.runtime.sendMessage({ type: 'BOTFAKE_BG_STOP' }, function () { void chrome.runtime.lastError; });
+        if (extBgAvailable()) extCall({ type: 'BOTFAKE_BG_STOP' });
       } catch (e0) { /* ignore */ }
       logLine('⏸ Đã bấm Dừng — ngắt lượt gửi, không bắn thêm.');
       applyRunStopButtons();
@@ -6689,16 +6736,12 @@
     }
   }
 
-  try {
-    if (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.onMessage) {
-      chrome.runtime.onMessage.addListener((m, _s, sendResponse) => {
-        if (m && m.type === 'BOTFAKE_SHOW_PANEL') {
-          showBotfakePanel();
-          sendResponse && sendResponse({ ok: true });
-        }
-      });
+  extListen((m, _s, sendResponse) => {
+    if (m && m.type === 'BOTFAKE_SHOW_PANEL') {
+      showBotfakePanel();
+      sendResponse && sendResponse({ ok: true });
     }
-  } catch (e) { /* ignore */ }
+  });
 
   function isPancakeHost() {
     const h = (location.hostname || '').toLowerCase();

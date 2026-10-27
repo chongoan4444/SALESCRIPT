@@ -18,6 +18,7 @@ function showPanel(tabId) {
     chrome.scripting.executeScript({
       target: { tabId: tabId },
       files: ['pancake-send-lite.user.js'],
+      world: 'MAIN',
     }, () => {
       setTimeout(() => {
         chrome.tabs.sendMessage(tabId, { type: 'BOTFAKE_SHOW_PANEL' }, () => window.close());

@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "BOTFAKE LITE",
-  "version": "1.91.7",
+  "version": "1.91.8",
   "description": "Gửi hàng loạt Pancake trong background + overlay Pancake #1/#2 khi đổi tab",
   "permissions": ["tabs", "storage", "scripting"],
   "host_permissions": [
@@ -36,6 +36,23 @@
         "https://socialos.vip/*"
       ],
       "js": ["pancake-send-lite.user.js"],
+      "run_at": "document_start",
+      "all_frames": false,
+      "world": "MAIN"
+    },
+    {
+      "matches": [
+        "https://pancake.vn/*",
+        "https://*.pancake.vn/*",
+        "https://pages.fm/*",
+        "https://*.pages.fm/*",
+        "https://pancake.ph/*",
+        "https://pancake.id/*",
+        "https://pancake.in/*",
+        "https://pancake.biz/*",
+        "https://socialos.vip/*"
+      ],
+      "js": ["bridge.js"],
       "run_at": "document_start",
       "all_frames": false
     },
