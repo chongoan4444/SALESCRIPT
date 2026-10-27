@@ -44,7 +44,7 @@
   /* ============================ HẰNG SỐ ============================ */
 
   const PANEL_ID = 'ssb-root';          // ssb = SaleScript Bulk — không đụng pk-*/adj-*/pancake-* của script khác
-  const APP_VERSION = '1.91.23';        // hiện ở tiêu đề panel — đối chiếu với @version trong header
+  const APP_VERSION = '1.91.30';        // hiện ở tiêu đề panel — đối chiếu với @version trong header
   const STYLE_ID = 'ssb-style';
 
   const MAX_NAME_LIST = 12;             // số tên hiển thị khi xác nhận
@@ -2279,6 +2279,16 @@
       } else {
         if (window && typeof window.__botfakeTrackStatus__ === 'function') window.__botfakeTrackStatus__(conv.id, 'uncertain');
         logLine('⚠ ' + nm + ' — không rõ kết quả (' + msg + ') — KHÔNG gửi lại để tránh trùng');
+      }
+    }).then((laneRes) => {
+      // lane nuốt lỗi văng ra từ fetch (mạng / abort quá hạn 20s) thành {ok:false,error:'Lỗi kênh:…'}
+      // mà KHÔNG ai chốt → chat kẹt pending vĩnh viễn. Chốt ⚠ tại đây (không gửi lại — tránh trùng).
+      if (myRun !== runSeq) return;
+      if (laneRes && laneRes.ok === false && laneRes.sent === false
+        && String(laneRes.error || '').indexOf('Lỗi kênh:') === 0
+        && !deliveredIds[conv.id] && !finalFailedIds[conv.id] && !uncertainIds[conv.id]) {
+        if (window && typeof window.__botfakeTrackStatus__ === 'function') window.__botfakeTrackStatus__(conv.id, 'uncertain');
+        logLine('⚠ ' + (conv.name || conv.id) + ' — không rõ kết quả (lỗi mạng/quá hạn) — KHÔNG gửi lại để tránh trùng');
       }
     }).catch(() => {
       if (myRun !== runSeq) return;
@@ -4566,6 +4576,39 @@
   const finalFailedIds = {}; // convId → đã thất bại hẳn (hết kênh hoặc khách khóa nick)
   const uncertainIds = {};   // convId → không rõ kết quả ('maybe')
   const skippedLateIds = {}; // convId → bỏ qua lúc gửi (tag cấm / icon điện thoại vừa gắn)
+  // Sổ tin bắn-nhả đang chờ xác nhận nền + WATCHDOG: quá 90s mà không kênh nào chốt
+  // (fetch treo, ACK mất, bù văng lỗi…) → tự chốt ⚠ để pending về 0: TỔNG HỢP luôn kết thúc,
+  // nút Chạy/Dừng luôn nhả. KHÔNG gửi lại (tránh trùng); ACK thật về sau markDelivered tự sửa số.
+  const pendingBg = {}; // convId → { at, name, via }
+  let bgWatchdogTimer = null;
+  const BG_SETTLE_DEADLINE_MS = 90000;
+  function noteBgPending(conv, via) {
+    if (!conv || !conv.id) return;
+    pendingBg[conv.id] = { at: Date.now(), name: conv.name || conv.id, via: via || '' };
+    if (!bgWatchdogTimer) bgWatchdogTimer = setInterval(sweepBgPending, 5000);
+  }
+  function clearBgPending(convId) { if (convId) delete pendingBg[convId]; }
+  function sweepBgPending() {
+    const now = Date.now();
+    let forced = 0;
+    Object.keys(pendingBg).forEach((id) => {
+      const e = pendingBg[id];
+      if (e && now - (e.at || 0) >= BG_SETTLE_DEADLINE_MS) {
+        delete pendingBg[id];
+        try { sockFiredPending.delete(id); } catch (e0) { /* ignore */ }
+        if (window && typeof window.__botfakeTrackStatus__ === 'function') window.__botfakeTrackStatus__(id, 'uncertain');
+        forced++;
+      }
+    });
+    if (forced) {
+      logLine('⏱ ' + forced + ' tin quá 90s chưa có xác nhận nền — chốt ⚠ không rõ (không gửi lại để tránh trùng) để TỔNG HỢP kết thúc.');
+      updateBatchSummaryUI();
+    }
+    if (!Object.keys(pendingBg).length && bgWatchdogTimer) {
+      clearInterval(bgWatchdogTimer);
+      bgWatchdogTimer = null;
+    }
+  }
   // v1.82.6 — khóa tin đang bay: đã POST/publish thì kênh khác không bắn thêm, trừ khi kênh trước
   // XÁC NHẬN thất bại (releaseOutbound). 'maybe' giữ khóa → không gửi lần 2.
   function dupBlockedResult(convId) {
@@ -4690,9 +4733,11 @@
   window.__botfakeTrackStatus__ = function (convId, kind) {
     if (!convId || deliveredIds[convId]) return;
     if (kind === 'fail') {
+      // đã từng bị watchdog chốt ⚠ mà sau đó bù chốt lỗi hẳn → chuyển nhóm, không đếm 2 lần
+      if (uncertainIds[convId]) { delete uncertainIds[convId]; summaryCounters.unsure = Math.max(0, summaryCounters.unsure - 1); }
       if (!finalFailedIds[convId]) { finalFailedIds[convId] = true; summaryCounters.fail++; }
     } else if (kind === 'uncertain') {
-      if (!uncertainIds[convId]) { uncertainIds[convId] = true; summaryCounters.unsure++; }
+      if (!uncertainIds[convId] && !finalFailedIds[convId]) { uncertainIds[convId] = true; summaryCounters.unsure++; }
     } else if (kind === 'skip') {
       if (!skippedLateIds[convId]) { skippedLateIds[convId] = true; summaryCounters.skipLate++; }
     }
@@ -4727,6 +4772,7 @@
       logLine('✓ ' + name + ' — tin đã đến nơi (xác nhận) — không bù.');
       return;
     }
+    if (pendingBg[conv.id]) pendingBg[conv.id].at = Date.now(); // chuỗi bù còn đang chạy — gia hạn watchdog
     const triedCh = (tried || []).slice();
     const done = buRetryDone[conv.id] || (buRetryDone[conv.id] = []); // kênh ĐÃ bù trong lượt
     const hasExt = !!(window.__ExtensionAdapter__ && typeof window.__ExtensionAdapter__.send === 'function');
@@ -4889,6 +4935,7 @@
     Object.keys(outboundLock).forEach((k) => { delete outboundLock[k]; });
     Object.keys(buRetryTimer).forEach((k) => { try { clearTimeout(buRetryTimer[k]); } catch (e0) { /* ignore */ } delete buRetryTimer[k]; });
     sockFiredPending.clear();
+    Object.keys(pendingBg).forEach((k) => { delete pendingBg[k]; });
     Object.keys(finalFailedIds).forEach((k) => { delete finalFailedIds[k]; });
     Object.keys(uncertainIds).forEach((k) => { delete uncertainIds[k]; });
     Object.keys(skippedLateIds).forEach((k) => { delete skippedLateIds[k]; });
