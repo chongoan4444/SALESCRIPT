@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE LITE
 // @namespace    salescript
-// @version      1.91.11
+// @version      1.91.12
 // @description  BOTFAKE — panel hiện mọi website; gửi/tải list qua extension background.
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -44,7 +44,7 @@
   /* ============================ HẰNG SỐ ============================ */
 
   const PANEL_ID = 'ssb-root';          // ssb = SaleScript Bulk — không đụng pk-*/adj-*/pancake-* của script khác
-  const APP_VERSION = '1.91.11';        // hiện ở tiêu đề panel — đối chiếu với @version trong header
+  const APP_VERSION = '1.91.12';        // hiện ở tiêu đề panel — đối chiếu với @version trong header
   const STYLE_ID = 'ssb-style';
 
   const MAX_NAME_LIST = 12;             // số tên hiển thị khi xác nhận
@@ -184,6 +184,41 @@
     startKeepAliveAudio();
   });
 
+  // html.txt: tên page = .icon-and-page-name span (dropdown) /
+  // .page-avt-modul.activated .content-right-top .font-bold (multi).
+  function getPageDisplayName() {
+    try {
+      const st = (typeof getReduxState === 'function' && getReduxState())
+        || (window.__pancakeReduxStore__ && window.__pancakeReduxStore__.getState && window.__pancakeReduxStore__.getState());
+      const pgs = (st && st.pages) || {};
+      const map = pgs.activatedMap || {};
+      const arr = Array.isArray(pgs.activated) ? pgs.activated : [];
+      const nameOf = (id) => {
+        if (id == null || id === '') return '';
+        const p = map[id] || arr.find((x) => x && String(x.id) === String(id));
+        return (p && p.name) ? String(p.name).replace(/\s+/g, ' ').trim() : '';
+      };
+      if (pgs.multiplePageMode && Array.isArray(pgs.multiplePageIds) && pgs.multiplePageIds.length) {
+        const names = pgs.multiplePageIds.map(nameOf).filter(Boolean);
+        if (names.length === 1) return names[0];
+        if (names.length > 1) return names[0] + ' +' + (names.length - 1);
+      }
+      const n = nameOf(pgs.currentPageId);
+      if (n) return n;
+    } catch (e) { /* ignore */ }
+    try {
+      const act = document.querySelector('.page-avt-modul.activated .content-right-top .font-bold');
+      const t = act && String(act.textContent || '').replace(/\s+/g, ' ').trim();
+      if (t) return t;
+    } catch (e2) { /* ignore */ }
+    try {
+      const sp = document.querySelector('.icon-and-page-name span');
+      const t2 = sp && String(sp.textContent || '').replace(/\s+/g, ' ').trim();
+      if (t2) return t2;
+    } catch (e3) { /* ignore */ }
+    return '';
+  }
+
   let extJobAt = 0;
   function reportExtJob(extra) {
     extra = extra || {};
@@ -200,6 +235,7 @@
       ok: extra.ok,
       total: extra.total,
       done: extra.done,
+      pageName: getPageDisplayName(),
     };
     extCall(payload);
   }

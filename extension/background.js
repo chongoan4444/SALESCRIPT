@@ -33,9 +33,10 @@ function listJobs() {
 
 async function upsert(tabId, data) {
   const n = await pancakeNumber(tabId);
-  const label = n ? ('Pancake #' + n) : ('Tab ' + tabId);
   const prev = jobs[tabId] || {};
-  jobs[tabId] = Object.assign({}, prev, data, { tabId, n, label, at: Date.now() });
+  const pageName = String((data && data.pageName) || prev.pageName || '').trim();
+  const label = pageName || (n ? ('Pancake #' + n) : ('Tab ' + tabId));
+  jobs[tabId] = Object.assign({}, prev, data, { tabId, n, pageName, label, at: Date.now() });
   if (data.phase === 'idle' && !data.sending && !data.scanning) delete jobs[tabId];
   await broadcast();
 }
