@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE LITE
 // @namespace    salescript
-// @version      1.91.41
+// @version      1.91.42
 // @description  BOTFAKE — panel hiện mọi website; gửi/tải list qua extension background.
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -44,7 +44,7 @@
   /* ============================ HẰNG SỐ ============================ */
 
   const PANEL_ID = 'ssb-root';          // ssb = SaleScript Bulk — không đụng pk-*/adj-*/pancake-* của script khác
-  const APP_VERSION = '1.91.41';        // hiện ở tiêu đề panel — đối chiếu với @version trong header
+  const APP_VERSION = '1.91.42';        // hiện ở tiêu đề panel — đối chiếu với @version trong header
   const STYLE_ID = 'ssb-style';
 
   const MAX_NAME_LIST = 12;             // số tên hiển thị khi xác nhận
@@ -2316,7 +2316,7 @@
         // BÁO RÕ KẾT QUẢ THẬT — không bao giờ "báo gửi" xong im lặng khi request đã bị từ chối.
         // Bù ĐÚNG 1 lần/kênh qua kênh CHƯA thử (Ext → Socket — đúng plan của app).
         logLine('⚠ ' + nm + ' — API từ chối (' + clip(msg, 90) + ')'
-          + (win ? ' — ngoài cửa sổ 24h, bù kênh khác' : ''));
+          + (win ? ' — ngoài cửa sổ 24h' : ''));
         scheduleBuRetry(conv, text, photo, nm, 'API từ chối (' + clip(msg, 90) + ')', ['api']);
       } else {
         if (window && typeof window.__botfakeTrackStatus__ === 'function') window.__botfakeTrackStatus__(conv.id, 'uncertain');
@@ -3479,7 +3479,7 @@
           }
           releaseOutbound(conv.id); // FB từ chối / chắc fail → nhả khóa để bù kênh khác (không sót)
           if (res && !res.recipientUnavailable && isRetryableLoss(res.error || '')) {
-            logLine('❌ ' + nm + ' — ' + (res.error || 'Socket thất bại') + ' (xác nhận nền — sẽ bù kênh khác)');
+            logLine('❌ ' + nm + ' — ' + (res.error || 'Socket thất bại') + ' (xác nhận nền — chốt lỗi, không bù)');
             scheduleBuRetry(conv, text, photo, nm, 'Socket bị từ chối (xác nhận nền)', ['socket']);
           } else {
             if (window && typeof window.__botfakeTrackStatus__ === 'function') window.__botfakeTrackStatus__(conv.id, 'fail');
@@ -4905,121 +4905,13 @@
   // Cả Extension lẫn Socket đều hỗ trợ gửi cả chữ lẫn ảnh (cho chat inbox). Bình luận (comment) chỉ
   // hỗ trợ API/Extension. 'maybe'/đã đến nơi → DỪNG tuyệt đối (chống trùng).
   function scheduleBuRetry(conv, text, photo, name, why, tried) {
+    // ĐÃ CẮT HẲN CƠ CHẾ BÙ (theo yêu cầu): kênh đầu thất bại chắc chắn → chốt ❌ ngay
+    // tại đây, KHÔNG lên lịch bắn thêm qua bất kỳ kênh nào nữa. Đường bù là nguồn gửi
+    // LẶP ở lô lớn: tin lần đầu thực ra đã đến nơi nhưng bị kết luận chưa đến → bù bắn
+    // lần 2 vào khách. Từ nay: chắc chắn fail = ❌; "không rõ" (maybe) = ⚠ như cũ.
     if (!conv) return;
-    if (buRetryTimer[conv.id]) return; // đã có chuỗi bù đang chờ — không chạy song song (chống gửi 2 lần)
-    if (sockFiredPending.has(conv.id)) {
-      // Socket đã bắn và ACK chưa chốt — bù kênh khác lúc này có thể gây TRÙNG câu. Chờ xác nhận nền chốt.
-      logLine('⏳ ' + name + ' — đang chờ xác nhận Socket (bắn-nhả) — không bù chồng để tránh trùng');
-      return;
-    }
-    if (deliveredIds[conv.id]) {
-      // đã có kênh XÁC NHẬN thành công thật — không gửi lại (chống trùng). Có log để không im lặng.
-      logLine('✓ ' + name + ' — tin đã đến nơi (xác nhận) — không bù.');
-      return;
-    }
-    if (uncertainIds[conv.id] || finalFailedIds[conv.id]) {
-      // Đã có nơi chốt cuối cho chat này (watchdog chốt ⚠ quá hạn / đã chốt ❌) — chốt đó là
-      // TUYỆT ĐỐI theo luật chống trùng: kết quả Socket về muộn không được kích bù nữa,
-      // nếu không sẽ bắn lần 2 lên tin có thể đã đến nơi (lặp ít, chủ yếu tin ảnh chốt chậm)
-      logLine('✓ ' + name + ' — đã chốt trạng thái cuối (⚠/❌) — không bù thêm để tránh trùng.');
-      return;
-    }
-    if (pendingBg[conv.id]) pendingBg[conv.id].at = Date.now(); // chuỗi bù còn đang chạy — gia hạn watchdog
-    const triedCh = (tried || []).slice();
-    const done = buRetryDone[conv.id] || (buRetryDone[conv.id] = []); // kênh ĐÃ bù trong lượt
-    const hasExt = !!(window.__ExtensionAdapter__ && typeof window.__ExtensionAdapter__.send === 'function');
-    const baseCandidates = (conv.type === 'comment')
-      ? ['ext']
-      : (hasExt ? ['ext', 'socket'] : ['socket']);
-    const remaining = baseCandidates.filter((c) => triedCh.indexOf(c) < 0 && done.indexOf(c) < 0);
-    if (!remaining.length) {
-      const seen = {};
-      const names = triedCh.concat(done).filter((x) => (seen[x] ? false : (seen[x] = true)));
-      if (window && typeof window.__botfakeTrackStatus__ === 'function') window.__botfakeTrackStatus__(conv.id, 'fail');
-      logLine('❌ ' + name + ' — đã thử hết kênh (' + (names.join(', ') || 'không rõ') + ')'
-        + (conv.type === 'comment' ? ' — bình luận chỉ API/Extension gửi được (Socket không hỗ trợ)' : '')
-        + ' — không bù nữa (mỗi kênh đúng 1 lần)');
-      return;
-    }
-    const myRun = runSeq;
-    // Chỉ bật gidForceFind khi đã từng thử 'ext' hoặc 'socket' mà thất bại; nếu mới chỉ thử 'api'
-    // (API từ chối ngoài 24h) thì global_id trong cache/GET /messages vẫn hoàn toàn hợp lệ!
-    const hadDirectFail = triedCh.indexOf('ext') > -1 || triedCh.indexOf('socket') > -1 || done.length > 0;
-    const delay = hadDirectFail ? (150 + Math.min(buRetrySeq++, 6) * BU_SPREAD_MS) : BU_RETRY_EXT_MS;
-    logLine('⏳ ' + name + ' — ' + why + ' — đang bù'
-      + (remaining.length > 1 ? ' (Socket/Extension)' : (' qua ' + (remaining[0] === 'ext' ? 'Extension' : 'Socket'))) + '…');
-    buRetryTimer[conv.id] = setTimeout(() => {
-      buRetryTimer[conv.id] = null;
-      if (myRun !== runSeq) return; // có lượt gửi mới — bù của lượt cũ bỏ (tránh gửi lẫn 2 lượt)
-      if (state.stopRequested) {
-        if (window && typeof window.__botfakeTrackStatus__ === 'function') window.__botfakeTrackStatus__(conv.id, 'fail');
-        logLine('⏸ ' + name + ' — bỏ bù (đang dừng).');
-        return;
-      }
-      if (deliveredIds[conv.id]) return; // trong lúc chờ, tin đã đến nơi qua đường khác — thôi
-      if (uncertainIds[conv.id] || finalFailedIds[conv.id]) return; // watchdog đã chốt ⚠/❌ trong lúc chờ bù — không bắn lần 2
-      const buCtx = { gidForceFind: hadDirectFail };
-      busEnqueue(async () => {
-        // Kiểm tra LẠI ngay trước khi bắn: trong lúc xếp hàng chờ lane (có thể cả phút ở
-        // lô lớn), ACK của lần đầu có thể đã về hoặc watchdog đã chốt — kiểm tra ở timer
-        // là chưa đủ, cứ bắn là LẶP (đây là nguồn của đoàn "bù thành công" cuối log)
-        if (deliveredIds[conv.id]) {
-          buStats.cancelled++;
-          logLine('✓ ' + name + ' — tin đã đến nơi trong lúc chờ bù — hủy bù (tránh trùng).');
-          return { ch: null, delivered: true };
-        }
-        if (uncertainIds[conv.id] || finalFailedIds[conv.id]) {
-          buStats.cancelled++;
-          logLine('✓ ' + name + ' — đã chốt trạng thái cuối trong lúc chờ bù — hủy bù (tránh trùng).');
-          return { ch: null, delivered: true };
-        }
-        await prepareDirectCtx(conv, photo, buCtx);
-        const pid = (buCtx.full && (buCtx.full.page_id || buCtx.full.pageId)) || conv.pageId || String(conv.id || '').split('_')[0];
-        const ordered = (remaining.length > 1)
-          ? pickBestDirectOrder(conv, pid, buCtx, remaining)
-          : remaining.slice();
-        const ch = ordered.find((c) => triedCh.indexOf(c) < 0 && done.indexOf(c) < 0) || remaining[0];
-        done.push(ch);
-        const r = (ch === 'ext')
-          ? await sendViaExtension(conv, text, photo, buCtx)
-          : await sendViaSocket(conv, text, photo, buCtx);
-        return { ch, r };
-      }).then((out) => {
-        if (out && out.delivered) return; // đã hủy bù vì tin đến nơi / đã chốt cuối — không chốt lỗi
-        if (!out || !out.ch) {
-          // bước chuẩn bị bù văng lỗi (lane trả {ok:false}) — phải chốt, không im lặng kẹt pending
-          if (window && typeof window.__botfakeTrackStatus__ === 'function') window.__botfakeTrackStatus__(conv.id, 'fail');
-          logLine('❌ ' + name + ' — bù lỗi: ' + clip((out && out.error) || 'không rõ', 90));
-          return;
-        }
-        const ch = out.ch;
-        const r = out.r;
-        if (r && r.ok) {
-          markDelivered(conv.id, ch);
-          postSendSideEffects(conv);
-          markChannel(conv.id, ch); // lần gửi sau vào thẳng kênh vừa thắng
-          buStats.ok++;
-          buStats.byWhy[buWhyBucket(why)] = (buStats.byWhy[buWhyBucket(why)] || 0) + 1;
-          logLine('✅ ' + name + ' — bù THÀNH CÔNG qua ' + (ch === 'ext' ? 'Extension' : 'Socket'));
-        } else if (r && r.sent === 'maybe') {
-          if (window && typeof window.__botfakeTrackStatus__ === 'function') window.__botfakeTrackStatus__(conv.id, 'uncertain');
-          logLine('⚠ ' + name + ' — bù không rõ kết quả — KHÔNG gửi thêm (chống trùng)');
-        } else if (r && r.recipientUnavailable) {
-          if (window && typeof window.__botfakeTrackStatus__ === 'function') window.__botfakeTrackStatus__(conv.id, 'fail');
-          logLine('❌ ' + name + ' — bù ' + (ch === 'ext' ? 'Extension' : 'Socket') + ' không được: '
-            + clip((r && r.error) || 'lỗi không rõ', 90) + ' — khách hiện không nhận được tin (không thử tiếp kênh khác)');
-        } else {
-          logLine('❌ ' + name + ' — bù ' + (ch === 'ext' ? 'Extension' : 'Socket') + ' không được: '
-            + clip((r && r.error) || 'lỗi không rõ', 90) + ' — sang kênh kế nếu còn');
-          // CHUỖI BÙ: kênh kế CHƯA thử (mỗi kênh đúng 1 lần — không lặp kênh vừa thua)
-          scheduleBuRetry(conv, text, photo, name,
-            'bù ' + (ch === 'ext' ? 'Extension' : 'Socket') + ' không được', triedCh.concat([ch]));
-        }
-      }).catch((e) => {
-        if (window && typeof window.__botfakeTrackStatus__ === 'function') window.__botfakeTrackStatus__(conv.id, 'fail');
-        logLine('❌ ' + name + ' — bù lỗi: ' + (e && e.message || e));
-      });
-    }, delay);
+    if (uncertainIds[conv.id] || finalFailedIds[conv.id]) return; // đã có chốt cuối (⚠/❌) — giữ nguyên
+    if (window && typeof window.__botfakeTrackStatus__ === 'function') window.__botfakeTrackStatus__(conv.id, 'fail');
   }
 
   // Nhóm chat theo NỘI DUNG sẽ gửi: chat thuộc câu nào → ĐÚNG chữ của câu đó;
@@ -5406,7 +5298,7 @@
         if (!r.fired) { markDelivered(c.id, r.sendBy || 'api'); postSendSideEffects(c); }
         if (r.fired) { firedN++; noteBgPending(c, r.sendBy); } // vào sổ watchdog — quá 90s tự chốt, không kẹt
         logLine('✅ [' + done + '/' + totalAll + '] ' + (c.name || c.id) + ' — đã gửi' + via
-          + (r.fired ? ' (đang xác nhận nền — nếu bị từ chối sẽ tự bù và báo)' : ''));
+          + (r.fired ? ' (đang xác nhận nền)' : ''));
       } else if (r.uncertain) {
         unsure++;
         if (window && typeof window.__botfakeTrackStatus__ === 'function') window.__botfakeTrackStatus__(c.id, 'uncertain');
@@ -5630,7 +5522,7 @@
         + (sumNow.pending > 0 ? ' (còn ' + sumNow.pending + ' tin đang xác nhận/bù nền — bảng TỔNG HỢP sẽ tự chốt khi xong hết)' : '')
         + ', ' + sumNow.failTotal + ' lỗi.'
         + (sumNow.unsureTotal ? ' ' + sumNow.unsureTotal + ' tin không rõ kết quả (không gửi thêm).' : '')
-        + (windowBlocked ? ' 🚫 ' + windowBlocked + ' lần API bị chặn ngoài cửa sổ 24h (đã bù kênh khác).' : '')
+        + (windowBlocked ? ' 🚫 ' + windowBlocked + ' lần API bị chặn ngoài cửa sổ 24h.' : '')
         + (sumNow.pending > 0
           ? ' ⏱ Đã phát lệnh xong trong ' + (((Date.now() - batchStats.startedAt) / 1000).toFixed(0)) + 's — tốc độ chốt xem ở dòng TỔNG HỢP cuối cùng.'
           : ' ⏱ Tổng thời gian: ' + (((Date.now() - batchStats.startedAt) / 60000).toFixed(1)) + ' phút'
