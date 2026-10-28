@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE LITE
 // @namespace    salescript
-// @version      1.91.42
+// @version      1.91.43
 // @description  BOTFAKE — panel hiện mọi website; gửi/tải list qua extension background.
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -44,7 +44,7 @@
   /* ============================ HẰNG SỐ ============================ */
 
   const PANEL_ID = 'ssb-root';          // ssb = SaleScript Bulk — không đụng pk-*/adj-*/pancake-* của script khác
-  const APP_VERSION = '1.91.42';        // hiện ở tiêu đề panel — đối chiếu với @version trong header
+  const APP_VERSION = '1.91.43';        // hiện ở tiêu đề panel — đối chiếu với @version trong header
   const STYLE_ID = 'ssb-style';
 
   const MAX_NAME_LIST = 12;             // số tên hiển thị khi xác nhận
@@ -2309,9 +2309,12 @@
         // "(#10)"; HAR có update_global_id chạy sau cả "(#551)"). → PHẢI bù qua kênh chưa thử.
         const win = isWindowClosedError(msg);
         if (win) windowBlocked++;
-        if (isThreadControlError(msg) && !batchSkipApi) {
+        if (isThreadControlError(msg)) {
+          markApiBlockedForPage(conv.pageId || String(conv.id || '').split('_')[0]); // nhớ page này cho các lượt sau
+          if (!batchSkipApi) {
           batchSkipApi = true; // học nhanh: API bị chặn cấp page (#10 app khác giữ thread, #613…) → chat còn lại trong lô đi thẳng Socket/Ext
           logLine('⛔ API bị chặn (' + msg + ') — các chat còn lại trong lô sẽ đi thẳng Socket/Ext');
+          }
         }
         // BÁO RÕ KẾT QUẢ THẬT — không bao giờ "báo gửi" xong im lặng khi request đã bị từ chối.
         // Bù ĐÚNG 1 lần/kênh qua kênh CHƯA thử (Ext → Socket — đúng plan của app).
@@ -2415,6 +2418,25 @@
     }
   }
   let batchSkipApi = false; // API bị chặn CẤP PAGE (#10 app khác giữ thread, #613, rate limit…) → chat sau đi thẳng Socket/Ext
+
+  // NHỚ THEO PAGE QUA CÁC LƯỢT: page từng bị API chặn cấp page (#10 app khác giữ
+  // thread…) thì các lượt SAU đi thẳng Socket/Ext ngay từ con đầu, không bắn API thử
+  // nữa — cơ chế học trong lượt không cứu được lô đã bắn hết trước khi #10 kịp về
+  // (lô 24 con chạy lại vẫn 0/24). Lưu sessionStorage (hết phiên tab là quên) + TTL 4h.
+  const API_BLOCKED_PAGES_KEY = 'ssb_api_blocked_pages_v1';
+  const API_BLOCKED_TTL_MS = 4 * 3600 * 1000;
+  let apiBlockedPages = {};
+  try { apiBlockedPages = JSON.parse(sessionStorage.getItem(API_BLOCKED_PAGES_KEY) || '{}') || {}; } catch (e) { apiBlockedPages = {}; }
+  function isApiBlockedForPage(pageId) {
+    if (!pageId) return false;
+    const ts = apiBlockedPages[String(pageId)] || 0;
+    return !!ts && (Date.now() - ts < API_BLOCKED_TTL_MS);
+  }
+  function markApiBlockedForPage(pageId) {
+    if (!pageId) return;
+    apiBlockedPages[String(pageId)] = Date.now();
+    try { sessionStorage.setItem(API_BLOCKED_PAGES_KEY, JSON.stringify(apiBlockedPages)); } catch (e) { /* ignore */ }
+  }
 
   // NGOÀI CỬA SỔ 24H — API từ chối "(#551) Người này hiện không có mặt" / "(#10)…ngoài khoảng
   // thời gian cho phép…". ĐÂY KHÔNG PHẢI "mọi kênh đều thua": app vẫn fallback Extension và Ext
@@ -3480,7 +3502,7 @@
           releaseOutbound(conv.id); // FB từ chối / chắc fail → nhả khóa để bù kênh khác (không sót)
           if (res && !res.recipientUnavailable && isRetryableLoss(res.error || '')) {
             logLine('❌ ' + nm + ' — ' + (res.error || 'Socket thất bại') + ' (xác nhận nền — chốt lỗi, không bù)');
-            scheduleBuRetry(conv, text, photo, nm, 'Socket bị từ chối (xác nhận nền)', ['socket']);
+            chotFailKhongBu(conv); // Socket bị từ chối ở xác nhận nền: chốt ❌, KHÔNG bù (chỉ bù cho API bị từ chối)
           } else {
             if (window && typeof window.__botfakeTrackStatus__ === 'function') window.__botfakeTrackStatus__(conv.id, 'fail');
             logLine('❌ ' + nm + ' — ' + ((res && res.error) || 'Socket thất bại') + ' (xác nhận nền)');
@@ -4079,7 +4101,9 @@
       const textOutWin = !photo && idleLong && !isRecordCtx7Days(full);
       const photoOutWin = !!photo && idleLong && !isRecordCtx7Days(full);
       const noApiPhoto = !!(photo && !photo.fbId);
+      const pidQuick = (full && (full.page_id || full.pageId)) || conv.pageId || String(conv.id || '').split('_')[0];
       const goDirect = batchSkipApi
+        || isApiBlockedForPage(pidQuick)
         || noApiPhoto
         || (photo && hint && hint !== 'api')
         || textOutWin
@@ -4139,7 +4163,7 @@
           }
           // cửa sổ 24h VẪN bù kênh khác (Thanh Binh); khách khóa nick (recipientUnavailable) hoặc hết kênh → tự bỏ
           if (!r.ok && !r.uncertain && !r.recipientUnavailable && isRetryableLoss(r.error)) {
-            scheduleBuRetry(conv, text, photo, nm2, 'gửi thẳng chưa được', r.tried || []);
+            chotFailKhongBu(conv);
           } else if (!r.ok && !r.uncertain) {
             if (window && typeof window.__botfakeTrackStatus__ === 'function') window.__botfakeTrackStatus__(conv.id, 'fail');
           }
@@ -4160,7 +4184,10 @@
     const channels = {
       api: async () => {
         const r = await sendViaApi(conv, text, photo, ctx);
-        if (!r.ok && r.sent !== 'maybe' && isThreadControlError(r.error)) batchSkipApi = true;
+        if (!r.ok && r.sent !== 'maybe' && isThreadControlError(r.error)) {
+          batchSkipApi = true;
+          markApiBlockedForPage(conv.pageId || String(conv.id || '').split('_')[0]);
+        }
         return r;
       },
       socket: () => sendViaSocket(conv, text, photo, ctx),
@@ -4905,10 +4932,129 @@
   // Cả Extension lẫn Socket đều hỗ trợ gửi cả chữ lẫn ảnh (cho chat inbox). Bình luận (comment) chỉ
   // hỗ trợ API/Extension. 'maybe'/đã đến nơi → DỪNG tuyệt đối (chống trùng).
   function scheduleBuRetry(conv, text, photo, name, why, tried) {
-    // ĐÃ CẮT HẲN CƠ CHẾ BÙ (theo yêu cầu): kênh đầu thất bại chắc chắn → chốt ❌ ngay
-    // tại đây, KHÔNG lên lịch bắn thêm qua bất kỳ kênh nào nữa. Đường bù là nguồn gửi
-    // LẶP ở lô lớn: tin lần đầu thực ra đã đến nơi nhưng bị kết luận chưa đến → bù bắn
-    // lần 2 vào khách. Từ nay: chắc chắn fail = ❌; "không rõ" (maybe) = ⚠ như cũ.
+    if (!conv) return;
+    if (buRetryTimer[conv.id]) return; // đã có chuỗi bù đang chờ — không chạy song song (chống gửi 2 lần)
+    if (sockFiredPending.has(conv.id)) {
+      // Socket đã bắn và ACK chưa chốt — bù kênh khác lúc này có thể gây TRÙNG câu. Chờ xác nhận nền chốt.
+      logLine('⏳ ' + name + ' — đang chờ xác nhận Socket (bắn-nhả) — không bù chồng để tránh trùng');
+      return;
+    }
+    if (deliveredIds[conv.id]) {
+      // đã có kênh XÁC NHẬN thành công thật — không gửi lại (chống trùng). Có log để không im lặng.
+      logLine('✓ ' + name + ' — tin đã đến nơi (xác nhận) — không bù.');
+      return;
+    }
+    if (uncertainIds[conv.id] || finalFailedIds[conv.id]) {
+      // Đã có nơi chốt cuối cho chat này (watchdog chốt ⚠ quá hạn / đã chốt ❌) — chốt đó là
+      // TUYỆT ĐỐI theo luật chống trùng: kết quả Socket về muộn không được kích bù nữa,
+      // nếu không sẽ bắn lần 2 lên tin có thể đã đến nơi (lặp ít, chủ yếu tin ảnh chốt chậm)
+      logLine('✓ ' + name + ' — đã chốt trạng thái cuối (⚠/❌) — không bù thêm để tránh trùng.');
+      return;
+    }
+    if (pendingBg[conv.id]) pendingBg[conv.id].at = Date.now(); // chuỗi bù còn đang chạy — gia hạn watchdog
+    const triedCh = (tried || []).slice();
+    const done = buRetryDone[conv.id] || (buRetryDone[conv.id] = []); // kênh ĐÃ bù trong lượt
+    const hasExt = !!(window.__ExtensionAdapter__ && typeof window.__ExtensionAdapter__.send === 'function');
+    const baseCandidates = (conv.type === 'comment')
+      ? ['ext']
+      : (hasExt ? ['ext', 'socket'] : ['socket']);
+    const remaining = baseCandidates.filter((c) => triedCh.indexOf(c) < 0 && done.indexOf(c) < 0);
+    if (!remaining.length) {
+      const seen = {};
+      const names = triedCh.concat(done).filter((x) => (seen[x] ? false : (seen[x] = true)));
+      if (window && typeof window.__botfakeTrackStatus__ === 'function') window.__botfakeTrackStatus__(conv.id, 'fail');
+      logLine('❌ ' + name + ' — đã thử hết kênh (' + (names.join(', ') || 'không rõ') + ')'
+        + (conv.type === 'comment' ? ' — bình luận chỉ API/Extension gửi được (Socket không hỗ trợ)' : '')
+        + ' — không bù nữa (mỗi kênh đúng 1 lần)');
+      return;
+    }
+    const myRun = runSeq;
+    // Chỉ bật gidForceFind khi đã từng thử 'ext' hoặc 'socket' mà thất bại; nếu mới chỉ thử 'api'
+    // (API từ chối ngoài 24h) thì global_id trong cache/GET /messages vẫn hoàn toàn hợp lệ!
+    const hadDirectFail = triedCh.indexOf('ext') > -1 || triedCh.indexOf('socket') > -1 || done.length > 0;
+    const delay = hadDirectFail ? (150 + Math.min(buRetrySeq++, 6) * BU_SPREAD_MS) : BU_RETRY_EXT_MS;
+    logLine('⏳ ' + name + ' — ' + why + ' — đang bù'
+      + (remaining.length > 1 ? ' (Socket/Extension)' : (' qua ' + (remaining[0] === 'ext' ? 'Extension' : 'Socket'))) + '…');
+    buRetryTimer[conv.id] = setTimeout(() => {
+      buRetryTimer[conv.id] = null;
+      if (myRun !== runSeq) return; // có lượt gửi mới — bù của lượt cũ bỏ (tránh gửi lẫn 2 lượt)
+      if (state.stopRequested) {
+        if (window && typeof window.__botfakeTrackStatus__ === 'function') window.__botfakeTrackStatus__(conv.id, 'fail');
+        logLine('⏸ ' + name + ' — bỏ bù (đang dừng).');
+        return;
+      }
+      if (deliveredIds[conv.id]) return; // trong lúc chờ, tin đã đến nơi qua đường khác — thôi
+      if (uncertainIds[conv.id] || finalFailedIds[conv.id]) return; // watchdog đã chốt ⚠/❌ trong lúc chờ bù — không bắn lần 2
+      const buCtx = { gidForceFind: hadDirectFail };
+      busEnqueue(async () => {
+        // Kiểm tra LẠI ngay trước khi bắn: trong lúc xếp hàng chờ lane (có thể cả phút ở
+        // lô lớn), ACK của lần đầu có thể đã về hoặc watchdog đã chốt — kiểm tra ở timer
+        // là chưa đủ, cứ bắn là LẶP (đây là nguồn của đoàn "bù thành công" cuối log)
+        if (deliveredIds[conv.id]) {
+          buStats.cancelled++;
+          logLine('✓ ' + name + ' — tin đã đến nơi trong lúc chờ bù — hủy bù (tránh trùng).');
+          return { ch: null, delivered: true };
+        }
+        if (uncertainIds[conv.id] || finalFailedIds[conv.id]) {
+          buStats.cancelled++;
+          logLine('✓ ' + name + ' — đã chốt trạng thái cuối trong lúc chờ bù — hủy bù (tránh trùng).');
+          return { ch: null, delivered: true };
+        }
+        await prepareDirectCtx(conv, photo, buCtx);
+        const pid = (buCtx.full && (buCtx.full.page_id || buCtx.full.pageId)) || conv.pageId || String(conv.id || '').split('_')[0];
+        const ordered = (remaining.length > 1)
+          ? pickBestDirectOrder(conv, pid, buCtx, remaining)
+          : remaining.slice();
+        const ch = ordered.find((c) => triedCh.indexOf(c) < 0 && done.indexOf(c) < 0) || remaining[0];
+        done.push(ch);
+        const r = (ch === 'ext')
+          ? await sendViaExtension(conv, text, photo, buCtx)
+          : await sendViaSocket(conv, text, photo, buCtx);
+        return { ch, r };
+      }).then((out) => {
+        if (out && out.delivered) return; // đã hủy bù vì tin đến nơi / đã chốt cuối — không chốt lỗi
+        if (!out || !out.ch) {
+          // bước chuẩn bị bù văng lỗi (lane trả {ok:false}) — phải chốt, không im lặng kẹt pending
+          if (window && typeof window.__botfakeTrackStatus__ === 'function') window.__botfakeTrackStatus__(conv.id, 'fail');
+          logLine('❌ ' + name + ' — bù lỗi: ' + clip((out && out.error) || 'không rõ', 90));
+          return;
+        }
+        const ch = out.ch;
+        const r = out.r;
+        if (r && r.ok) {
+          markDelivered(conv.id, ch);
+          postSendSideEffects(conv);
+          markChannel(conv.id, ch); // lần gửi sau vào thẳng kênh vừa thắng
+          buStats.ok++;
+          buStats.byWhy[buWhyBucket(why)] = (buStats.byWhy[buWhyBucket(why)] || 0) + 1;
+          logLine('✅ ' + name + ' — bù THÀNH CÔNG qua ' + (ch === 'ext' ? 'Extension' : 'Socket'));
+        } else if (r && r.sent === 'maybe') {
+          if (window && typeof window.__botfakeTrackStatus__ === 'function') window.__botfakeTrackStatus__(conv.id, 'uncertain');
+          logLine('⚠ ' + name + ' — bù không rõ kết quả — KHÔNG gửi thêm (chống trùng)');
+        } else if (r && r.recipientUnavailable) {
+          if (window && typeof window.__botfakeTrackStatus__ === 'function') window.__botfakeTrackStatus__(conv.id, 'fail');
+          logLine('❌ ' + name + ' — bù ' + (ch === 'ext' ? 'Extension' : 'Socket') + ' không được: '
+            + clip((r && r.error) || 'lỗi không rõ', 90) + ' — khách hiện không nhận được tin (không thử tiếp kênh khác)');
+        } else {
+          logLine('❌ ' + name + ' — bù ' + (ch === 'ext' ? 'Extension' : 'Socket') + ' không được: '
+            + clip((r && r.error) || 'lỗi không rõ', 90) + ' — sang kênh kế nếu còn');
+          // CHUỖI BÙ: kênh kế CHƯA thử (mỗi kênh đúng 1 lần — không lặp kênh vừa thua)
+          scheduleBuRetry(conv, text, photo, name,
+            'bù ' + (ch === 'ext' ? 'Extension' : 'Socket') + ' không được', triedCh.concat([ch]));
+        }
+      }).catch((e) => {
+        if (window && typeof window.__botfakeTrackStatus__ === 'function') window.__botfakeTrackStatus__(conv.id, 'fail');
+        logLine('❌ ' + name + ' — bù lỗi: ' + (e && e.message || e));
+      });
+    }, delay);
+  }
+
+  // Chốt ❌ KHÔNG bù — dùng cho mọi đường fail NGOÀI lỗi API bị từ chối rõ ràng
+  // (Socket bị từ chối/không rõ, gửi thẳng fail…): từ v1.91.42, các đường này không
+  // được bắn thêm qua kênh khác (nguồn gửi lặp ở lô lớn). Riêng scheduleBuRetry chỉ
+  // còn được gọi từ fireApiAndWatch khi API bị FB TỪ CHỐI MINH BẠCH (tin chắc chắn
+  // chưa đi — bù qua Ext/Socket không thể gây lặp).
+  function chotFailKhongBu(conv) {
     if (!conv) return;
     if (uncertainIds[conv.id] || finalFailedIds[conv.id]) return; // đã có chốt cuối (⚠/❌) — giữ nguyên
     if (window && typeof window.__botfakeTrackStatus__ === 'function') window.__botfakeTrackStatus__(conv.id, 'fail');
@@ -5311,10 +5457,7 @@
         // cửa sổ 24h VẪN bù kênh khác (Thanh Binh); kênh đã thử hết → scheduleBuRetry tự bỏ
         if (!r.uncertain && !r.recipientUnavailable && isRetryableLoss(r.error)) {
           const p2 = c.pageId || String(c.id).split('_')[0];
-          scheduleBuRetry(c, gtext, !photo ? null
-            : (photo.qr
-              ? (qrPhotoByPage[p2] ? { items: qrPhotoByPage[p2].items, url: qrPhotoByPage[p2].url, id: qrPhotoByPage[p2].id, fbId: fbIdByPage[p2] || '', fbIds: apiFbIdsByPage[p2] || [], w: qrPhotoByPage[p2].w || 0, h: qrPhotoByPage[p2].h || 0 } : null)
-              : { url: photo.url, id: photo.id, fbId: fbIdByPage[p2] || '', w: photo.w, h: photo.h }), c.name || c.id, 'gửi chưa được', r.tried || []);
+          chotFailKhongBu(c);
         } else {
           if (window && typeof window.__botfakeTrackStatus__ === 'function') window.__botfakeTrackStatus__(c.id, 'fail');
         }
