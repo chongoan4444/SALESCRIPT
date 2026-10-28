@@ -1,0 +1,78 @@
+{
+  "manifest_version": 3,
+  "name": "BOTFAKE LITE",
+  "version": "1.91.43",
+  "description": "Gửi hàng loạt Pancake trong background + overlay Pancake #1/#2 khi đổi tab",
+  "permissions": ["tabs", "storage", "scripting", "cookies", "declarativeNetRequest", "declarativeNetRequestWithHostAccess"],
+  "host_permissions": [
+    "https://pages.fm/*",
+    "https://pancake.vn/*",
+    "https://pancake.ph/*",
+    "https://pancake.id/*",
+    "https://pancake.in/*",
+    "https://pancake.biz/*",
+    "https://socialos.vip/*",
+    "https://*/*",
+    "http://*/*"
+  ],
+  "icons": {
+    "16": "extension/icons/icon16.png",
+    "32": "extension/icons/icon32.png",
+    "48": "extension/icons/icon48.png",
+    "128": "extension/icons/icon128.png"
+  },
+  "action": {
+    "default_title": "BOTFAKE LITE",
+    "default_popup": "extension/popup.html",
+    "default_icon": {
+      "16": "extension/icons/icon16.png",
+      "32": "extension/icons/icon32.png",
+      "48": "extension/icons/icon48.png",
+      "128": "extension/icons/icon128.png"
+    }
+  },
+  "background": {
+    "service_worker": "extension/background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://pancake.vn/*",
+        "https://*.pancake.vn/*",
+        "https://pages.fm/*",
+        "https://*.pages.fm/*",
+        "https://pancake.ph/*",
+        "https://pancake.id/*",
+        "https://pancake.in/*",
+        "https://pancake.biz/*",
+        "https://socialos.vip/*"
+      ],
+      "js": ["scripts/pancake-send-lite.user.js"],
+      "run_at": "document_start",
+      "all_frames": false,
+      "world": "MAIN"
+    },
+    {
+      "matches": [
+        "https://pancake.vn/*",
+        "https://*.pancake.vn/*",
+        "https://pages.fm/*",
+        "https://*.pages.fm/*",
+        "https://pancake.ph/*",
+        "https://pancake.id/*",
+        "https://pancake.in/*",
+        "https://pancake.biz/*",
+        "https://socialos.vip/*"
+      ],
+      "js": ["extension/bridge.js"],
+      "run_at": "document_start",
+      "all_frames": false
+    },
+    {
+      "matches": ["https://*/*", "http://*/*"],
+      "js": ["extension/overlay.js"],
+      "run_at": "document_idle",
+      "all_frames": false
+    }
+  ]
+}
