@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE LITE
 // @namespace    salescript
-// @version      1.91.44
+// @version      1.91.45
 // @description  BOTFAKE — panel hiện mọi website; gửi/tải list qua extension background.
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -44,7 +44,7 @@
   /* ============================ HẰNG SỐ ============================ */
 
   const PANEL_ID = 'ssb-root';          // ssb = SaleScript Bulk — không đụng pk-*/adj-*/pancake-* của script khác
-  const APP_VERSION = '1.91.44';        // hiện ở tiêu đề panel — đối chiếu với @version trong header
+  const APP_VERSION = '1.91.45';        // hiện ở tiêu đề panel — đối chiếu với @version trong header
   const STYLE_ID = 'ssb-style';
 
   const MAX_NAME_LIST = 12;             // số tên hiển thị khi xác nhận
@@ -4741,6 +4741,12 @@
   // (fetch treo, ACK mất, bù văng lỗi…) → tự chốt ⚠ để pending về 0: TỔNG HỢP luôn kết thúc,
   // nút Chạy/Dừng luôn nhả. KHÔNG gửi lại (tránh trùng); ACK thật về sau markDelivered tự sửa số.
   const pendingBg = {}; // convId → { at, name, via }
+  // Sổ kiểm chứng sau khi Socket mất ACK (khai báo sớm tại đây để getBatchSummaryCounts
+  // tính được số ca đang chờ kiểm chứng vào "pending" — lượt không kết thúc, nút Gửi không
+  // nhả cho tới khi kiểm chứng chốt, tránh người dùng bấm lượt mới làm hủy đường bắn cứu).
+  const sockVerifyPending = {}; // convId → runSeq đang có kiểm chứng chờ (chống đăng ký trùng)
+  const sockVerifyFired = {}; // convId → runSeq đã bắn cứu sau kiểm chứng (mỗi lượt tối đa 1 lần/chat)
+  const verifyStats = { found: 0, fired: 0, unknown: 0 }; // theo lượt — in ở dòng TỔNG HỢP
   let bgWatchdogTimer = null;
   const BG_SETTLE_DEADLINE_MS = 90000;
   function noteBgPending(conv, via) {
@@ -4824,7 +4830,8 @@
     const unsureTotal = summaryCounters.unsure;
     const skipLateTotal = summaryCounters.skipLate;
     const settled = okTotal + failTotal + unsureTotal + skipLateTotal;
-    const pending = Math.max(0, (batchStats.total || 0) - settled);
+    const verifyPendingNow = Object.keys(sockVerifyPending).filter((id) => sockVerifyPending[id] === runSeq).length;
+    const pending = Math.max(0, (batchStats.total || 0) - settled) + verifyPendingNow;
     return {
       total: batchStats.total || 0,
       okTotal, okApi, okExt, okSocket,
@@ -5092,10 +5099,9 @@
    *     qua scheduleBuRetry (đủ guard chống trùng như đường bù API).
    *   • Không đọc được lịch sử / thiếu dữ kiện → GIỮ NGUYÊN ⚠, tuyệt đối không bắn mò.
    * Chỉ áp dụng cho tin CHỈ CÓ CHỮ: ca có ảnh khớp nội dung qua API không đủ tin cậy. */
-  const SOCK_VERIFY_DELAY_MS = 20000; // chờ thêm sau thời điểm mất ACK rồi mới đọc lịch sử
-  const sockVerifyPending = {}; // convId → runSeq đang có kiểm chứng chờ (chống đăng ký trùng)
-  const sockVerifyFired = {}; // convId → runSeq đã bắn cứu sau kiểm chứng (mỗi lượt tối đa 1 lần/chat)
-  const verifyStats = { found: 0, fired: 0, unknown: 0 }; // theo lượt — in ở dòng TỔNG HỢP
+  const SOCK_VERIFY_DELAY_MS = 10000; // chờ thêm sau thời điểm mất ACK rồi mới đọc lịch sử (tổng phân xử ~25s: tin đã tới FB thì lịch sử có trong vài giây)
+  // sockVerifyPending / sockVerifyFired / verifyStats: khai báo ở vùng sổ nền (cạnh pendingBg)
+  // để getBatchSummaryCounts tính được ca đang chờ kiểm chứng vào "pending" giữ lượt.
 
   function reopenUncertain(convId) {
     if (!convId || !uncertainIds[convId]) return;
@@ -5131,11 +5137,10 @@
     const nm = conv.name || conv.id;
     const sentAt = publishedAtMs || Date.now();
     setTimeout(async () => {
-      delete sockVerifyPending[conv.id];
-      if (myRun !== runSeq) return; // đã sang lượt mới — giữ nguyên ⚠ lượt cũ, không bắn lẫn
-      if (state.stopRequested) return; // đang dừng — không bắn cứu
-      if (deliveredIds[conv.id] || finalFailedIds[conv.id]) return; // kênh khác đã chốt xong
       try {
+        if (myRun !== runSeq) return; // đã sang lượt mới — giữ nguyên ⚠ lượt cũ, không bắn lẫn
+        if (state.stopRequested) return; // đang dừng — không bắn cứu
+        if (deliveredIds[conv.id] || finalFailedIds[conv.id]) return; // kênh khác đã chốt xong
         let f = null;
         try { f = peekConv(conv); } catch (e) { f = null; }
         if (!f || !(f.page_id || f.pageId)) {
@@ -5169,10 +5174,10 @@
           if (!m.from || String(m.from.id) !== String(pageId)) return false; // chỉ tin DO PAGE gửi
           if (normalizeMsgText(m.message) !== want) return false;
           const rawT = String(m.inserted_at || '');
-          if (rawT) {
-            const t = Date.parse(/[zZ+]|\+\d{2}:?\d{2}$/.test(rawT) ? rawT : rawT + 'Z');
-            if (!isNaN(t) && t < sentAt - 60000) return false; // tin cũ cùng nội dung — không tính
-          }
+          if (!rawT) return false; // không có mốc giờ → bằng chứng yếu, không tính (tránh khớp nhầm tin cũ cùng nội dung)
+          const t = Date.parse(/[zZ+]|\+\d{2}:?\d{2}$/.test(rawT) ? rawT : rawT + 'Z');
+          if (isNaN(t)) return false; // mốc giờ không đọc được → không tính
+          if (t < sentAt - 60000) return false; // tin cũ cùng nội dung — không tính (cửa sổ 60s chừa lệch đồng hồ máy)
           return true;
         });
         if (found) {
@@ -5192,6 +5197,8 @@
       } catch (e) {
         verifyStats.unknown++;
         logLine('🔎 ' + nm + ' — kiểm chứng lỗi (' + (e && e.message || e) + ') — giữ ⚠ như cũ, không gửi lại');
+      } finally {
+        delete sockVerifyPending[conv.id]; // nhả sổ chờ ở mọi lối ra — lượt chỉ được kết thúc sau khi kiểm chứng chốt xong
       }
     }, SOCK_VERIFY_DELAY_MS);
   }
