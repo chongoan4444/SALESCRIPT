@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE LITE
 // @namespace    salescript
-// @version      1.91.43
+// @version      1.91.44
 // @description  BOTFAKE — panel hiện mọi website; gửi/tải list qua extension background.
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -44,7 +44,7 @@
   /* ============================ HẰNG SỐ ============================ */
 
   const PANEL_ID = 'ssb-root';          // ssb = SaleScript Bulk — không đụng pk-*/adj-*/pancake-* của script khác
-  const APP_VERSION = '1.91.43';        // hiện ở tiêu đề panel — đối chiếu với @version trong header
+  const APP_VERSION = '1.91.44';        // hiện ở tiêu đề panel — đối chiếu với @version trong header
   const STYLE_ID = 'ssb-style';
 
   const MAX_NAME_LIST = 12;             // số tên hiển thị khi xác nhận
@@ -2954,6 +2954,12 @@
   }
 
   const socketNoAckStreak = {};
+  // Ép kết nối lại socket sau lần mất ACK đầu tiên (socket chết ngầm: isSocketAlive vẫn báo
+  // sống vì chỉ nhìn object nội bộ, publish rơi vào hố đen → mất tin thật). Giới hạn số lần
+  // ép mỗi page/lượt để không nướng ~12s/lần vô hạn khi socket page chết hẳn.
+  const SOCK_FORCE_RC_MAX_PER_RUN = 2;
+  const sockForceRc = {}; // pageId → số lần đã ép reconnect trong lượt hiện tại
+  let sockForceRcRun = -1; // runSeq đã đồng bộ với sockForceRc (đổi lượt là tự reset)
   const socketRejectStreak = {};
   const socketReconnectPromises = {};
   const socketLastPublishAt = {};
@@ -3014,8 +3020,17 @@
       await Promise.race([warm, sleep(12000)]);
       sock = helper.SOCKETS && helper.SOCKETS[pageId];
     }
-    if (!isSocketAlive(sock) || (socketNoAckStreak[pageId] || 0) >= 3) {
-      sock = await ensureAliveSocket(helper, pageId, (socketNoAckStreak[pageId] || 0) >= 3);
+    if (sockForceRcRun !== runSeq) {
+      sockForceRcRun = runSeq;
+      Object.keys(sockForceRc).forEach((k) => delete sockForceRc[k]);
+    }
+    const noAckStreakNow = socketNoAckStreak[pageId] || 0;
+    // Mất ACK 1 lần = dấu hiệu socket có thể đã chết ngầm → ép làm mới TRƯỚC lần publish kế
+    // tiếp của page này (chỉ cứu các chat SAU, không bắn lại tin đang mất ACK — chống trùng).
+    const wantForceRc = noAckStreakNow >= 1 && (sockForceRc[pageId] || 0) < SOCK_FORCE_RC_MAX_PER_RUN;
+    if (!isSocketAlive(sock) || wantForceRc) {
+      if (wantForceRc) sockForceRc[pageId] = (sockForceRc[pageId] || 0) + 1;
+      sock = await ensureAliveSocket(helper, pageId, wantForceRc);
     }
     if (!isSocketAlive(sock)) return { kind: 'dead' };
     if (typeof helper.publish !== 'function' || typeof helper.findAllBlockActions !== 'function') {
@@ -3456,7 +3471,7 @@
         // không có ACK: socket đã chết → frame chưa đi → chắc thua; socket sống → tin CÓ THỂ đã đi
         const sock = helper.SOCKETS && helper.SOCKETS[pageId];
         if (!(sock && sock.instance)) return { ok: false, sent: false, error: 'Socket không kết nối' };
-        return { ok: false, sent: 'maybe', error: 'Socket không rõ kết quả (không có ACK)' };
+        return { ok: false, sent: 'maybe', noAck: true, error: 'Socket không rõ kết quả (không có ACK)' };
       }
       // legacy — helper không có publish: đường sendMessage cũ (kèm bước chờ 1s của app)
       const res = await pageLane(() => helper.sendMessage(pageId, gid, attFbIds ? { text, attachmentFbIds: attFbIds } : { text }));
@@ -3475,7 +3490,7 @@
       if (!(sock && sock.instance)) {
         return { ok: false, sent: false, error: 'Socket không kết nối' };
       }
-      return { ok: false, sent: 'maybe', error: 'Socket không rõ kết quả' + (reason ? ' (' + reason + ')' : '') };
+      return { ok: false, sent: 'maybe', noAck: true, error: 'Socket không rõ kết quả' + (reason ? ' (' + reason + ')' : '') };
       };
       // 🔥 NẤC 2 (v1.71.0): bắn-nhả cho lô lớn — publish xong trả kết quả ngay cho worker đi bắn tiếp;
       // ACK thật của FB về sau sẽ chạy settleSocketResult ở nền: thành công → markDelivered (im lặng,
@@ -3495,6 +3510,7 @@
           const nm = conv.name || conv.id;
           if (res && res.ok) { markDelivered(conv.id, 'socket'); postSendSideEffects(conv); return; }
           if (res && (res.uncertain || res.sent === 'maybe')) {
+            if (res.noAck) scheduleSocketVerify(conv, text, photo, Date.now() - 15000);
             if (window && typeof window.__botfakeTrackStatus__ === 'function') window.__botfakeTrackStatus__(conv.id, 'uncertain');
             logLine('⚠ ' + nm + ' — ' + (res.error || 'Socket không rõ kết quả') + ' (xác nhận nền — không gửi thêm để tránh trùng)');
             return;
@@ -3533,6 +3549,7 @@
       try {
         const rawSync = await pageLane(() => socketPublishSend(helper, pageId, gid, text, attFbIds));
         settled = await settleSocketResult(rawSync);
+        if (settled && settled.noAck) scheduleSocketVerify(conv, text, photo, Date.now() - 15000);
       } finally { ctx.ownsOutbound = false; }
       if (!(settled && (settled.ok || settled.sent === 'maybe'))) releaseOutbound(conv.id);
       return settled;
@@ -4705,6 +4722,7 @@
     if (w.indexOf('gửi thẳng') === 0) return 'Gui thang fail';
     if (w.indexOf('gửi chưa được') === 0) return 'Lan dau fail';
     if (w.indexOf('bù ') === 0) return 'Chuoi bu';
+    if (w.indexOf('kiểm chứng') > -1) return 'Kiem chung ACK';
     return 'Khac';
   }
   const BU_RETRY_MS = 1000;     // Socket: kênh dự phòng cuối (1s)
@@ -4856,6 +4874,9 @@
           + (c.skipTotal ? ' | 🧹 Bỏ qua: ' + c.skipTotal : '')
           + ((buStats.ok || buStats.cancelled)
             ? ' | 🔁 Bù OK: ' + buStats.ok + ' (' + Object.keys(buStats.byWhy).map((k) => k + ': ' + buStats.byWhy[k]).join(' · ') + ') · hủy bù tránh trùng: ' + buStats.cancelled
+            : '')
+          + ((verifyStats.found || verifyStats.fired || verifyStats.unknown)
+            ? ' | 🔎 Kiểm chứng ACK: đã đến nơi ' + verifyStats.found + ' · bắn cứu ' + verifyStats.fired + ' · không kiểm chứng được ' + verifyStats.unknown
             : '')
           + ((sendDiag.sockRetry || sendDiag.photoRetry)
             ? ' | 🔂 Socket bắn lại sau rejected: ' + sendDiag.sockRetry + ' · bắn lại ảnh: ' + sendDiag.photoRetry
@@ -5060,6 +5081,121 @@
     if (window && typeof window.__botfakeTrackStatus__ === 'function') window.__botfakeTrackStatus__(conv.id, 'fail');
   }
 
+  /* ===== KIỂM CHỨNG SAU KHI SOCKET MẤT ACK (v1.91.44) =====
+   * Tại thời điểm mất ACK (noack) không thể phân biệt "tin chưa đi (socket chết ngầm)"
+   * với "tin đã đi nhưng gói /ls_resp bị mất" → vẫn chốt ⚠ và cấm bắn lại như cũ.
+   * Kiểm chứng chạy NỀN bằng kênh độc lập — đọc lại lịch sử chat qua API:
+   *   • Thấy tin của page khớp nội dung + mốc giờ → tin ĐÃ đến nơi (chỉ mất ACK)
+   *     → lật ✅ (markDelivered tự sửa số trong TỔNG HỢP, đúng mẫu "ACK trễ").
+   *   • Đọc được lịch sử mà KHÔNG thấy tin → tin chắc chắn chưa tới FB (publish rơi
+   *     vào socket chết ngầm) → nhả khóa outbound, mở lại chốt ⚠, bù đúng 1 vòng
+   *     qua scheduleBuRetry (đủ guard chống trùng như đường bù API).
+   *   • Không đọc được lịch sử / thiếu dữ kiện → GIỮ NGUYÊN ⚠, tuyệt đối không bắn mò.
+   * Chỉ áp dụng cho tin CHỈ CÓ CHỮ: ca có ảnh khớp nội dung qua API không đủ tin cậy. */
+  const SOCK_VERIFY_DELAY_MS = 20000; // chờ thêm sau thời điểm mất ACK rồi mới đọc lịch sử
+  const sockVerifyPending = {}; // convId → runSeq đang có kiểm chứng chờ (chống đăng ký trùng)
+  const sockVerifyFired = {}; // convId → runSeq đã bắn cứu sau kiểm chứng (mỗi lượt tối đa 1 lần/chat)
+  const verifyStats = { found: 0, fired: 0, unknown: 0 }; // theo lượt — in ở dòng TỔNG HỢP
+
+  function reopenUncertain(convId) {
+    if (!convId || !uncertainIds[convId]) return;
+    delete uncertainIds[convId];
+    summaryCounters.unsure = Math.max(0, summaryCounters.unsure - 1);
+    updateBatchSummaryUI();
+  }
+
+  function normalizeMsgText(s) {
+    return String(s == null ? '' : s)
+      .replace(/<br\s*\/?>/gi, '\n')
+      .replace(/<\/div>\s*<div[^>]*>/gi, '\n')
+      .replace(/<[^>]+>/g, '')
+      .replace(/&nbsp;/gi, ' ')
+      .replace(/&amp;/gi, '&')
+      .replace(/&lt;/gi, '<')
+      .replace(/&gt;/gi, '>')
+      .replace(/&quot;/gi, '"')
+      .replace(/&#0?39;|&apos;/gi, "'")
+      .replace(/\s+/g, ' ')
+      .trim();
+  }
+
+  function scheduleSocketVerify(conv, text, photo, publishedAtMs) {
+    if (!conv || !conv.id) return;
+    if (photo) return; // có ảnh → không kiểm chứng, giữ ⚠ như cũ
+    const want = normalizeMsgText(text);
+    if (!want) return;
+    if (sockVerifyPending[conv.id]) return; // đã có 1 kiểm chứng đang chờ cho chat này
+    if (sockVerifyFired[conv.id] === runSeq) return; // lượt này đã cứu 1 lần rồi — giữ ⚠, không cứu vòng 2
+    const myRun = runSeq;
+    sockVerifyPending[conv.id] = myRun;
+    const nm = conv.name || conv.id;
+    const sentAt = publishedAtMs || Date.now();
+    setTimeout(async () => {
+      delete sockVerifyPending[conv.id];
+      if (myRun !== runSeq) return; // đã sang lượt mới — giữ nguyên ⚠ lượt cũ, không bắn lẫn
+      if (state.stopRequested) return; // đang dừng — không bắn cứu
+      if (deliveredIds[conv.id] || finalFailedIds[conv.id]) return; // kênh khác đã chốt xong
+      try {
+        let f = null;
+        try { f = peekConv(conv); } catch (e) { f = null; }
+        if (!f || !(f.page_id || f.pageId)) {
+          try { f = await ctxFull(conv, {}); } catch (e) { f = null; }
+        }
+        f = f || conv;
+        const pageId = f.page_id || f.pageId || conv.pageId || String(conv.id || '').split('_')[0];
+        const convId = f.id || conv.id;
+        const custId = String(f.customerId || conv.customerId
+          || (f.customers && f.customers[0] && f.customers[0].id)
+          || (conv.customers && conv.customers[0] && conv.customers[0].id) || '');
+        if (!pageId) { verifyStats.unknown++; return; }
+        const url = apiBase() + '/v1/pages/' + pageId
+          + '/conversations/' + encodeURIComponent(convId)
+          + '/messages?customer_id=' + encodeURIComponent(custId)
+          + '&user_view=true&is_new_api=true&separate_pos=true';
+        const res = await ctxFetchLane(() => fetchJson(url, 2));
+        if (!res || !res.ok || !res.data || res.data.success === false) {
+          verifyStats.unknown++;
+          logLine('🔎 ' + nm + ' — không kiểm chứng được tin Socket (đọc lịch sử lỗi) — giữ ⚠ như cũ, không gửi lại');
+          return;
+        }
+        const msgs = res.data.messages || (res.data.data && res.data.data.messages) || null;
+        if (!Array.isArray(msgs)) {
+          verifyStats.unknown++;
+          logLine('🔎 ' + nm + ' — không kiểm chứng được tin Socket (lịch sử lạ) — giữ ⚠ như cũ, không gửi lại');
+          return;
+        }
+        const found = msgs.some((m) => {
+          if (!m || m.is_removed) return false;
+          if (!m.from || String(m.from.id) !== String(pageId)) return false; // chỉ tin DO PAGE gửi
+          if (normalizeMsgText(m.message) !== want) return false;
+          const rawT = String(m.inserted_at || '');
+          if (rawT) {
+            const t = Date.parse(/[zZ+]|\+\d{2}:?\d{2}$/.test(rawT) ? rawT : rawT + 'Z');
+            if (!isNaN(t) && t < sentAt - 60000) return false; // tin cũ cùng nội dung — không tính
+          }
+          return true;
+        });
+        if (found) {
+          verifyStats.found++;
+          markDelivered(conv.id, 'socket');
+          try { postSendSideEffects(conv); } catch (e) { /* ignore */ }
+          logLine('🔎 ' + nm + ' — kiểm chứng: tin ĐÃ đến nơi (Socket chỉ mất ACK) — tính ✅ Socket');
+          return;
+        }
+        // Đọc được lịch sử mà không thấy tin → publish chưa hề tới FB (socket chết ngầm)
+        verifyStats.fired++;
+        sockVerifyFired[conv.id] = myRun;
+        reopenUncertain(conv.id);
+        releaseOutbound(conv.id); // tin chắc chưa đi → nhả khóa để kênh cứu được bắn (đúng luật khóa outbound)
+        logLine('🔎 ' + nm + ' — kiểm chứng: CHƯA thấy tin trong lịch sử — bắn cứu 1 vòng qua kênh chưa thử');
+        scheduleBuRetry(conv, text, null, nm, 'Socket mất ACK (kiểm chứng chưa thấy tin)', []);
+      } catch (e) {
+        verifyStats.unknown++;
+        logLine('🔎 ' + nm + ' — kiểm chứng lỗi (' + (e && e.message || e) + ') — giữ ⚠ như cũ, không gửi lại');
+      }
+    }, SOCK_VERIFY_DELAY_MS);
+  }
+
   // Nhóm chat theo NỘI DUNG sẽ gửi: chat thuộc câu nào → ĐÚNG chữ của câu đó;
   // chat lẻ (không thuộc câu nào) → câu đang gõ trên ô textarea. Trả về [{text, list}].
   function buildSendGroups(matches, savedLists, typedText) {
@@ -5164,6 +5300,7 @@
     batchStats.startedAt = Date.now();
     batchStats.loopFinished = false;
     buStats.ok = 0; buStats.cancelled = 0; buStats.byWhy = {};
+    verifyStats.found = 0; verifyStats.fired = 0; verifyStats.unknown = 0;
     sendDiag.sockRetry = 0; sendDiag.photoRetry = 0;
     batchStats.finalLogged = false;
     reportExtJob({ phase: 'send', pct: 0, ok: 0, total: 0 }); // sau reset — không bị lượt cũ đổi thành idle
