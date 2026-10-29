@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE LITE
 // @namespace    salescript
-// @version      1.91.53
+// @version      1.91.54
 // @description  BOTFAKE — panel hiện mọi website; gửi/tải list qua extension background.
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -44,7 +44,7 @@
   /* ============================ HẰNG SỐ ============================ */
 
   const PANEL_ID = 'ssb-root';          // ssb = SaleScript Bulk — không đụng pk-*/adj-*/pancake-* của script khác
-  const APP_VERSION = '1.91.53';        // hiện ở tiêu đề panel — đối chiếu với @version trong header
+  const APP_VERSION = '1.91.54';        // hiện ở tiêu đề panel — đối chiếu với @version trong header
   const STYLE_ID = 'ssb-style';
 
   const MAX_NAME_LIST = 12;             // số tên hiển thị khi xác nhận
@@ -1770,6 +1770,7 @@
   const gidStats = {
     cacheHit: 0, httpHit: 0, httpNoGid: 0, httpFail: 0, http429: 0,
     wsHit: 0, extHit: 0, extUnknown: 0, unknown: 0, batchMappings: 0,
+    batchReturned: 0, batchFail: 0, extRespondedNoGid: 0, gateSkip: 0,
   };
   function resetGidStats() {
     Object.keys(gidStats).forEach((k) => { gidStats[k] = 0; });
@@ -2658,10 +2659,13 @@
     const tKey = (pageId && threadId) ? (pageId + '_' + threadId) : '';
     const discoveryPass = (ctx && ctx.gidRetryPass) ? 2 : 1;
     let foundSource = '';
+    let extFinderRespondedNoGid = false; // Ext CÓ phản hồi success mà không có globalId (khác timeout/mất kết nối)
     if (ctx) {
       ctx.gidUnknown = false;
       ctx.extFinderReturnedNull = false; // giữ field cũ nhưng KHÔNG còn nguồn nào được set true
       ctx.noGidConfirmedByExt = false;
+      ctx.extFinderRespondedNoGid = false;
+      ctx.gidGateSkipExt = false;
     }
     const saveCache = (val) => {
       const s = String(val || '');
@@ -3034,7 +3038,16 @@
             const val = (res && res.success && res.data && res.data.globalId
               && String(res.data.globalId) !== badGid) ? String(res.data.globalId) : '';
             if (val) finishExt(val, 'ext');
-            else onFinderNull();
+            else {
+              // Chỉ success=true mới là "Extension đã trả lời rõ ràng mà không có gid".
+              // success:false/data:null là hình dạng timeout/mất phản hồi → vẫn CHƯA RÕ.
+              if (res && res.success) {
+                extFinderRespondedNoGid = true;
+                if (ctx) ctx.extFinderRespondedNoGid = true;
+                gidStats.extRespondedNoGid++;
+              }
+              onFinderNull();
+            }
           }).catch(() => onFinderNull());
         } else if (typeof window.findGlobalIdForConv === 'function') {
           Promise.resolve().then(() => window.findGlobalIdForConv(finderPayload)).then((v) => {
@@ -3077,6 +3090,8 @@
         ctx.gidFromPsid = false;
         ctx.extFinderReturnedNull = false;
         ctx.noGidConfirmedByExt = false;
+        ctx.extFinderRespondedNoGid = false;
+        ctx.gidGateSkipExt = false;
         ctx.gidDiscoveryState = foundSource || 'found';
         ctx.gidUnknown = false;
       }
@@ -3088,10 +3103,26 @@
     // lane đã thông. TUYỆT ĐỐI không bắn from_psid sai vào Socket.
     if (ctx) {
       ctx.extFinderReturnedNull = false;
-      ctx.noGidConfirmedByExt = false;
       ctx.gidUnknown = true;
-      if (!ctx.gidDiscoveryState || ctx.gidDiscoveryState === 'found') {
-        ctx.gidDiscoveryState = hasExtFinder ? 'unknown' : 'no-ext-finder';
+      // GATE NO-GID (lô lớn): chỉ bỏ lệnh gửi Ext thread-only khi đủ bằng chứng rẻ —
+      // HTTP GET /messages đã THÀNH CÔNG nhưng server không có gid, BATCH_GET_GLOBAL_ID
+      // đã nạp xong cho page, và chính Extension cũng phản hồi success mà không có gid.
+      // Timeout/mất kết nối/success:false vẫn là CHƯA RÕ → giữ đường cứu cũ, không chốt oan.
+      const ccEntry = key ? convCtxCache[key] : null;
+      const httpOkNoGid = !!((ctx.httpState === 'ok-no-gid' || ctx.gidDiscoveryState === 'server-no-gid')
+        || (ccEntry && ccEntry.fetched && !ccEntry.gid));
+      const batchSettled = !!(pageId && batchGidFetchedPages[pageId] && !batchGidPromises[pageId]);
+      if (isLargeBatch && httpOkNoGid && batchSettled && extFinderRespondedNoGid) {
+        ctx.noGidConfirmedByExt = true;
+        ctx.gidGateSkipExt = true;
+        ctx.gidDiscoveryState = 'ext-responded-no-gid';
+        gidStats.gateSkip++;
+      } else {
+        ctx.noGidConfirmedByExt = false;
+        ctx.gidGateSkipExt = false;
+        if (!ctx.gidDiscoveryState || ctx.gidDiscoveryState === 'found') {
+          ctx.gidDiscoveryState = hasExtFinder ? 'unknown' : 'no-ext-finder';
+        }
       }
     }
     gidStats.unknown++;
@@ -3833,6 +3864,15 @@
     if (!globalUserId && !threadId) {
       return { ok: false, sent: false, error: 'Không có globalId/thread_id — bỏ qua Ext' };
     }
+    // GATE NO-GID: khâu dò đã đủ bằng chứng (HTTP ok-no-gid + Batch xong + Ext finder
+    // phản hồi success không có gid) → không bắn lệnh gửi thread-only, khỏi giữ extSendLane.
+    if (!globalUserId && ctx && ctx.gidGateSkipExt) {
+      return {
+        ok: false, sent: false, gidUnknown: true, noGidGate: true,
+        discoveryState: ctx.gidDiscoveryState || 'ext-responded-no-gid',
+        error: 'Không tìm được global_id để gửi — bỏ qua Ext thread-only cho nhanh',
+      };
+    }
     const token = getToken();
     let files;
     if (photo) {
@@ -3973,9 +4013,12 @@
           return { ok: false, sent: 'maybe', error: 'Extension không phản hồi (quá hạn) — không gửi thêm để tránh trùng' };
         }
         const errStr = 'Extension không gửi được' + (why ? ' (' + why + ')' : '');
-        // Chỉ kết luận khách khóa nick thật (deadUser) khi đã gửi bằng globalUserId thật (khác null, !ctx.gidFromPsid)
-        const deadUser = !!globalUserId && (!ctx || !ctx.gidFromPsid)
-          && /1545041|Người này hiện không có mặt|Không tìm thấy người dùng/i.test(String(why || ''));
+        // Lệnh Ext là lệnh GỬI THẬT vào đúng thread: Facebook trả minh bạch 1545041 /
+        // "Người này hiện không có mặt" / không tìm thấy người dùng thì chốt khách không
+        // nhận được tin luôn — kể cả khi payload là thread-only (globalUserId=null).
+        // Không rơi sang Socket nữa (Socket cũng không có gid để bắn, chỉ tốn thêm vòng lặp).
+        const deadUser = /1545041|Người này hiện không có mặt|Không tìm thấy người dùng/i.test(String(why || ''))
+          && (!globalUserId || !(ctx && ctx.gidFromPsid));
         // INCORRECT THREAD khi CHƯA có globalUserId thật: lệnh Ext lúc đó thiếu
         // globalUserId nên có thể không định vị được thread dù thread vẫn tồn tại.
         // Bằng chứng _app @903213 cho thấy khâu dò không cung cấp được "xác nhận
@@ -4761,6 +4804,16 @@
           return { ok: false, sent: false, deferredToExt: true, deferredCtx: ctx };
         }
         if (ctx.noGidConfirmedByExt && (!ctx.gid || ctx.gidFromPsid)) {
+          if (ctx.gidGateSkipExt) {
+            // GATE NO-GID: HTTP/Batch/WS/Ext đều đã xác nhận không có global_id ở khâu dò.
+            // Không bắn REPLY_INBOX_PHOTO thread-only nữa — đây là nút nghẽn 6 luồng ở đuôi lô.
+            recycleUnusedFbId(pid0, ctx);
+            return {
+              ok: false, sent: false, gidUnknown: true, noGidGate: true,
+              discoveryState: ctx.gidDiscoveryState || 'ext-responded-no-gid',
+              error: 'Không tìm được global_id để gửi (server/Batch/WS/Ext đều không có) — bỏ qua Ext thread-only cho nhanh',
+            };
+          }
           // Chưa hề có tin nào được bắn cho chat này, nên cứu hộ ở đây không thể gây trùng:
           // thử Extension bằng thread_id trước, sau đó API bằng conversation_id (đúng fallback
           // của luồng gửi tay trong _app: extension -> socket -> api). Không còn chốt oan
@@ -5148,14 +5201,20 @@
     const promise = Promise.resolve().then(() => adapter.send({
       type: 'BATCH_GET_GLOBAL_ID',
       pageId: pageId,
+      // Khớp payload app (@897543): app luôn kèm timeRangeMin. Gửi 0 = lấy mọi mốc,
+      // tránh Extension hiểu thiếu trường là không có mapping nào trong khoảng lọc.
+      timeRangeMin: 0,
     }, { timeout: 15000 })).then((res) => {
       delete batchGidPromises[pageId];
       const list = res && res.success && res.data && res.data.threadsWithGlobalId;
       if (!Array.isArray(list)) {
+        gidStats.batchFail++;
         delete batchGidFetchedPages[pageId];
+        try { logLine('🧭 BATCH_GET_GLOBAL_ID ' + pageId + ': success=' + !!(res && res.success) + ' · không có threadsWithGlobalId'); } catch (e) { /* ignore */ }
         return 0;
       }
       batchGidFetchedPages[pageId] = true;
+      gidStats.batchReturned += list.length;
       let applied = 0;
       list.forEach((it) => {
         if (it && it.threadId && it.globalId && typeof window.__botfakeSaveGid__ === 'function') {
@@ -5165,8 +5224,10 @@
         }
       });
       gidStats.batchMappings += applied;
+      try { logLine('🧭 BATCH_GET_GLOBAL_ID ' + pageId + ': success=true · threadsWithGlobalId=' + list.length + ' · nạp mới=' + applied); } catch (e) { /* ignore */ }
       return applied;
     }).catch(() => {
+      gidStats.batchFail++;
       delete batchGidPromises[pageId];
       delete batchGidFetchedPages[pageId];
       return 0;
@@ -5175,7 +5236,7 @@
     return promise;
   }
 
-  function warmUpSockets(targets) {
+  function warmUpSockets(targets, opts) {
     try {
       preloadPersistentGlobalIds();
       const h = window.__MqttHelper__;
@@ -5188,7 +5249,9 @@
         seen[pid] = true;
         // 1) Gọi BATCH_GET_GLOBAL_ID (@897543 trong _app) 1 lần/page để nạp hàng loạt { threadId, globalId }
         //    từ IndexedDB của Extension vào cache RAM + localStorage chỉ bằng 1 lệnh duy nhất!
-        if (adapter && typeof adapter.send === 'function') requestBatchGlobalIds(pid, false);
+        //    Đầu mỗi LƯỢT GỬI ép nạp lại (forceBatch): danh sách mới/IndexedDB vừa được
+        //    loadThread bổ sung sau lúc mở panel thì lượt này vẫn lấy được, không chờ phiên sau.
+        if (adapter && typeof adapter.send === 'function') requestBatchGlobalIds(pid, !!(opts && opts.forceBatch));
         if (!h || typeof h.initSocket !== 'function') return;
         syncSocketMappingsToCache(h, pid);
         try {
@@ -5447,7 +5510,9 @@
           + ' · HTTP lỗi ' + gidStats.httpFail + ' (429×' + gidStats.http429 + ')'
           + ' · Ext chưa rõ ' + gidStats.extUnknown
           + ' · lần dò chưa ra ' + gidStats.unknown
-          + ' · batch nạp ' + gidStats.batchMappings + ' mapping'
+          + ' · batch nạp ' + gidStats.batchMappings + '/' + gidStats.batchReturned + ' mapping (lỗi ' + gidStats.batchFail + ')'
+          + ' · Ext trả không có gid ' + gidStats.extRespondedNoGid
+          + ' · gate bỏ Ext no-gid ' + gidStats.gateSkip
           + ' · lane HTTP ' + ctxFetchLane.getLimit()
           + ' / Ext ' + gidExtLane.getLimit());
       }
@@ -6412,7 +6477,7 @@
     let sendErr = null;
     try {
       try {
-        warmUpSockets(targets);
+        warmUpSockets(targets, { forceBatch: true });
         await waitInitialGidWarmup(targets, 1500);
       } catch (e) { /* làm nóng lỗi không được làm hỏng lô */ }
       // SW gửi inbox thất bại: jwt → #551; cookie jar → Invalid access_token. Chỉ tab pancake.vn.
