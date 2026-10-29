@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE LITE
 // @namespace    salescript
-// @version      1.91.45
+// @version      1.91.46
 // @description  BOTFAKE — panel hiện mọi website; gửi/tải list qua extension background.
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -44,7 +44,7 @@
   /* ============================ HẰNG SỐ ============================ */
 
   const PANEL_ID = 'ssb-root';          // ssb = SaleScript Bulk — không đụng pk-*/adj-*/pancake-* của script khác
-  const APP_VERSION = '1.91.45';        // hiện ở tiêu đề panel — đối chiếu với @version trong header
+  const APP_VERSION = '1.91.46';        // hiện ở tiêu đề panel — đối chiếu với @version trong header
   const STYLE_ID = 'ssb-style';
 
   const MAX_NAME_LIST = 12;             // số tên hiển thị khi xác nhận
@@ -3710,8 +3710,14 @@
         // Chỉ kết luận khách khóa nick thật (deadUser) khi đã gửi bằng globalUserId thật (khác null, !ctx.gidFromPsid)
         const deadUser = !!globalUserId && (!ctx || !ctx.gidFromPsid)
           && /1545041|Người này hiện không có mặt|Không tìm thấy người dùng/i.test(String(why || ''));
+        // INCORRECT THREAD + KHÔNG có globalId thật: thread không với tới được bằng mọi
+        // định danh hiện có (Socket cũng không dò ra gid thật, API thì #10 ngoài cửa sổ) —
+        // kết luận "không cứu được", dừng ngay tại đây, không đốt thêm bước Socket/API.
+        // Ngược lại, ĐÃ có globalId thật mà vẫn INCORRECT THREAD thì không kết luận ở đây:
+        // Socket còn đường bắn bằng chính gid thật đó (tránh gửi sót).
+        const hopelessThread = !globalUserId && /INCORRECT THREAD/i.test(String(why || ''));
         if (!ownLock) releaseOutbound(conv.id);
-        return { ok: false, sent: false, recipientUnavailable: deadUser, error: errStr };
+        return { ok: false, sent: false, recipientUnavailable: deadUser || hopelessThread, error: errStr };
       }
       // không có phản hồi (timeout/hủy) → extension có thể đã gửi → KHÔNG rõ
       return { ok: false, sent: 'maybe', error: 'Extension không phản hồi' };
