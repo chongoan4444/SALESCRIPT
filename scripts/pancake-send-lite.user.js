@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE LITE
 // @namespace    salescript
-// @version      1.91.49
+// @version      1.91.50
 // @description  BOTFAKE — panel hiện mọi website; gửi/tải list qua extension background.
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -44,7 +44,7 @@
   /* ============================ HẰNG SỐ ============================ */
 
   const PANEL_ID = 'ssb-root';          // ssb = SaleScript Bulk — không đụng pk-*/adj-*/pancake-* của script khác
-  const APP_VERSION = '1.91.49';        // hiện ở tiêu đề panel — đối chiếu với @version trong header
+  const APP_VERSION = '1.91.50';        // hiện ở tiêu đề panel — đối chiếu với @version trong header
   const STYLE_ID = 'ssb-style';
 
   const MAX_NAME_LIST = 12;             // số tên hiển thị khi xác nhận
@@ -1770,7 +1770,7 @@
   const gidStats = {
     cacheHit: 0, httpHit: 0, httpNoGid: 0, httpFail: 0, http429: 0,
     wsHit: 0, extHit: 0, extUnknown: 0, unknown: 0, batchMappings: 0,
-    pass2Queued: 0, pass2Recovered: 0, pass2StillUnknown: 0,
+    pass2Queued: 0, pass2Recovered: 0, pass2StillUnknown: 0, pass2RepeatExtSkipped: 0,
   };
   function resetGidStats() {
     Object.keys(gidStats).forEach((k) => { gidStats[k] = 0; });
@@ -3004,9 +3004,11 @@
         };
         const onFinderNull = () => {
           if (extSettled) return; // timer đã chốt nhánh này — không phát thêm lệnh Ext
-          // Chỉ Pass 2 (lane đã thông) mới tốn thêm 1 lệnh MAKE_MESSENGER_LINK;
-          // Pass 1 ở lô lớn không nhân đôi áp lực lên Extension cho mọi chat khó.
-          if ((discoveryPass === 2 || !isLargeBatch) && !(ctx && ctx.extMessengerTried)) {
+          // MAKE_MESSENGER_LINK là lệnh Ext phụ: chỉ dùng khi lô không lớn.
+          // Ở lô lớn/Pass 2, bắn thêm lệnh này cho mọi ca khó làm Extension
+          // càng nghẽn (log 5.637: khâu dò Ext không cứu được ca nào nhưng
+          // Pass 2 vẫn tốn ~20s/ca ở lane Ext) — BATCH/HTTP/WS đã là đủ nguồn dò.
+          if (!isLargeBatch && !(ctx && ctx.extMessengerTried)) {
             if (ctx) ctx.extMessengerTried = true;
             tryMessengerLink();
           } else {
@@ -3796,6 +3798,20 @@
     const globalUserId = (ctx && ctx.gidFromPsid && threadId) ? null : rawGlobalId;
     if (!globalUserId && !threadId) {
       return { ok: false, sent: false, error: 'Không có globalId/thread_id — bỏ qua Ext' };
+    }
+    // PASS 2 CHỐNG LẶP LỆNH EXT ĐẮT: Pass 1 đã bắn đúng payload thread-only
+    // này và Extension đã trả INCORRECT THREAD khi vẫn chưa có globalId thật.
+    // Nếu Pass 2 dò lại vẫn chưa có gid mới thì bắn lại y hệt chỉ tốn thêm
+    // ~20s ở lane Ext cho cùng một kết quả (log 5.637: 177 ca Pass 2 mất
+    // ~13 phút, cứu 11 ca nhờ gid/điều kiện đã đổi). Chỉ bỏ qua khi CHƯA có
+    // gid mới; hễ Pass 2 tìm được gid thật thì vẫn gửi bình thường.
+    if (ctx && ctx.gidRetryPass && ctx.pass1ExtIncorrectNoGid && !globalUserId) {
+      gidStats.pass2RepeatExtSkipped++;
+      return {
+        ok: false, sent: false, gidUnknown: true,
+        discoveryState: (ctx && ctx.gidDiscoveryState) || 'unknown',
+        error: 'Extension đã trả INCORRECT THREAD ở Pass 1 và Pass 2 vẫn chưa dò được globalId — bỏ qua lần bắn Ext lặp',
+      };
     }
 
     const token = getToken();
@@ -4795,18 +4811,22 @@
       // Nếu vừa dùng from_psid phỏng đoán (ctx.gidFromPsid === true) hoặc lỗi thiếu globalId/thread_id:
       // bắt buộc mở khóa ctx.gidResolved = false để kênh kế tiếp dò lại global_id thật (nhỡ WebSocket
       // hoặc Extension vừa nạp xong), tuyệt đối không bắn tiếp bằng from_psid sai!
-      // Riêng Ext INCORRECT THREAD khi CHƯA có globalId thật: ở Pass 1 KHÔNG reset
-      // gidDiscoveryRan — Socket kế tiếp sẽ trả gidUnknown ngay thay vì mở lại
-      // toàn bộ cuộc đua HTTP/WS/Ext lần thứ hai giữa lúc đang nghẽn. Cuộc dò lại
-      // sạch sẽ thuộc về Pass 2 cuối lô (ctx mới, gidRetryPass=2) hoặc kênh kế tiếp
-      // trong chính Pass 2.
+      // Riêng Ext INCORRECT THREAD khi CHƯA có globalId thật: KHÔNG reset
+      // gidDiscoveryRan ở cả Pass 1 lẫn Pass 2 — Socket kế tiếp vẫn được kiểm
+      // tra cache/WS ở 0ms trong resolveGlobalId, nhưng không mở lại toàn bộ
+      // cuộc đua HTTP/WS/Ext lần thứ hai cho cùng một ca. Pass 2 đã là cuộc
+      // dò lại sạch sẽ bằng ctx mới; dò thêm lần nữa trong cùng ca chỉ làm
+      // đuôi lô chậm thêm mà không đổi kết quả khi vẫn chưa có gid.
       const incorrectThreadNoGid = /INCORRECT THREAD/i.test(r.error || '') && !(ctx && ctx.gid && !ctx.gidFromPsid);
       if ((ctx && ctx.gidFromPsid) || (conv.fromPsid && /globalId|thread_id/i.test(r.error || '')) || incorrectThreadNoGid) {
         ctx.gidForceFind = true;
         ctx.gidResolved = false;
         ctx.gidFromPsid = false;
         ctx.gid = null;
-        if (incorrectThreadNoGid && ctx.gidRetryPass) ctx.gidDiscoveryRan = false;
+        // Pass 2 đã dò HTTP một lần trong chính ca này: kể cả lần đó lỗi
+        // mạng/429 thì Socket kế tiếp cũng không gọi lại GET /messages nữa,
+        // chỉ còn kiểm tra cache/WS 0ms ở đầu resolveGlobalId.
+        if (incorrectThreadNoGid && ctx.gidRetryPass) ctx.httpCtxTried = true;
       }
       if (r.error && r.error.indexOf('Token') === 0) {
         recycleUnusedFbId(pid0, ctx);
@@ -5418,6 +5438,7 @@
           + ' · Pass 2: xếp hàng ' + gidStats.pass2Queued
           + ' / cứu được ' + gidStats.pass2Recovered
           + ' / vẫn chưa rõ ' + gidStats.pass2StillUnknown
+          + (gidStats.pass2RepeatExtSkipped ? ' / bỏ bắn Ext lặp ' + gidStats.pass2RepeatExtSkipped : '')
           + ' · lane HTTP ' + ctxFetchLane.getLimit()
           + ' / Ext ' + gidExtLane.getLimit());
       }
@@ -6088,6 +6109,7 @@
         extMessengerTried: false,
         extFinderReturnedNull: false,
         noGidConfirmedByExt: false,
+        pass1ExtIncorrectNoGid: !!old.pass1ExtIncorrectNoGid,
         triedChannels: [],
         triedErrors: [],
       };
@@ -6226,9 +6248,14 @@
         && !/Token/i.test(String(r.error || ''))) {
         if (!activeGidRetryIds || !activeGidRetryIds.has(c.id)) {
           if (activeGidRetryIds) activeGidRetryIds.add(c.id);
+          // Nhớ riêng ca Pass 1 đã thật sự bắn Ext thread-only và bị trả
+          // INCORRECT THREAD khi chưa có gid: Pass 2 chỉ bắn lại nếu dò
+          // được gid MỚI, không lặp lại payload cũ tốn ~20s/ca ở lane Ext.
+          const retryCtx = Object.assign({}, (itemOpts && itemOpts.deferredCtx) || {});
+          if (/INCORRECT THREAD/i.test(String(r.error || ''))) retryCtx.pass1ExtIncorrectNoGid = true;
           activeGidRetryQueue.push({
             c: c,
-            deferredCtx: (itemOpts && itemOpts.deferredCtx) || null,
+            deferredCtx: retryCtx,
           });
           gidStats.pass2Queued++;
         }
@@ -6420,6 +6447,7 @@
         if (gidRetryQueue.length && !state.stopRequested) {
           const recoveredBefore = gidStats.pass2Recovered;
           const stillBefore = gidStats.pass2StillUnknown;
+          const skippedRepeatBefore = gidStats.pass2RepeatExtSkipped;
           logLine('🔁 Pass 2 globalId: bắt đầu xử lý lại ' + gidRetryQueue.length
             + ' chat chưa dò được ID ở Pass 1 (chưa tính lỗi, chưa có tin nào bị gửi trùng)…');
           activeGidRetryQueue = null; // Pass 2 không tự xếp lại vào chính nó
@@ -6460,9 +6488,11 @@
           const pass2RecoveredDelta = Math.max(0, gidStats.pass2Recovered - recoveredBefore);
           const pass2StillDelta = Math.max(0, gidStats.pass2StillUnknown - stillBefore);
           const pass2OtherDelta = Math.max(0, gidRetryQueue.length - pass2RecoveredDelta - pass2StillDelta);
+          const pass2SkippedRepeatDelta = Math.max(0, gidStats.pass2RepeatExtSkipped - skippedRepeatBefore);
           logLine('🔁 Pass 2 globalId xong: cứu thêm ' + pass2RecoveredDelta
             + ' chat, vẫn chưa rõ ' + pass2StillDelta + ' chat'
             + (pass2OtherDelta ? ', chốt lỗi thường ' + pass2OtherDelta + ' chat' : '')
+            + (pass2SkippedRepeatDelta ? ', bỏ bắn Ext lặp ' + pass2SkippedRepeatDelta + ' chat' : '')
             + ' (nhóm Pass 2 này: ' + gidRetryQueue.length
             + ' chat; tổng đã xếp Pass 2 trong lượt: ' + gidStats.pass2Queued + ').');
         } else if (gidRetryQueue.length && state.stopRequested) {
