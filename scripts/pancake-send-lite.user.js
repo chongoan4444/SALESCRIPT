@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE LITE
 // @namespace    salescript
-// @version      1.91.51
+// @version      1.91.53
 // @description  BOTFAKE — panel hiện mọi website; gửi/tải list qua extension background.
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -44,7 +44,7 @@
   /* ============================ HẰNG SỐ ============================ */
 
   const PANEL_ID = 'ssb-root';          // ssb = SaleScript Bulk — không đụng pk-*/adj-*/pancake-* của script khác
-  const APP_VERSION = '1.91.51';        // hiện ở tiêu đề panel — đối chiếu với @version trong header
+  const APP_VERSION = '1.91.53';        // hiện ở tiêu đề panel — đối chiếu với @version trong header
   const STYLE_ID = 'ssb-style';
 
   const MAX_NAME_LIST = 12;             // số tên hiển thị khi xác nhận
@@ -3567,19 +3567,19 @@
         return { ok: false, sent: 'maybe', error: 'Socket: đã gửi được chữ nhưng FB từ chối ảnh đính kèm' };
       }
 
-      // CHỐNG BỎ SÓT TIN DO FACEBOOK MQTT BURST-REJECT MÀ KHÔNG LÀM CHẬM VÙNG KHÁCH KHÓA NICK (v1.65.0):
-      //   • Khi đang gửi ở vùng các chat sống (socketRejectStreak[pageId] <= 4): nếu bị rejected lần đầu,
-      //     nghỉ nhẹ 100ms rồi lấy fbId mới (ưu tiên 0ms từ spareFbIdPool) và bắn thử lại 1 lần ngay trên Socket
-      //     (cứu 100% các chat sống chẳng may dính burst như ở v1.61.0!).
-      //   • Khi gặp cả một dải hàng trăm khách đã khóa nick liên tiếp (socketRejectStreak[pageId] > 4, như dải
-      //     130..287 trong log): tự động bỏ qua retry lần 2 để không phải upload ảnh lần 2 và bắn Socket lần 2
-      //     cho hàng trăm khách đã khóa nick (nhanh gấp đôi ở vùng chat lỗi!).
+      // CHỐNG BỎ SÓT TIN DO FACEBOOK MQTT BURST-REJECT:
+      // Mọi ca đã có globalId thật mà bị rejected đều được bắn lại Socket
+      // đúng 1 lần sau 100ms. Chuỗi rejected dài chỉ còn dùng để thăm dò
+      // ảnh trong cụm khách chặn, KHÔNG còn quyền tước lần bắn lại này:
+      // thực địa 7.224 chat cho thấy một khách sống nằm giữa cụm khách
+      // chết đã bị chốt oan vì streak > 4, nhưng chạy lại thì gửi được.
+      // Chỉ khi lần bắn lại vẫn rejected mới kết luận khách không nhận tin.
       if (raw && raw.kind === 'rejected') {
         socketRejectStreak[pageId] = (socketRejectStreak[pageId] || 0) + 1;
       } else if (raw && raw.kind === 'ok') {
         socketRejectStreak[pageId] = 0;
       }
-      if (raw && raw.kind === 'rejected' && (!ctx || !ctx.gidFromPsid) && !ctx.socketRetriedOnce && (socketRejectStreak[pageId] || 0) <= 4) {
+      if (raw && raw.kind === 'rejected' && (!ctx || !ctx.gidFromPsid) && !ctx.socketRetriedOnce) {
         // Chat đã được kênh khác xác nhận đến nơi trong lúc chờ ACK → dừng, không bắn lại (chống trùng)
         if (deliveredIds[conv.id]) return { ok: true, id: gid, sendBy: 'socket', sent: true };
         ctx.socketRetriedOnce = true;
@@ -3598,15 +3598,48 @@
             }
           } catch (e0) { /* ignore */ }
         }
-        if (photo) {
+        if (photo && !inBlockedCluster) {
           const freshUp = await uploadOneTimePhoto(pageId, photo, conv.id, ctx, true);
           if (!freshUp || !freshUp.ok || !freshUp.fbId) {
             return { ok: false, sent: false, error: 'Socket: server báo gửi thất bại' };
           }
           ctx.nonReusableFbId = null;
           attFbIds = (freshUp.fbIds && freshUp.fbIds.length) ? freshUp.fbIds.slice() : [freshUp.fbId];
+        } else if (inBlockedCluster) {
+          // Cụm khách chặn: lần bắn đầu mới là gói chữ thăm dò. Bắn lại
+          // đúng gói chữ đó để xác nhận, chưa upload ảnh cho tới khi chữ qua.
+          attFbIds = null;
         }
         raw = await pageLane(() => socketPublishSend(helper, pageId, gid, text, attFbIds));
+        if (inBlockedCluster && raw && raw.kind === 'ok') {
+          socketRejectStreak[pageId] = 0;
+          let probePhotoUp = await uploadOneTimePhoto(pageId, photo, conv.id, ctx, false);
+          if (probePhotoUp && probePhotoUp.ok && probePhotoUp.fbId) {
+            ctx.nonReusableFbId = null;
+            let sendPhotoRes = await pageLane(() => socketPublishSend(helper, pageId, gid, '', (probePhotoUp.fbIds && probePhotoUp.fbIds.length) ? probePhotoUp.fbIds : [probePhotoUp.fbId]));
+            if (sendPhotoRes && sendPhotoRes.kind === 'ok') {
+              recordSocketGidSuccess();
+              return { ok: true, id: gid, sendBy: 'socket', sent: true };
+            }
+            await sleep(80);
+            probePhotoUp = await uploadOneTimePhoto(pageId, photo, conv.id, ctx, true);
+            if (probePhotoUp && probePhotoUp.ok && probePhotoUp.fbId) {
+              ctx.nonReusableFbId = null;
+              sendDiag.photoRetry++;
+              sendPhotoRes = await pageLane(() => socketPublishSend(helper, pageId, gid, '', (probePhotoUp.fbIds && probePhotoUp.fbIds.length) ? probePhotoUp.fbIds : [probePhotoUp.fbId]));
+              if (sendPhotoRes && sendPhotoRes.kind === 'ok') {
+                recordSocketGidSuccess();
+                return { ok: true, id: gid, sendBy: 'socket', sent: true };
+              }
+            }
+          }
+          const extPhotoFallback = await sendViaExtension(conv, '', photo, ctx);
+          if (extPhotoFallback && extPhotoFallback.ok) {
+            recordSocketGidSuccess();
+            return { ok: true, id: gid, sendBy: 'socket', sent: true };
+          }
+          return { ok: false, sent: 'maybe', error: 'Socket: đã gửi được chữ nhưng FB từ chối ảnh đính kèm' };
+        }
         if (raw && raw.kind === 'ok') {
           socketRejectStreak[pageId] = 0;
         }
@@ -3634,15 +3667,17 @@
       }
       if (raw.kind === 'dead') return { ok: false, sent: false, error: 'Socket không kết nối' };
       if (raw.kind === 'rejected') {
-        // Khi chat ĐÃ CÓ global_id thật (!ctx.gidFromPsid) và ĐÃ THỬ ĐỦ 2 LẦN qua Socket cách xa nhau
-        // (lần 1 ở Làn 1 + lần 2 ở Hồ Nền sau khi hết burst) mà Facebook WebSocket vẫn trả về
-        // markOptimisticMessageFailed: 100% khách hiện không có mặt / đã khóa nick (fbErrorCode 1545041)!
-        const isConfirmedUnavailable = ((!ctx || !ctx.gidFromPsid) && batchStats && batchStats.total > 50)
-          || !!(ctx && ctx.socketRetriedOnce); // đã bắn lại 1 lần vẫn bị từ chối = FB xác nhận khách không nhận tin
+        // Chỉ kết luận khách không có mặt / đã khóa nick sau khi Socket
+        // đã bắn lại đúng 1 lần mà vẫn bị markOptimisticMessageFailed.
+        // Một lần rejected trong lô lớn chưa đủ bằng chứng: có thể là
+        // burst-reject tạm thời hoặc mapping gid vừa đổi (ca thực địa
+        // chạy lại đã gửi được). Chưa bắn lại thì giữ lỗi Socket thường,
+        // tuyệt đối không gắn nhãn recipientUnavailable.
+        const isConfirmedUnavailable = !!(ctx && ctx.socketRetriedOnce);
         return {
           ok: false,
           sent: false,
-          recipientUnavailable: !!isConfirmedUnavailable,
+          recipientUnavailable: isConfirmedUnavailable,
           error: isConfirmedUnavailable
             ? 'Socket: FB từ chối nhận tin (khách hiện không có mặt / đã khóa nick)'
             : 'Socket: server báo gửi thất bại',
