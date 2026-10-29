@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE LITE
 // @namespace    salescript
-// @version      1.91.47
+// @version      1.91.48
 // @description  BOTFAKE — panel hiện mọi website; gửi/tải list qua extension background.
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -44,7 +44,7 @@
   /* ============================ HẰNG SỐ ============================ */
 
   const PANEL_ID = 'ssb-root';          // ssb = SaleScript Bulk — không đụng pk-*/adj-*/pancake-* của script khác
-  const APP_VERSION = '1.91.47';        // hiện ở tiêu đề panel — đối chiếu với @version trong header
+  const APP_VERSION = '1.91.48';        // hiện ở tiêu đề panel — đối chiếu với @version trong header
   const STYLE_ID = 'ssb-style';
 
   const MAX_NAME_LIST = 12;             // số tên hiển thị khi xác nhận
@@ -1761,7 +1761,20 @@
   //     "100025260544548"… — app gửi Ext/Socket bằng id NÀY, không phải from_psid).
   // LIST chat KHÔNG có 2 thứ này → gửi hàng loạt mà không nạp = thiếu cờ (#10 oan) + bắn nhầm id
   // (Ext "không gửi được", Socket "server báo gửi thất bại") — đúng 2 triệu chứng trong log.
-  const convCtxCache = {}; // convId → { ad_clicks, gid, fetched }
+  const convCtxCache = {}; // convId → { ad_clicks, gid, fetched, httpState, gidSource }
+
+  // THỐNG KÊ KHÂU DÒ GLOBAL_ID THEO LƯỢT (in ở TỔNG HỢP): trước đây mọi kết quả
+  // "chưa lấy được" bị gộp thành "không tìm thấy", không biết nghẽn ở nguồn nào.
+  // Số ở đây đếm theo LẦN PHÂN GIẢI (1 chat có thể được dò lại ở Pass 2), dùng để
+  // đối chiếu nguồn nào đang nghẽn chứ không phải số chat duy nhất.
+  const gidStats = {
+    cacheHit: 0, httpHit: 0, httpNoGid: 0, httpFail: 0, http429: 0,
+    wsHit: 0, extHit: 0, extUnknown: 0, unknown: 0, batchMappings: 0,
+    pass2Queued: 0, pass2Recovered: 0, pass2StillUnknown: 0,
+  };
+  function resetGidStats() {
+    Object.keys(gidStats).forEach((k) => { gidStats[k] = 0; });
+  }
 
   function adClicksFromPayload(j) {
     if (!j) return null;
@@ -1835,7 +1848,12 @@
     }
     let entry = convCtxCache[cid];
     if (entry && entry.fetched) return entry; // đã nạp thành công qua mạng — không gọi lại
-    entry = entry || { ad_clicks: null, gid: '', fetched: false, inflight: null };
+    entry = entry || {
+      ad_clicks: null, gid: '', fetched: false, inflight: null,
+      httpState: '', httpError: '', httpAttempts: 0, gidSource: '',
+    };
+    if (!entry.httpState) entry.httpState = '';
+    if (!entry.gidSource) entry.gidSource = '';
     const full = peekConv(conv) || conv;
     // 1) có sẵn trong dữ liệu conv (bản ghi đầy đủ / dòng list) — khỏi gọi mạng
     if (!entry.ad_clicks) {
@@ -1848,6 +1866,7 @@
     if (!entry.gid) {
       entry.gid = String(gidFromPayload(full) || full.globalId || (conv && conv.globalId)
         || (full.customers && full.customers[0] && full.customers[0].global_id) || '');
+      if (entry.gid) entry.gidSource = 'conv';
     }
     if (!entry.gid) {
       try {
@@ -1855,6 +1874,7 @@
         const tKey = (pid && tid) ? (pid + '_' + tid) : '';
         entry.gid = String((g1 && g1.get(cid)) || (g2 && g2.get(cid))
           || (tKey && ((g1 && g1.get(tKey)) || (g2 && g2.get(tKey)))) || '');
+        if (entry.gid) entry.gidSource = 'cache';
       } catch (e) { /* ignore */ }
     }
     if (!entry.gid && pid && tid) {
@@ -1866,6 +1886,7 @@
           || (ip.threadMappingStoreV2 && ip.threadMappingStoreV2[tid]));
         if (mGid) {
           entry.gid = String(mGid);
+          entry.gidSource = 'ws';
           if (typeof window.__botfakeSaveGid__ === 'function') {
             window.__botfakeSaveGid__(cid, pid, tid, entry.gid);
           }
@@ -1911,16 +1932,31 @@
     if (entry.inflight) return entry.inflight;
     convCtxCache[cid] = entry;
     entry.inflight = ctxFetchLane(async () => {
+      const startedAt = Date.now();
+      let fetchStartedAt = startedAt;
+      entry.httpAttempts = (entry.httpAttempts || 0) + 1;
       try {
+        // Đang trong cơn 429 của Pancake: mọi request dò mới cùng chờ hết giờ
+        // nghỉ chung thay vì tiếp tục đâm vào server (tự làm nghẽn nặng hơn).
+        await waitGidHttpCooldown();
+        if (state.stopRequested) return entry;
+        fetchStartedAt = Date.now();
         const url = apiBase() + '/v1/pages/' + pid
           + '/conversations/' + encodeURIComponent(cid)
           + '/messages?customer_id=' + encodeURIComponent(custId)
           + '&user_view=true&is_new_api=true&separate_pos=true';
-        const res = await fetchJson(url, 3);
+        // CHỈ 1 LẦN THỬ/PASS: fetchJson tự retry 3 lần sẽ nhân ba áp lực đúng lúc
+        // server đang 429/timeout. Ca lỗi tạm thời để Pass 2 thử lại khi lane đã thông.
+        const res = await fetchJson(url, 1, { timeoutMs: 8000 });
+        const latencyMs = Date.now() - fetchStartedAt;
         if (res.ok && res.data && res.data.success !== false) {
           const j = res.data;
           entry.ad_clicks = entry.ad_clicks || adClicksFromPayload(j) || null;
-          entry.gid = entry.gid || gidFromPayload(j) || '';
+          const httpGid = gidFromPayload(j) || '';
+          if (!entry.gid && httpGid) {
+            entry.gid = String(httpGid);
+            entry.gidSource = 'http';
+          }
           // Khớp 100% @298730 trong _app: n.customers.forEach(t => t.fb_id && t.global_id && b.Z.set(e + "_" + t.fb_id, t.global_id))
           if (Array.isArray(j.customers)) {
             j.customers.forEach((t) => {
@@ -1940,8 +1976,28 @@
           }
           // CHỈ đánh dấu fetched=true khi request thành công (tránh lỗi 429/mạng làm mất vĩnh viễn gid của 3.000 chat sau)
           entry.fetched = true;
+          entry.httpState = entry.gid ? 'ok-gid' : 'ok-no-gid';
+          entry.httpError = '';
+          if (entry.gid && entry.gidSource === 'http') gidStats.httpHit++;
+          else if (!entry.gid) gidStats.httpNoGid++;
+          noteGidHttpResult(true, 200, latencyMs);
+        } else {
+          const errText = String((res && res.error) || (res && res.data && (res.data.message || res.data.error)) || 'HTTP lỗi');
+          const statusMatch = /HTTP\s+(\d{3})/.exec(errText);
+          const status = statusMatch ? Number(statusMatch[1]) : 0;
+          entry.httpState = status === 429 ? 'http-429' : 'http-fail';
+          entry.httpError = errText;
+          gidStats.httpFail++;
+          if (status === 429) gidStats.http429++;
+          noteGidHttpResult(false, status, latencyMs);
         }
-      } catch (e) { /* mạng lỗi — chưa set fetched=true để lần force sau còn thử lại */ }
+      } catch (e) {
+        // mạng lỗi — chưa set fetched=true để lần force sau còn thử lại
+        entry.httpState = 'http-fail';
+        entry.httpError = String(e && e.message || e || 'Lỗi mạng');
+        gidStats.httpFail++;
+        noteGidHttpResult(false, 0, Date.now() - fetchStartedAt);
+      }
       entry.inflight = null;
       return entry;
     }).then(() => { entry.inflight = null; return entry; }); // lane không chạy fn (bấm Dừng) cũng phải nhả inflight
@@ -2586,21 +2642,28 @@
     return '';
   }
 
-  let extNullStreak = 0;
-
-  // Tìm globalId của khách theo kiến trúc Đa Tầng Không Chặn Đầu (Two-Pass Non-Blocking Pipeline v1.63.0):
+  // Tìm globalId của khách theo kiến trúc Đa Tầng Không Chặn Đầu:
   //   • Bước 1 (0ms): RAM / localStorage / IndexedDB / WebSocket threadMappingStoreV2.
-  //   • Bước 1B (~100–200ms): Server Pancake HTTP GET /messages (khớp @298730 trong _app: n.customers[].global_id,
-  //     chạy song song trên ctxFetchLane, đồng thời đánh thức WebSocket loadThread).
-  //   • Bước 1C (Nếu đang ở Làn Nhanh ctx.fastOnly === true mà cả Bước 1 & 1B đều trả null):
-  //     Đánh dấu ctx.deferredToExt = true và trả về null NGAY LẬP TỨC (0ms) để đẩy chat sang hồ nền Extension
-  //     (extBacklogQueue), TUYỆT ĐỐI KHÔNG giữ chân worker của Làn Nhanh!
-  //   • Bước 2 + 3 (Chạy trong hồ nền extBacklogQueue): Đua song song WebSocket PENDING_MESSAGES + Extension,
-  //     kèm mạch ngắt thông minh (extNullStreak) và TUYỆT ĐỐI không trả về from_psid sai để bắn mù vào Socket!
+  //   • Bước 1B: Server Pancake HTTP GET /messages (khớp @298730 trong _app:
+  //     customers[].global_id) qua lane THÍCH ỨNG — nguồn có thẩm quyền nhất.
+  //   • Bước 1C: Làn Nhanh (ctx.fastOnly) chưa có thì hoãn sang hồ nền, không giữ worker.
+  //   • Bước 2 + 3 (hồ nền): WebSocket loadThread chạy trước một nhịp ngắn, Extension
+  //     chỉ vào sau để khỏi tranh tài nguyên với chính lệnh gửi qua Extension.
+  // QUAN TRỌNG (đối chiếu _app-9331d46f21a84eb1.v6.js @903213): hàm
+  // window.findGlobalIdForConv của Pancake trả null cho CẢ Extension mất kết nối,
+  // adapter success:false, thiếu data.globalId và exception. Vì vậy null của khâu
+  // dò chỉ có nghĩa "CHƯA RÕ", tuyệt đối không phải bằng chứng khách khóa nick.
   async function resolveGlobalId(full, threadId, cacheKey, convFromPsid, forceFind, ctx) {
     const key = (full && full.id) || cacheKey;
     const pageId = (full && full.page_id) || (full && full.pageId) || String(cacheKey || '').split('_')[0];
     const tKey = (pageId && threadId) ? (pageId + '_' + threadId) : '';
+    const discoveryPass = (ctx && ctx.gidRetryPass) ? 2 : 1;
+    let foundSource = '';
+    if (ctx) {
+      ctx.gidUnknown = false;
+      ctx.extFinderReturnedNull = false; // giữ field cũ nhưng KHÔNG còn nguồn nào được set true
+      ctx.noGidConfirmedByExt = false;
+    }
     const saveCache = (val) => {
       const s = String(val || '');
       if (!s) return;
@@ -2626,12 +2689,27 @@
     // 1) Kiểm tra 0ms trong RAM (Cache + full.global_id + MqttHelper.threadMappingStoreV2)
     const fastGid = peekFastGlobalId(full, full, badGid);
     if (fastGid) {
+      gidStats.cacheHit++;
       saveCache(fastGid);
       if (ctx) {
         ctx.gidFromPsid = false;
         ctx.gidFromServerOrCache = true;
+        ctx.gidDiscoveryState = 'cache';
+        ctx.gidUnknown = false;
       }
       return String(fastGid);
+    }
+    // Pass 2: entry HTTP cũ "thành công nhưng chưa có gid" vẫn có thể đã cũ —
+    // trong lúc lô chạy, Pancake/Extension có thể vừa cập nhật mapping lên server.
+    // Ép nạp lại đúng 1 lần cho nhóm Pass 2 (vẫn qua lane thích ứng + dedupe).
+    if (ctx && discoveryPass === 2 && key) {
+      try {
+        const oldCc = convCtxCache[key];
+        if (oldCc && oldCc.fetched && !oldCc.gid && !oldCc.inflight) {
+          oldCc.fetched = false;
+          oldCc.httpState = 'retry-pass2';
+        }
+      } catch (e0) { /* ignore */ }
     }
     // 1B) Nạp global_id từ Server Pancake HTTP GET /messages (khớp @298730 trong _app: n.customers[].global_id):
     //     Chỉ đánh dấu httpCtxTried = true khi request thực sự thành công (cc.fetched === true), để nếu lần 1
@@ -2639,19 +2717,31 @@
     if (!ctx || !ctx.httpCtxTried) {
       try {
         const cc = await ensureConvCtx(full || { id: key, pageId: pageId, threadId: threadId }, { force: true });
-        if (ctx && cc && cc.fetched) ctx.httpCtxTried = true;
+        if (ctx && cc) {
+          ctx.httpState = cc.httpState || '';
+          ctx.httpError = cc.httpError || '';
+          if (cc.fetched) ctx.httpCtxTried = true;
+        }
         const srvGid = (cc && cc.gid && String(cc.gid) !== badGid)
           ? String(cc.gid)
           : peekFastGlobalId(full, full, badGid);
         if (srvGid) {
+          if (!(cc && cc.gid && cc.gidSource === 'http')) gidStats.cacheHit++;
           saveCache(srvGid);
           if (ctx) {
             ctx.gidFromPsid = false;
             ctx.gidFromServerOrCache = true;
+            ctx.gidDiscoveryState = (cc && cc.gidSource) || 'cache';
+            ctx.gidUnknown = false;
           }
           return String(srvGid);
         }
-      } catch (e1) { /* ignore */ }
+        if (ctx) {
+          ctx.gidDiscoveryState = (cc && cc.fetched) ? 'server-no-gid' : 'http-unknown';
+        }
+      } catch (e1) {
+        if (ctx) ctx.gidDiscoveryState = 'http-unknown';
+      }
     }
     // 1C) Nếu đang chạy trong Làn Nhanh (ctx.fastOnly === true) mà cả Cache, WebSocket lẫn Server Pancake
     //     đều chưa có global_id (tức là buộc phải chờ Extension findGlobalIdForConv):
@@ -2659,14 +2749,20 @@
     //     giải phóng worker của Làn Nhanh đi bắn ngay các chat tiếp theo (301..20.000)!
     if (ctx && ctx.fastOnly) {
       ctx.deferredToExt = true;
+      ctx.gidUnknown = true;
+      if (!ctx.gidDiscoveryState) ctx.gidDiscoveryState = 'deferred';
       return null;
     }
     const isLargeBatch = !!(batchStats && batchStats.total > 50);
     // Khớp 100% với this.concurrentlyGetGLobalIdExecuted (@961019 trong _app):
     // Nếu trong cùng ctx của chat này đã từng chạy trọn vẹn bước dò tìm mạng/Extension 1 lần rồi
-    // mà không ra, KHÔNG chạy lại HTTP/Extension lần thứ 2!
+    // mà không ra, KHÔNG chạy lại HTTP/Extension lần thứ 2 trong cùng một lần gửi!
     if (ctx && ctx.gidDiscoveryRan) {
-      if (ctx.noGidConfirmedByExt || isLargeBatch) return null;
+      if (isLargeBatch) {
+        ctx.gidUnknown = true;
+        if (!ctx.gidDiscoveryState) ctx.gidDiscoveryState = 'unknown';
+        return null;
+      }
       if (!ctx.psidTried) {
         const guess2 = psidFromFull(full, pageId) || psidFromFull({ from_psid: convFromPsid || '' }, pageId);
         if (guess2 && String(guess2) !== badGid) {
@@ -2713,8 +2809,11 @@
       }
     };
 
-    const wsWaitMs = 1500;
-    const extWaitMs = 10000;
+    // Pass 2 chạy khi lô chính đã xả: cho WebSocket thêm thời gian vì lúc này
+    // loadThread đã cuộn lâu hơn và lane không còn bị tranh chấp.
+    const wsWaitMs = discoveryPass === 2 ? 2500 : 1500;
+    const extWaitMs = 8000;
+    const extStartDelayMs = discoveryPass === 2 ? 0 : 250;
     const raceTasks = [];
 
     // Nhánh 1: WebSocket PENDING_MESSAGES + wakingUpLoadThread + wsPoll 60ms (bắt ngay global_id ở <60ms khi loadThread về,
@@ -2726,6 +2825,7 @@
           wsResolveRef = resolve;
           const nowGid = peekFastGlobalId(full, full, badGid);
           if (nowGid) {
+            foundSource = 'ws';
             saveCache(nowGid);
             if (ctx) ctx.gidFromServerOrCache = true;
             cleanupRace();
@@ -2736,6 +2836,7 @@
             if (settled) { if (wsPoll) { clearInterval(wsPoll); wsPoll = null; } return; }
             const hitGid = peekFastGlobalId(full, full, badGid);
             if (hitGid) {
+              foundSource = 'ws';
               saveCache(hitGid);
               if (ctx) ctx.gidFromServerOrCache = true;
               cleanupRace();
@@ -2748,6 +2849,7 @@
             try { delete mqtt.PENDING_MESSAGES[pKey]; } catch (e2) { /* ignore */ }
             const lateGid = peekFastGlobalId(full, full, badGid);
             if (lateGid) {
+              foundSource = 'ws';
               saveCache(lateGid);
               if (ctx) ctx.gidFromServerOrCache = true;
               cleanupRace();
@@ -2760,6 +2862,7 @@
             callback: (r) => {
               const val = (r && r.success && r.data && String(r.data) !== badGid) ? String(r.data) : null;
               if (val) {
+                foundSource = 'ws';
                 saveCache(val);
                 if (ctx) ctx.gidFromServerOrCache = true;
               }
@@ -2778,7 +2881,7 @@
             .then((r) => {
               clearTimeout(timer);
               const val = (r && r.success && r.data && String(r.data) !== badGid) ? String(r.data) : null;
-              if (val) { saveCache(val); if (ctx) ctx.gidFromServerOrCache = true; cleanupRace(); }
+              if (val) { foundSource = 'ws'; saveCache(val); if (ctx) ctx.gidFromServerOrCache = true; cleanupRace(); }
               resolve(val);
             })
             .catch(() => { clearTimeout(timer); resolve(null); });
@@ -2786,39 +2889,77 @@
       }
     }
 
-    // Nhánh 2: Extension GET_GLOBAL_ID_FOR_CONV (8 luồng song song qua gidExtLane)
+    // Nhánh 2: Extension GET_GLOBAL_ID_FOR_CONV qua lane thích ứng. Pass 1 cho
+    // WebSocket một nhịp ngắn trước; nếu WS đã tìm thấy thì nhánh này tự hủy,
+    // không tốn một lệnh Extension nào.
     if (hasExtFinder && threadId) {
-      raceTasks.push(gidExtLane(() => new Promise((resolve) => {
+      const extEnqueuedAt = Date.now();
+      raceTasks.push((async () => {
+        if (extStartDelayMs) await sleep(extStartDelayMs);
+        if (settled || state.stopRequested) {
+          return peekFastGlobalId(full, full, badGid) || null;
+        }
+        return gidExtLane(() => new Promise((resolve) => {
+        const extStartedAt = Date.now();
+        let extSettled = false;
         if (settled || state.stopRequested) { cutWsShort(); resolve(null); return; }
         // Kiểm tra lại ngay khi tới lượt trong gidExtLane: nếu WebSocket loadThread đã cuộn tới
         // và nạp xong global_id vào threadMappingStoreV2 trong lúc xếp hàng → lấy luôn ở 0ms, khỏi gọi Extension!
         const hitNow = peekFastGlobalId(full, full, badGid);
         if (hitNow) {
-          extNullStreak = 0;
+          foundSource = 'cache';
+          gidStats.cacheHit++;
           saveCache(hitNow);
           if (ctx) ctx.gidFromServerOrCache = true;
           cleanupRace();
           resolve(String(hitNow));
           return;
         }
+        // Hàng đợi đã quá cũ ở Pass 1: đừng tiếp tục nạp thêm lệnh dò vào Extension
+        // đang nghẽn. Kết quả vẫn là "chưa rõ" để Pass 2 xử lý khi lane đã thông.
+        if (Date.now() - extEnqueuedAt > (discoveryPass === 2 ? 60000 : 20000)) {
+          gidStats.extUnknown++;
+          noteGidExtResult(false, true, Date.now() - extEnqueuedAt);
+          cutWsShort();
+          resolve(null);
+          return;
+        }
         const timer = setTimeout(() => {
-          // LƯU Ý QUAN TRỌNG: Khi bị timeout (Extension đang bận xử lý các lệnh khác),
-          // TUYỆT ĐỐI KHÔNG gán ctx.extFinderReturnedNull = true (để chat vẫn còn cơ hội gửi qua
-          // sendViaExtension bằng threadId y hệt khi gửi tay, không bị báo oan là khách khóa nick!).
+          if (extSettled) return;
+          extSettled = true;
+          // Timeout chỉ có nghĩa Extension chưa trả lời kịp — KHÔNG phải "không có
+          // globalId". Không set bất kỳ cờ chết nào ở đây.
+          gidStats.extUnknown++;
+          noteGidExtResult(false, true, Date.now() - extStartedAt);
           cutWsShort();
           resolve(null);
         }, extWaitMs);
-        const finishExt = (val, confirmedNull) => {
+        const finishExt = (val, source) => {
           clearTimeout(timer);
+          const alreadySettled = extSettled;
+          extSettled = true;
+          const elapsedMs = Date.now() - extStartedAt;
           if (val && String(val) !== badGid) {
-            extNullStreak = 0;
+            // Extension trả về SAU khi timer đã nổ: vẫn lưu cache cho kênh sau/Pass 2,
+            // nhưng không đếm nguồn thêm lần nữa (promise dò đã chốt null rồi).
+            if (!alreadySettled) {
+              foundSource = source || 'ext';
+              if (foundSource === 'ext') {
+                gidStats.extHit++;
+                noteGidExtResult(true, false, elapsedMs);
+              } else if (foundSource === 'cache') {
+                gidStats.cacheHit++;
+              }
+            }
             saveCache(val);
             cleanupRace();
             resolve(String(val));
           } else {
-            if (confirmedNull) {
-              extNullStreak++;
-              if (isLargeBatch && ctx) ctx.extFinderReturnedNull = true;
+            // Bằng chứng từ _app @903213: null của findGlobalIdForConv bao gồm cả
+            // mất kết nối/success:false/exception nên mọi null đều là CHƯA RÕ.
+            if (!alreadySettled) {
+              gidStats.extUnknown++;
+              if ((source || 'ext') === 'ext') noteGidExtResult(false, false, elapsedMs);
             }
             cutWsShort();
             resolve(null);
@@ -2826,7 +2967,7 @@
         };
         const tryMessengerLink = () => {
           const adapter = window.__ExtensionAdapter__;
-          if (settled || !adapter || typeof adapter.send !== 'function') { finishExt(null, false); return; }
+          if (settled || !adapter || typeof adapter.send !== 'function') { finishExt(null, 'ext'); return; }
           Promise.resolve().then(() => adapter.send({
             type: 'MAKE_MESSENGER_LINK',
             pageId: pageId,
@@ -2847,46 +2988,70 @@
                   if (sel && /^\d+$/.test(sel)) mlGid = sel;
                 } catch (e3) { /* ignore */ }
               }
-              if (mlGid && String(mlGid) !== badGid) { finishExt(mlGid, false); return; }
+              if (mlGid && String(mlGid) !== badGid) { finishExt(mlGid, 'ext'); return; }
             }
-            finishExt(null, !!(mlRes && mlRes.timedOut !== true));
-          }).catch(() => finishExt(null, false));
+            finishExt(null, 'ext');
+          }).catch(() => finishExt(null, 'ext'));
         };
-        if (typeof window.findGlobalIdForConv === 'function') {
-          Promise.resolve().then(() => window.findGlobalIdForConv({
-            pageId: pageId,
-            threadId: threadId,
-            threadKey: (full && (full.thread_key || full.threadKey)) || ('t_' + threadId),
-            isBusiness: true,
-            conversationUpdatedTime: isNaN(updMs) ? Date.now() : updMs,
-            customerName: custName,
-            convType: 'INBOX', postId: null, convId: null,
-          })).then((v) => {
-            if (v && String(v) !== badGid) {
-              finishExt(v, false);
-            } else if (isLargeBatch) {
-              // Chính findGlobalIdForConv của Extension đã chạy xong và trả về null → xác nhận khách khóa nick
-              finishExt(null, true);
-            } else {
-              tryMessengerLink();
+        const finderPayload = {
+          pageId: pageId,
+          threadId: threadId,
+          threadKey: (full && (full.thread_key || full.threadKey)) || ('t_' + threadId),
+          isBusiness: true,
+          conversationUpdatedTime: isNaN(updMs) ? Date.now() : updMs,
+          customerName: custName,
+          convType: 'INBOX', postId: null, convId: null,
+        };
+        const onFinderNull = () => {
+          if (extSettled) return; // timer đã chốt nhánh này — không phát thêm lệnh Ext
+          // Chỉ Pass 2 (lane đã thông) mới tốn thêm 1 lệnh MAKE_MESSENGER_LINK;
+          // Pass 1 ở lô lớn không nhân đôi áp lực lên Extension cho mọi chat khó.
+          if ((discoveryPass === 2 || !isLargeBatch) && !(ctx && ctx.extMessengerTried)) {
+            if (ctx) ctx.extMessengerTried = true;
+            tryMessengerLink();
+          } else {
+            finishExt(null, 'ext');
+          }
+        };
+        const adapter = window.__ExtensionAdapter__;
+        if (adapter && typeof adapter.send === 'function') {
+          try {
+            if (typeof adapter.checkConnection === 'function'
+              && !adapter.checkConnection({ silent: true })) {
+              finishExt(null, 'ext');
+              return;
             }
-          }).catch(() => {
-            if (isLargeBatch) {
-              finishExt(null, false);
-            } else {
-              tryMessengerLink();
-            }
-          });
+          } catch (e) { /* cứ thử gửi lệnh dò */ }
+          // Gọi thẳng adapter để giữ được shape success/data và đặt timeout 8s.
+          // window.findGlobalIdForConv nuốt hết mọi lý do thất bại thành null,
+          // còn adapter timeout trả { success:false, data:null } — vẫn là CHƯA RÕ,
+          // nhưng ít nhất không phải chờ timeout mặc định 30s của Pancake.
+          Promise.resolve().then(() => adapter.send(
+            Object.assign({ type: 'GET_GLOBAL_ID_FOR_CONV' }, finderPayload),
+            { timeout: extWaitMs }
+          )).then((res) => {
+            const val = (res && res.success && res.data && res.data.globalId
+              && String(res.data.globalId) !== badGid) ? String(res.data.globalId) : '';
+            if (val) finishExt(val, 'ext');
+            else onFinderNull();
+          }).catch(() => onFinderNull());
+        } else if (typeof window.findGlobalIdForConv === 'function') {
+          Promise.resolve().then(() => window.findGlobalIdForConv(finderPayload)).then((v) => {
+            if (v && String(v) !== badGid) finishExt(v, 'ext');
+            else onFinderNull();
+          }).catch(() => onFinderNull());
         } else {
           tryMessengerLink();
         }
-      })));
+        }));
+      }));
     } else if (!hasExtFinder) {
       // Dự phòng nếu không có Extension: thử lấy từ ensureConvCtx
       raceTasks.push((async () => {
         try {
           const cc = await ensureConvCtx(full || { id: key, pageId: pageId }, { force: true });
           if (cc && cc.gid && String(cc.gid) !== badGid) {
+            foundSource = (cc.gidSource === 'http') ? 'http' : 'cache';
             saveCache(cc.gid);
             if (ctx) ctx.gidFromServerOrCache = true;
             cleanupRace();
@@ -2905,23 +3070,30 @@
     if (gid && typeof gid !== 'string' && typeof gid !== 'number') gid = null;
     cleanupRace();
     if (gid && String(gid) !== badGid) {
+      if (foundSource === 'ws') gidStats.wsHit++;
       saveCache(gid);
       if (ctx) {
         ctx.gidFromPsid = false;
         ctx.extFinderReturnedNull = false;
+        ctx.noGidConfirmedByExt = false;
+        ctx.gidDiscoveryState = foundSource || 'found';
+        ctx.gidUnknown = false;
       }
       return String(gid);
     }
-    // Khi chính Extension (findGlobalIdForConv) đã chạy xong và xác nhận không tìm thấy global_id
-    // trên Facebook (ctx.extFinderReturnedNull === true) hoặc trình duyệt không có Extension trên lô lớn:
-    // đánh dấu noGidConfirmedByExt = true để dừng ngay.
-    // Ngược lại, nếu Extension chỉ bị timeout tạm thời (extFinderReturnedNull !== true) thì giữ
-    // noGidConfirmedByExt = false để sendViaExtension vẫn gửi được bằng threadId (nhưng vẫn trả về null
-    // trên isLargeBatch để TUYỆT ĐỐI không bắn from_psid sai vào Socket!).
-    if (ctx && (ctx.extFinderReturnedNull || (!hasExtFinder && isLargeBatch))) {
-      ctx.noGidConfirmedByExt = true;
-      return null;
+    // Mọi đường dò đều không ra ở lần này = CHƯA RÕ, không phải "đã xác nhận chết":
+    // HTTP có thể 429/timeout, WS chưa cuộn tới thread, Extension null bị nuốt lý do.
+    // Lô lớn: trả null để sendOne đánh dấu gidUnknown → Pass 2 cuối lô dò lại khi
+    // lane đã thông. TUYỆT ĐỐI không bắn from_psid sai vào Socket.
+    if (ctx) {
+      ctx.extFinderReturnedNull = false;
+      ctx.noGidConfirmedByExt = false;
+      ctx.gidUnknown = true;
+      if (!ctx.gidDiscoveryState || ctx.gidDiscoveryState === 'found') {
+        ctx.gidDiscoveryState = hasExtFinder ? 'unknown' : 'no-ext-finder';
+      }
     }
+    gidStats.unknown++;
     if (isLargeBatch) {
       return null;
     }
@@ -2932,6 +3104,8 @@
         if (ctx) {
           ctx.gidFromPsid = true;
           ctx.psidTried = true;
+          ctx.gidUnknown = false;
+          ctx.gidDiscoveryState = 'psid-guess';
         }
         return guess;
       }
@@ -3271,7 +3445,13 @@
     // TUYỆT ĐỐI không nhận from_psid phỏng đoán (bắn from_psid vào /ls_req sẽ bị FB MQTT treo không trả ACK!).
     if (!gid || (ctx && ctx.gidFromPsid)) {
       recycleUnusedFbId(pageId, ctx);
-      return { ok: false, sent: false, error: 'Không tìm thấy globalId thật cho Socket' };
+      // Chưa có gid ở lần này không đồng nghĩa khách chết: khâu dò có thể vừa bị
+      // 429/timeout/WS chưa cuộn tới. Đánh dấu rõ để sendBatch đưa sang Pass 2.
+      return {
+        ok: false, sent: false, gidUnknown: true,
+        discoveryState: (ctx && ctx.gidDiscoveryState) || 'unknown',
+        error: 'Không tìm thấy globalId thật cho Socket',
+      };
     }
     // Lưu ngay global_id thật vào cache bền vững (kể cả khi khách đã chặn page), để ở các lần gửi sau
     // cục khách đã chặn này có sẵn fastGid0 ở 0ms mà không phải gọi lại GET /messages hay đợi loadThread!
@@ -3710,17 +3890,20 @@
         // Chỉ kết luận khách khóa nick thật (deadUser) khi đã gửi bằng globalUserId thật (khác null, !ctx.gidFromPsid)
         const deadUser = !!globalUserId && (!ctx || !ctx.gidFromPsid)
           && /1545041|Người này hiện không có mặt|Không tìm thấy người dùng/i.test(String(why || ''));
-        // INCORRECT THREAD + KHÔNG có globalId thật + khâu dò đã XÁC NHẬN không có gid
-        // (extFinderReturnedNull: chính Extension finder chạy xong và trả null — khách chết
-        // thật): kết luận "không cứu được", dừng ngay, không đốt thêm bước Socket/API.
-        // Nếu mới "chưa dò được" do nghẽn lane/timeout ở lô lớn (extFinderReturnedNull chưa
-        // set) thì KHÔNG kết luận ở đây: lệnh Ext lúc đó thiếu globalUserId nên không định
-        // vị được thread và báo INCORRECT THREAD oan — thread có thể hoàn toàn tồn tại
-        // (gửi lẻ là được), phải để kênh sau dò lại gid (tránh gửi sót).
-        const hopelessThread = !globalUserId && /INCORRECT THREAD/i.test(String(why || ''))
-          && !!(ctx && ctx.extFinderReturnedNull);
+        // INCORRECT THREAD khi CHƯA có globalUserId thật: lệnh Ext lúc đó thiếu
+        // globalUserId nên có thể không định vị được thread dù thread vẫn tồn tại.
+        // Bằng chứng _app @903213 cho thấy khâu dò không cung cấp được "xác nhận
+        // không có gid", nên ca này là GID CHƯA RÕ → kênh sau/Pass 2 dò lại, không
+        // được kết luận recipientUnavailable.
+        const gidUnknownThread = !globalUserId && /INCORRECT THREAD/i.test(String(why || ''));
         if (!ownLock) releaseOutbound(conv.id);
-        return { ok: false, sent: false, recipientUnavailable: deadUser || hopelessThread, error: errStr };
+        return {
+          ok: false, sent: false,
+          recipientUnavailable: deadUser,
+          gidUnknown: gidUnknownThread,
+          discoveryState: (ctx && ctx.gidDiscoveryState) || 'unknown',
+          error: errStr,
+        };
       }
       // không có phản hồi (timeout/hủy) → extension có thể đã gửi → KHÔNG rõ
       return { ok: false, sent: 'maybe', error: 'Extension không phản hồi' };
@@ -3937,18 +4120,26 @@
 
   // ===== HỆ THỐNG PHÂN LUỒNG ĐA TẦNG (SMART DUAL-ENGINE & CONCURRENCY LANES CHO 30.000 MESS) =====
   //  • apiSendLane (48 luồng): điều tiết POST /messages của fireApiAndWatch (~300 tin/s).
-  //  • ctxFetchLane (64 luồng): điều tiết GET /messages của ensureConvCtx (~350–400 chat/s).
-  //  • photoUploadLane (64 luồng): điều tiết POST /contents/facebook (reusable=false) riêng cho từng chat (~250–300 ảnh/s).
-  //  • gidExtLane (6 luồng): điều tiết GET_GLOBAL_ID_FOR_CONV (chỉ gọi khi HTTP + WS không có global_id).
-  //  • extPrepLane (128 luồng): chuẩn bị chung cho các chat CHƯA có sẵn global_id trong RAM.
+  //  • ctxFetchLane (thích ứng 32, dải 8–64): điều tiết GET /messages của ensureConvCtx.
+  //  • photoUploadLane (96 luồng): điều tiết POST /contents/facebook (reusable=false) riêng cho từng chat.
+  //  • gidExtLane (thích ứng 8, dải 3–16): điều tiết GET_GLOBAL_ID_FOR_CONV khi HTTP/WS chưa có global_id.
+  //  • extPrepLane (160 luồng): chuẩn bị chung cho các chat CHƯA có sẵn global_id trong RAM.
   //  • extSendLane (6 luồng): bắn REPLY_INBOX_PHOTO qua Extension khi đã cầm đủ payload.
   //  • getPageSocketLane (24 luồng/page): điều tiết số frame /ls_req in-flight trên mỗi kết nối WebSocket
   //    của từng fanpage (tránh vượt ngưỡng burst của edge-chat.facebook.com gây markOptimisticMessageFailed).
   //  • sideEffectLane (4 luồng): điều tiết các request phụ nền (fill_admin_name, update_global_id).
   const API_SEND_PARALLEL = 48;
-  const CTX_FETCH_PARALLEL = 128; // v1.80.0: nới làn nạp ngữ cảnh cho quy mô 100k
+  // Khâu dò globalId dùng LANE THÍCH ỨNG thay cho mức cố định: HAR cho thấy GET
+  // /messages khỏe chỉ ~40–250ms, nhưng bắn cố định 128 luồng ở lô 5.000 làm
+  // Pancake/Chrome dội 429 + timeout dây chuyền. Lane tự tăng khi phản hồi nhanh,
+  // tự giảm + nghỉ chung khi 429/chậm — giữ thông lượng thật cao nhất mà server chịu được.
+  const CTX_FETCH_INITIAL = 32;
+  const CTX_FETCH_MIN = 8;
+  const CTX_FETCH_MAX = 64;
   const PHOTO_UPLOAD_PARALLEL = 96;
-  const GID_EXT_PARALLEL = 24;
+  const GID_EXT_INITIAL = 8;
+  const GID_EXT_MIN = 3;
+  const GID_EXT_MAX = 16;
   const PREP_PARALLEL_EXT = 160;  // số chat chưa có global_id chuẩn bị HTTP/WS song song (không bị chặn bởi gidExtLane)
   const BUS_PARALLEL_EXT = 6;     // số lệnh adapter.send (REPLY_INBOX_PHOTO) chạy song song
   const BUS_PARALLEL_SOCKET = 64; // số frame Socket (/ls_req) in-flight trên mỗi kết nối WebSocket (kèm giãn nhịp 2ms chống burst; vẫn giữ retry + socketRejectStreak bảo vệ)
@@ -3987,10 +4178,138 @@
     enqueue.waitingCount = () => waiters.length;
     return enqueue;
   }
+
+  // Lane có GIỚI HẠN ĐỘNG cho riêng khâu dò globalId. Các lane gửi thật vẫn giữ
+  // mức cố định như cũ; chỉ nguồn dễ tự gây nghẽn (HTTP GET /messages và lệnh dò
+  // qua Extension) mới được bộ điều tiết tăng/giảm theo phản hồi thật.
+  function makeAdaptiveLane(initial, min, max) {
+    let active = 0;
+    let limit = Math.max(min, Math.min(max, initial || min));
+    const waiters = [];
+    const pump = () => {
+      if (state.stopRequested) {
+        while (waiters.length) { const w = waiters.shift(); w(); }
+        return;
+      }
+      while (active < limit && waiters.length) {
+        const start = waiters.shift();
+        start();
+      }
+    };
+    const enqueue = function (fn) {
+      return new Promise((resolve) => {
+        const start = () => {
+          if (state.stopRequested) { resolve({ ok: false, sent: false, error: 'Đã dừng' }); return; }
+          active++;
+          Promise.resolve()
+            .then(fn)
+            .catch((e) => ({ ok: false, sent: false, error: 'Lỗi kênh: ' + (e && e.message || e) }))
+            .then((r) => {
+              active--;
+              pump();
+              resolve(r);
+            });
+        };
+        if (active < limit && !waiters.length) start();
+        else { waiters.push(start); pump(); }
+      });
+    };
+    enqueue.busy = () => active >= limit || waiters.length > 0;
+    enqueue.activeCount = () => active;
+    enqueue.waitingCount = () => waiters.length;
+    enqueue.getLimit = () => limit;
+    enqueue.setLimit = (next) => {
+      limit = Math.max(min, Math.min(max, Math.round(next) || min));
+      pump();
+      return limit;
+    };
+    return enqueue;
+  }
+
   const apiSendLane = makeLane(API_SEND_PARALLEL);
-  const ctxFetchLane = makeLane(CTX_FETCH_PARALLEL);
+  const ctxFetchLane = makeAdaptiveLane(CTX_FETCH_INITIAL, CTX_FETCH_MIN, CTX_FETCH_MAX);
   const photoUploadLane = makeLane(PHOTO_UPLOAD_PARALLEL);
-  const gidExtLane = makeLane(GID_EXT_PARALLEL);
+  const gidExtLane = makeAdaptiveLane(GID_EXT_INITIAL, GID_EXT_MIN, GID_EXT_MAX);
+
+  // BỘ ĐIỀU TIẾT DÒ GLOBAL_ID (AIMD): phản hồi nhanh/ổn định → tăng dần để lấy
+  // tốc độ thật; 429/timeout/chậm → giảm mạnh + nghỉ chung, tránh cả nghìn request
+  // cùng đâm vào server đang nghẽn rồi cùng chết (đúng bệnh lô 5.000).
+  const gidHttpCtl = { good: 0, bad: 0, coolUntil: 0, backoffStreak: 0 };
+  const gidExtCtl = { good: 0, bad: 0 };
+  async function waitGidHttpCooldown() {
+    let waited = false;
+    while (!state.stopRequested && Date.now() < gidHttpCtl.coolUntil) {
+      waited = true;
+      await sleep(Math.min(250, Math.max(25, gidHttpCtl.coolUntil - Date.now())));
+    }
+    // Rải nhịp ngẫu nhiên sau cơn 429: tránh cả lane cùng lao lại đúng 1 ms.
+    if (waited && !state.stopRequested) await sleep(Math.floor(Math.random() * 180));
+  }
+  function noteGidHttpResult(ok, status, latencyMs) {
+    try {
+      if (status === 429) {
+        gidHttpCtl.backoffStreak = Math.min(6, (gidHttpCtl.backoffStreak || 0) + 1);
+        gidHttpCtl.coolUntil = Date.now() + Math.min(10000, 1200 * gidHttpCtl.backoffStreak);
+        gidHttpCtl.good = 0;
+        gidHttpCtl.bad = 0;
+        ctxFetchLane.setLimit(ctxFetchLane.getLimit() * 0.5);
+        return;
+      }
+      if (!ok || latencyMs > 2500) {
+        gidHttpCtl.good = 0;
+        gidHttpCtl.bad++;
+        if (gidHttpCtl.bad >= 3) {
+          gidHttpCtl.bad = 0;
+          ctxFetchLane.setLimit(ctxFetchLane.getLimit() * 0.75);
+        }
+        return;
+      }
+      gidHttpCtl.bad = 0;
+      gidHttpCtl.backoffStreak = 0;
+      if (latencyMs < 700) {
+        gidHttpCtl.good++;
+        if (gidHttpCtl.good >= 24) {
+          gidHttpCtl.good = 0;
+          ctxFetchLane.setLimit(ctxFetchLane.getLimit() + 4);
+        }
+      } else {
+        gidHttpCtl.good = 0;
+      }
+    } catch (e) { /* điều tiết lỗi không được làm hỏng lượt gửi */ }
+  }
+  function noteGidExtResult(ok, timedOut, latencyMs) {
+    try {
+      if (timedOut || latencyMs > 6000) {
+        gidExtCtl.good = 0;
+        gidExtCtl.bad++;
+        if (gidExtCtl.bad >= 3) {
+          gidExtCtl.bad = 0;
+          gidExtLane.setLimit(gidExtLane.getLimit() * 0.7);
+        }
+        return;
+      }
+      gidExtCtl.bad = 0;
+      if (ok && latencyMs < 1500) {
+        gidExtCtl.good++;
+        if (gidExtCtl.good >= 20) {
+          gidExtCtl.good = 0;
+          gidExtLane.setLimit(gidExtLane.getLimit() + 2);
+        }
+      } else {
+        gidExtCtl.good = 0;
+      }
+    } catch (e) { /* ignore */ }
+  }
+  async function waitForGidDiscoveryIdle(maxMs) {
+    const startedAt = Date.now();
+    while (!state.stopRequested && (Date.now() - startedAt) < (maxMs || 8000)) {
+      const busy = (ctxFetchLane.activeCount() + ctxFetchLane.waitingCount())
+        + (gidExtLane.activeCount() + gidExtLane.waitingCount());
+      if (!busy) return true;
+      await sleep(200);
+    }
+    return false;
+  }
   const extPrepLane = makeLane(PREP_PARALLEL_EXT);
   const extSendLane = makeLane(BUS_PARALLEL_EXT);
   const extLane = extPrepLane;
@@ -4287,6 +4606,9 @@
 
     const tried = Array.isArray(ctx.triedErrors) ? ctx.triedErrors.slice() : [];
     const triedCh = Array.isArray(ctx.triedChannels) ? ctx.triedChannels.slice() : [];
+    // Chỉ đánh dấu "gid chưa rõ" khi một kênh thật sự cho biết đang thiếu gid.
+    // Lỗi API độc lập (chưa hề cần gid) không được kéo cả chat sang Pass 2 oan.
+    let sawGidUnknown = !!(ctx.gidUnknown && !ctx.gid && conv.type !== 'comment');
     if (triedCh.length) {
       seq = seq.filter((x) => triedCh.indexOf(x) < 0);
     }
@@ -4316,6 +4638,7 @@
       }
       triedCh.push(ch);
       tried.push((ch === 'ext' ? 'Ext' : ch) + ': ' + (r.error || 'fail'));
+      if (r.gidUnknown) sawGidUnknown = true;
       // "không rõ" = tin CÓ THỂ đã đi — thử tiếp kênh khác sẽ gửi TRÙNG → dừng ngay
       if (r.sent === 'maybe') {
         recycleUnusedFbId(pid0, ctx);
@@ -4330,17 +4653,18 @@
       // Nếu vừa dùng from_psid phỏng đoán (ctx.gidFromPsid === true) hoặc lỗi thiếu globalId/thread_id:
       // bắt buộc mở khóa ctx.gidResolved = false để kênh kế tiếp dò lại global_id thật (nhỡ WebSocket
       // hoặc Extension vừa nạp xong), tuyệt đối không bắn tiếp bằng from_psid sai!
-      // Thêm ca: Ext INCORRECT THREAD khi CHƯA có globalId thật — nhiều khả năng khâu dò lần 1
-      // chỉ bị nghẽn lane/timeout ở lô lớn (Ext thiếu globalUserId nên không định vị được thread),
-      // không phải thread chết thật → mở khóa + cho dò lại từ đầu (gidDiscoveryRan = false),
-      // kênh kế tiếp có cơ hội lấy gid qua HTTP/WS khi lane đã thông hơn (gửi lẻ là được).
+      // Riêng Ext INCORRECT THREAD khi CHƯA có globalId thật: ở Pass 1 KHÔNG reset
+      // gidDiscoveryRan — Socket kế tiếp sẽ trả gidUnknown ngay thay vì mở lại
+      // toàn bộ cuộc đua HTTP/WS/Ext lần thứ hai giữa lúc đang nghẽn. Cuộc dò lại
+      // sạch sẽ thuộc về Pass 2 cuối lô (ctx mới, gidRetryPass=2) hoặc kênh kế tiếp
+      // trong chính Pass 2.
       const incorrectThreadNoGid = /INCORRECT THREAD/i.test(r.error || '') && !(ctx && ctx.gid && !ctx.gidFromPsid);
       if ((ctx && ctx.gidFromPsid) || (conv.fromPsid && /globalId|thread_id/i.test(r.error || '')) || incorrectThreadNoGid) {
         ctx.gidForceFind = true;
         ctx.gidResolved = false;
         ctx.gidFromPsid = false;
         ctx.gid = null;
-        if (incorrectThreadNoGid) ctx.gidDiscoveryRan = false;
+        if (incorrectThreadNoGid && ctx.gidRetryPass) ctx.gidDiscoveryRan = false;
       }
       if (r.error && r.error.indexOf('Token') === 0) {
         recycleUnusedFbId(pid0, ctx);
@@ -4348,7 +4672,12 @@
       }
     }
     recycleUnusedFbId(pid0, ctx);
-    return { ok: false, sent: false, tried: triedCh.slice(), error: tried.join(' | ') };
+    return {
+      ok: false, sent: false, tried: triedCh.slice(),
+      gidUnknown: !!(sawGidUnknown && !(ctx.gid && !ctx.gidFromPsid)),
+      discoveryState: (ctx && ctx.gidDiscoveryState) || '',
+      error: tried.join(' | '),
+    };
   }
 
   // ===== CACHE BỀN VỮNG GLOBAL_ID (LOCALSTORAGE + INDEXEDDB "fb_meta_data") & VÁ MQTTHELPER =====
@@ -4627,8 +4956,49 @@
   // phải trả phí kết nối + đồng bộ thread map ~10s (initSocket). Làm nóng ngay lúc bắn lô —
   // chạy song song các bắn API — nên khi nào cần bù Socket thì chỉ còn ~1–2s của sendMessage.
   const socketWarmPromises = {}; // pageId → Promise kết nối socket (đang chạy dở)
-  const batchGidFetchedPages = {}; // pageId → đã gọi BATCH_GET_GLOBAL_ID (@897543) trong phiên
+  const batchGidFetchedPages = {}; // pageId → BATCH_GET_GLOBAL_ID (@897543) đã THÀNH CÔNG trong phiên
   const batchGidPromises = {}; // pageId → Promise BATCH_GET_GLOBAL_ID đang chạy
+
+  // Nạp HÀNG LOẠT { threadId → globalId } mà Extension đã biết trong IndexedDB:
+  // 1 lệnh/page thay vì dò từng chat. Chỉ đánh dấu "đã nạp" khi THÀNH CÔNG; lần
+  // gọi hỏng/timeout được phép gọi lại ở lượt sau hoặc trước Pass 2, vì IndexedDB
+  // của Extension liên tục được loadThread/gửi tay bổ sung thêm mapping mới.
+  function requestBatchGlobalIds(pid, force) {
+    const pageId = String(pid || '');
+    if (!pageId) return Promise.resolve(0);
+    if (batchGidPromises[pageId]) return batchGidPromises[pageId];
+    if (!force && batchGidFetchedPages[pageId]) return Promise.resolve(0);
+    const adapter = window.__ExtensionAdapter__;
+    if (!adapter || typeof adapter.send !== 'function') return Promise.resolve(0);
+    const promise = Promise.resolve().then(() => adapter.send({
+      type: 'BATCH_GET_GLOBAL_ID',
+      pageId: pageId,
+    }, { timeout: 15000 })).then((res) => {
+      delete batchGidPromises[pageId];
+      const list = res && res.success && res.data && res.data.threadsWithGlobalId;
+      if (!Array.isArray(list)) {
+        delete batchGidFetchedPages[pageId];
+        return 0;
+      }
+      batchGidFetchedPages[pageId] = true;
+      let applied = 0;
+      list.forEach((it) => {
+        if (it && it.threadId && it.globalId && typeof window.__botfakeSaveGid__ === 'function') {
+          const mapKey = String(pageId) + '_' + String(it.threadId);
+          if (!persistentGidMap[mapKey]) applied++;
+          window.__botfakeSaveGid__(mapKey, pageId, it.threadId, String(it.globalId));
+        }
+      });
+      gidStats.batchMappings += applied;
+      return applied;
+    }).catch(() => {
+      delete batchGidPromises[pageId];
+      delete batchGidFetchedPages[pageId];
+      return 0;
+    });
+    batchGidPromises[pageId] = promise;
+    return promise;
+  }
 
   function warmUpSockets(targets) {
     try {
@@ -4643,23 +5013,7 @@
         seen[pid] = true;
         // 1) Gọi BATCH_GET_GLOBAL_ID (@897543 trong _app) 1 lần/page để nạp hàng loạt { threadId, globalId }
         //    từ IndexedDB của Extension vào cache RAM + localStorage chỉ bằng 1 lệnh duy nhất!
-        if (adapter && typeof adapter.send === 'function' && !batchGidFetchedPages[pid]) {
-          batchGidFetchedPages[pid] = true;
-          batchGidPromises[pid] = Promise.resolve().then(() => adapter.send({
-            type: 'BATCH_GET_GLOBAL_ID',
-            pageId: pid,
-          }, { timeout: 15000 })).then((res) => {
-            delete batchGidPromises[pid];
-            const list = res && res.success && res.data && res.data.threadsWithGlobalId;
-            if (Array.isArray(list)) {
-              list.forEach((it) => {
-                if (it && it.threadId && it.globalId && typeof window.__botfakeSaveGid__ === 'function') {
-                  window.__botfakeSaveGid__(String(pid) + '_' + String(it.threadId), pid, it.threadId, String(it.globalId));
-                }
-              });
-            }
-          }).catch(() => { delete batchGidPromises[pid]; return null; });
-        }
+        if (adapter && typeof adapter.send === 'function') requestBatchGlobalIds(pid, false);
         if (!h || typeof h.initSocket !== 'function') return;
         syncSocketMappingsToCache(h, pid);
         try {
@@ -4904,6 +5258,20 @@
             ? ' | 🔂 Socket bắn lại sau rejected: ' + sendDiag.sockRetry + ' · bắn lại ảnh: ' + sendDiag.photoRetry
             : '')
           + ' | ⏱ Tổng thời gian: ' + elapsedSec + 's');
+        logLine('🧭 Chẩn đoán globalId: cache ' + gidStats.cacheHit
+          + ' · HTTP ' + gidStats.httpHit
+          + ' · WS ' + gidStats.wsHit
+          + ' · Ext ' + gidStats.extHit
+          + ' · HTTP không có gid ' + gidStats.httpNoGid
+          + ' · HTTP lỗi ' + gidStats.httpFail + ' (429×' + gidStats.http429 + ')'
+          + ' · Ext chưa rõ ' + gidStats.extUnknown
+          + ' · lần dò chưa ra ' + gidStats.unknown
+          + ' · batch nạp ' + gidStats.batchMappings + ' mapping'
+          + ' · Pass 2: xếp hàng ' + gidStats.pass2Queued
+          + ' / cứu được ' + gidStats.pass2Recovered
+          + ' / vẫn chưa rõ ' + gidStats.pass2StillUnknown
+          + ' · lane HTTP ' + ctxFetchLane.getLimit()
+          + ' / Ext ' + gidExtLane.getLimit());
       }
     } catch (e) { /* ignore */ }
   }
@@ -5323,6 +5691,7 @@
     batchStats.loopFinished = false;
     buStats.ok = 0; buStats.cancelled = 0; buStats.byWhy = {};
     verifyStats.found = 0; verifyStats.fired = 0; verifyStats.unknown = 0;
+    resetGidStats();
     sendDiag.sockRetry = 0; sendDiag.photoRetry = 0;
     batchStats.finalLogged = false;
     reportExtJob({ phase: 'send', pct: 0, ok: 0, total: 0 }); // sau reset — không bị lượt cũ đổi thành idle
@@ -5469,6 +5838,36 @@
     const quickEl0 = shadow && shadow.getElementById('ssb-quick');
     const quickOn = !!(quickEl0 && quickEl0.checked);
 
+    // PASS 2 GLOBAL_ID: sendBatch đang chạy sẽ gắn một hàng đợi vào biến này.
+    // Chat nào Pass 1 thất bại CHỈ vì chưa dò được gid (không có bất kỳ tin nào
+    // được bắn, không "maybe", không phải khách chết được xác nhận bằng gid thật)
+    // sẽ được giữ lại tại đây thay vì tính lỗi ngay; cuối lô mới gửi lại khi các
+    // lane dò đã xả hết. sendBatch xử lý xong phải gỡ hàng đợi về null.
+    let activeGidRetryQueue = null;
+    let activeGidRetryIds = null; // Set đi kèm để chống trùng O(1), tránh some() O(n²) ở lô lớn
+    const makeGidRetryCtx = (oldCtx) => {
+      const old = (oldCtx && typeof oldCtx === 'object') ? oldCtx : {};
+      return {
+        full: old.full || null,
+        fullLoaded: !!old.fullLoaded,
+        threadId: old.threadId || null,
+        threadResolved: !!old.threadResolved,
+        gid: null,
+        gidResolved: false,
+        gidDiscoveryRan: false,
+        gidRetryPass: 2,
+        gidFromPsid: false,
+        gidFromServerOrCache: false,
+        httpCtxTried: false,
+        httpState: '',
+        extMessengerTried: false,
+        extFinderReturnedNull: false,
+        noGidConfirmedByExt: false,
+        triedChannels: [],
+        triedErrors: [],
+      };
+    };
+
     // CÂU NHANH NHIỀU ĐOẠN: gửi từng đoạn theo đúng thứ tự như gửi tay — mỗi đoạn qua
     // sendOne như 1 tin thường. Chưa đoạn nào đến nơi mà lỗi → trả nguyên kết quả để xử lý
     // kênh/bù như 1 tin thường; đã có đoạn đến nơi rồi mới lỗi → chốt ⚠ (uncertain) để
@@ -5516,13 +5915,14 @@
 
     const sendOneAndLog = async (c, gtext, itemOpts) => {
       const isDeferredPass = !!(itemOpts && itemOpts.deferredCtx);
+      const isGidRetryPass = !!(itemOpts && itemOpts.gidRetryPass);
       // v1.82.5 — khóa cứng 1 chat = 1 lần bắn trong lượt.
       // Làn chậm (deferredCtx) là TIẾP TỤC cùng 1 lần đã khóa ở làn nhanh → được vào.
       // Worker thứ 2 / câu thứ 2 cùng id → bỏ, không bắn thêm (chống gửi 2 lần).
       if (c && c.id && deliveredIds[c.id]) {
         return { ok: true, skippedDup: true, sent: true, sendBy: deliveredIds[c.id] };
       }
-      if (c && c.id && claimedSendIds[c.id] && !isDeferredPass) {
+      if (c && c.id && claimedSendIds[c.id] && !isDeferredPass && !isGidRetryPass) {
         return { ok: true, skippedDup: true, sent: true };
       }
       if (c && c.id) claimedSendIds[c.id] = 1;
@@ -5591,6 +5991,27 @@
       if (r && r.deferredToExt) {
         return r;
       }
+      // PASS 2: Pass 1 chỉ "chưa dò được gid" (gidUnknown, chắc chắn chưa có tin
+      // nào được bắn thành công và không phải maybe) → KHÔNG tăng done/fail ở đây.
+      // Giữ chat lại để cuối lô dò lại khi HTTP/WS/Extension đã hết nghẽn. Đây là
+      // điểm khác cốt lõi với lỗi thường: lỗi thường vẫn chốt ngay như cũ.
+      if (r && !r.ok && !r.uncertain && !r.recipientUnavailable && r.gidUnknown
+        && !isGidRetryPass && activeGidRetryQueue && c && c.id
+        && !deliveredIds[c.id] && !sockFiredPending.has(c.id)
+        && !/Token/i.test(String(r.error || ''))) {
+        if (!activeGidRetryIds || !activeGidRetryIds.has(c.id)) {
+          if (activeGidRetryIds) activeGidRetryIds.add(c.id);
+          activeGidRetryQueue.push({
+            c: c,
+            deferredCtx: (itemOpts && itemOpts.deferredCtx) || null,
+          });
+          gidStats.pass2Queued++;
+        }
+        logLine('⏳ ' + (c.name || c.id) + ' — chưa dò được globalId (nghi nghẽn khâu dò) — để lại Pass 2 cuối lô, chưa tính lỗi');
+        return { ok: false, sent: false, gidRetryQueued: true, error: r.error || 'Chưa dò được globalId' };
+      }
+      if (isGidRetryPass && r && r.ok) gidStats.pass2Recovered++;
+      if (isGidRetryPass && r && !r.ok && r.gidUnknown) gidStats.pass2StillUnknown++;
       const via = r.ok ? (r.sendBy === 'direct' ? ' — gửi thẳng Socket/Ext'
         : r.sendBy === 'socket' ? ' — qua Socket'
         : r.sendBy === 'extension' ? ' — qua Extension' : '') : '';
@@ -5612,7 +6033,8 @@
       } else {
         fail++;
         if (r.windowClosed) windowBlocked++;
-        logLine('❌ [' + done + '/' + totalAll + '] ' + (c.name || c.id) + ' — ' + r.error);
+        logLine('❌ [' + done + '/' + totalAll + '] ' + (c.name || c.id) + ' — ' + r.error
+          + ((isGidRetryPass && r.gidUnknown) ? ' — Pass 2 vẫn chưa dò được globalId' : ''));
         // cửa sổ 24h VẪN bù kênh khác (Thanh Binh); kênh đã thử hết → scheduleBuRetry tự bỏ
         if (!r.uncertain && !r.recipientUnavailable && isRetryableLoss(r.error)) {
           const p2 = c.pageId || String(c.id).split('_')[0];
@@ -5636,7 +6058,7 @@
     };
 
     // 🚀 KIẾN TRÚC ĐA TẦNG KHÔNG CHẶN ĐẦU (TWO-PASS NON-BLOCKING PIPELINE v1.61.0 CHO 20.000–30.000 TIN):
-    //   • Làn 1 (fastHttpSocketPool — 96 worker song song, fastOnly=true):
+    //   • Làn 1 (fastHttpSocketPool — 192 worker song song, fastOnly=true):
     //     Quét xuyên suốt từ chat 1 đến hết danh sách (2.356 / 5.089 / 20.000 chat) mà KHÔNG BAO GIỜ đứng chờ Extension!
     //     Mọi chat lấy được global_id từ RAM / WebSocket / Server Pancake (GET /messages) đều được upload ảnh
     //     và bắn thẳng qua Socket/API ngay lập tức. Chat nào thiếu global_id trên Server Pancake (cần hỏi Extension)
@@ -5658,7 +6080,9 @@
     let gtextRef = '';
     const sendBatch = async (gtext, batch) => {
       gtextRef = gtext;
-      extNullStreak = 0;
+      const gidRetryQueue = [];
+      activeGidRetryQueue = gidRetryQueue;
+      activeGidRetryIds = new Set();
       // Đánh thức WebSocket loadThread ngay đầu lượt cho mọi page có trong batch
       try {
         const mh = window.__MqttHelper__;
@@ -5721,11 +6145,13 @@
       // ⚡ GID PREFETCH (v1.70.0): pipeline chạy nền SONG SONG với làn gửi, đi trước để nạp sẵn
       // ngữ cảnh + global_id (GET /messages, có dedupe inflight trong ensureConvCtx) cho các chat
       // phía sau — tới lượt worker gửi thì gid đã có sẵn trong cache (0ms), không phải đứng chờ HTTP.
-      // Không await: prefetch chậm hơn làn gửi cũng vô hại (toàn cache hit), nhanh hơn thì làn gửi bứt tốc.
-      runPool(batch, async (c) => {
+      // Không await ở đây: prefetch chậm hơn làn gửi cũng vô hại (toàn cache hit),
+      // nhanh hơn thì làn gửi bứt tốc. Số worker chỉ là nhịp nạp hàng đợi; thông
+      // lượng HTTP thật do ctxFetchLane thích ứng (8–64) quyết định.
+      const gidPrefetchPromise = runPool(batch, async (c) => {
         if (state.stopRequested) return;
         try { await ensureConvCtx(c, { force: true }); } catch (e) { /* ignore */ }
-      }, 96).catch(() => {}); // v1.80.0: 48→96 — ở lô 34k, 48 worker × ~0,75s/GET ≈ 64 chat/s, khớp đúng tốc độ đo được → đây là nút thắt
+      }, 48).catch(() => {});
 
       const extWorkers = [];
       const nExtWorkers = Math.min(EXT_BACKLOG_WORKERS, Math.max(1, batch.length));
@@ -5759,6 +6185,68 @@
         }
       }
       await Promise.all(extWorkers);
+
+      // ===== PASS 2 GLOBAL_ID (cuối mỗi batch) =====
+      // Chỉ chạy khi Pass 1 có chat bị giữ lại vì gidUnknown. Lúc này làn nhanh
+      // và hồ nền đã xong: chờ khâu dò xả hết, nạp lại BATCH_GET_GLOBAL_ID cho
+      // từng page (Extension có thể đã học thêm mapping trong lúc lô chạy), rồi
+      // gửi lại đúng nhóm chưa rõ bằng ctx mới ở nhịp thấp/ổn định.
+      try {
+        if (gidRetryQueue.length && !state.stopRequested) {
+          const recoveredBefore = gidStats.pass2Recovered;
+          const stillBefore = gidStats.pass2StillUnknown;
+          logLine('🔁 Pass 2 globalId: bắt đầu xử lý lại ' + gidRetryQueue.length
+            + ' chat chưa dò được ID ở Pass 1 (chưa tính lỗi, chưa có tin nào bị gửi trùng)…');
+          activeGidRetryQueue = null; // Pass 2 không tự xếp lại vào chính nó
+          activeGidRetryIds = null;
+          await Promise.race([gidPrefetchPromise, sleep(3000)]);
+          await waitForGidDiscoveryIdle(8000);
+          if (!state.stopRequested) {
+            const pageIds = [];
+            gidRetryQueue.forEach((item) => {
+              const pid = (item.c && item.c.pageId) || String((item.c && item.c.id) || '').split('_')[0];
+              if (pid && pageIds.indexOf(pid) === -1) pageIds.push(pid);
+            });
+            if (pageIds.length) {
+              await Promise.race([
+                Promise.all(pageIds.map((pid) => requestBatchGlobalIds(pid, true))),
+                sleep(5000),
+              ]);
+            }
+            // Nghỉ một nhịp ngắn để 429/backoff (nếu còn) hạ nhiệt trước khi dò lại.
+            await sleep(350);
+            await runPool(gidRetryQueue, async (item) => {
+              if (state.stopRequested) return;
+              try {
+                const rr = await sendOneAndLog(item.c, gtextRef, {
+                  fastOnly: false,
+                  gidRetryPass: true,
+                  deferredCtx: makeGidRetryCtx(item.deferredCtx),
+                });
+                if (rr && !rr.ok && /Token/i.test(String(rr.error || ''))) {
+                  logLine('⛔ Dừng sớm vì token không còn hợp lệ.');
+                  state.stopRequested = true;
+                }
+              } catch (e) {
+                settleInternalError(item.c, e);
+              }
+            }, Math.min(24, Math.max(1, gidRetryQueue.length)));
+          }
+          const pass2RecoveredDelta = Math.max(0, gidStats.pass2Recovered - recoveredBefore);
+          const pass2StillDelta = Math.max(0, gidStats.pass2StillUnknown - stillBefore);
+          const pass2OtherDelta = Math.max(0, gidRetryQueue.length - pass2RecoveredDelta - pass2StillDelta);
+          logLine('🔁 Pass 2 globalId xong: cứu thêm ' + pass2RecoveredDelta
+            + ' chat, vẫn chưa rõ ' + pass2StillDelta + ' chat'
+            + (pass2OtherDelta ? ', chốt lỗi thường ' + pass2OtherDelta + ' chat' : '')
+            + ' (nhóm Pass 2 này: ' + gidRetryQueue.length
+            + ' chat; tổng đã xếp Pass 2 trong lượt: ' + gidStats.pass2Queued + ').');
+        } else if (gidRetryQueue.length && state.stopRequested) {
+          logLine('⏸ Đã dừng — bỏ Pass 2 globalId cho ' + gidRetryQueue.length + ' chat chưa dò được ID.');
+        }
+      } finally {
+        activeGidRetryQueue = null;
+        activeGidRetryIds = null;
+      }
     };
 
     const runWaves = async (gtext, list) => {
