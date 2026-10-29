@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE LITE
 // @namespace    salescript
-// @version      1.91.46
+// @version      1.91.47
 // @description  BOTFAKE — panel hiện mọi website; gửi/tải list qua extension background.
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -44,7 +44,7 @@
   /* ============================ HẰNG SỐ ============================ */
 
   const PANEL_ID = 'ssb-root';          // ssb = SaleScript Bulk — không đụng pk-*/adj-*/pancake-* của script khác
-  const APP_VERSION = '1.91.46';        // hiện ở tiêu đề panel — đối chiếu với @version trong header
+  const APP_VERSION = '1.91.47';        // hiện ở tiêu đề panel — đối chiếu với @version trong header
   const STYLE_ID = 'ssb-style';
 
   const MAX_NAME_LIST = 12;             // số tên hiển thị khi xác nhận
@@ -3710,12 +3710,15 @@
         // Chỉ kết luận khách khóa nick thật (deadUser) khi đã gửi bằng globalUserId thật (khác null, !ctx.gidFromPsid)
         const deadUser = !!globalUserId && (!ctx || !ctx.gidFromPsid)
           && /1545041|Người này hiện không có mặt|Không tìm thấy người dùng/i.test(String(why || ''));
-        // INCORRECT THREAD + KHÔNG có globalId thật: thread không với tới được bằng mọi
-        // định danh hiện có (Socket cũng không dò ra gid thật, API thì #10 ngoài cửa sổ) —
-        // kết luận "không cứu được", dừng ngay tại đây, không đốt thêm bước Socket/API.
-        // Ngược lại, ĐÃ có globalId thật mà vẫn INCORRECT THREAD thì không kết luận ở đây:
-        // Socket còn đường bắn bằng chính gid thật đó (tránh gửi sót).
-        const hopelessThread = !globalUserId && /INCORRECT THREAD/i.test(String(why || ''));
+        // INCORRECT THREAD + KHÔNG có globalId thật + khâu dò đã XÁC NHẬN không có gid
+        // (extFinderReturnedNull: chính Extension finder chạy xong và trả null — khách chết
+        // thật): kết luận "không cứu được", dừng ngay, không đốt thêm bước Socket/API.
+        // Nếu mới "chưa dò được" do nghẽn lane/timeout ở lô lớn (extFinderReturnedNull chưa
+        // set) thì KHÔNG kết luận ở đây: lệnh Ext lúc đó thiếu globalUserId nên không định
+        // vị được thread và báo INCORRECT THREAD oan — thread có thể hoàn toàn tồn tại
+        // (gửi lẻ là được), phải để kênh sau dò lại gid (tránh gửi sót).
+        const hopelessThread = !globalUserId && /INCORRECT THREAD/i.test(String(why || ''))
+          && !!(ctx && ctx.extFinderReturnedNull);
         if (!ownLock) releaseOutbound(conv.id);
         return { ok: false, sent: false, recipientUnavailable: deadUser || hopelessThread, error: errStr };
       }
@@ -4327,11 +4330,17 @@
       // Nếu vừa dùng from_psid phỏng đoán (ctx.gidFromPsid === true) hoặc lỗi thiếu globalId/thread_id:
       // bắt buộc mở khóa ctx.gidResolved = false để kênh kế tiếp dò lại global_id thật (nhỡ WebSocket
       // hoặc Extension vừa nạp xong), tuyệt đối không bắn tiếp bằng from_psid sai!
-      if ((ctx && ctx.gidFromPsid) || (conv.fromPsid && /globalId|thread_id/i.test(r.error || ''))) {
+      // Thêm ca: Ext INCORRECT THREAD khi CHƯA có globalId thật — nhiều khả năng khâu dò lần 1
+      // chỉ bị nghẽn lane/timeout ở lô lớn (Ext thiếu globalUserId nên không định vị được thread),
+      // không phải thread chết thật → mở khóa + cho dò lại từ đầu (gidDiscoveryRan = false),
+      // kênh kế tiếp có cơ hội lấy gid qua HTTP/WS khi lane đã thông hơn (gửi lẻ là được).
+      const incorrectThreadNoGid = /INCORRECT THREAD/i.test(r.error || '') && !(ctx && ctx.gid && !ctx.gidFromPsid);
+      if ((ctx && ctx.gidFromPsid) || (conv.fromPsid && /globalId|thread_id/i.test(r.error || '')) || incorrectThreadNoGid) {
         ctx.gidForceFind = true;
         ctx.gidResolved = false;
         ctx.gidFromPsid = false;
         ctx.gid = null;
+        if (incorrectThreadNoGid) ctx.gidDiscoveryRan = false;
       }
       if (r.error && r.error.indexOf('Token') === 0) {
         recycleUnusedFbId(pid0, ctx);
