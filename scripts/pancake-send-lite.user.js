@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE LITE
 // @namespace    salescript
-// @version      1.91.52
+// @version      1.91.51
 // @description  BOTFAKE — panel hiện mọi website; gửi/tải list qua extension background.
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -44,7 +44,7 @@
   /* ============================ HẰNG SỐ ============================ */
 
   const PANEL_ID = 'ssb-root';          // ssb = SaleScript Bulk — không đụng pk-*/adj-*/pancake-* của script khác
-  const APP_VERSION = '1.91.52';        // hiện ở tiêu đề panel — đối chiếu với @version trong header
+  const APP_VERSION = '1.91.51';        // hiện ở tiêu đề panel — đối chiếu với @version trong header
   const STYLE_ID = 'ssb-style';
 
   const MAX_NAME_LIST = 12;             // số tên hiển thị khi xác nhận
@@ -5386,7 +5386,7 @@
       if (isDoneAll && !batchStats.finalLogged && c.total > 0) {
         batchStats.finalLogged = true;
         try { localStorage.setItem(SUMMARY_LS_KEY, html); } catch (e) { /* ignore */ }
-        const finalLine = '📊 TỔNG HỢP CHỐT LƯỢT GỬI: ✅ Đã gửi thành công ' + c.okTotal + '/' + c.total
+        logLine('📊 TỔNG HỢP CHỐT LƯỢT GỬI: ✅ Đã gửi thành công ' + c.okTotal + '/' + c.total
           + ' tin (' + pct + '%)' + chStr
           + ' | ❌ Lỗi: ' + c.failTotal
           + (c.unsureTotal ? ' | ⚠ Không rõ: ' + c.unsureTotal : '')
@@ -5403,8 +5403,8 @@
           + ((sendDiag.sockRetry || sendDiag.photoRetry)
             ? ' | 🔂 Socket bắn lại sau rejected: ' + sendDiag.sockRetry + ' · bắn lại ảnh: ' + sendDiag.photoRetry
             : '')
-          + ' | ⏱ Tổng thời gian: ' + elapsedSec + 's';
-        const diagLine = '🧭 Chẩn đoán globalId: cache ' + gidStats.cacheHit
+          + ' | ⏱ Tổng thời gian: ' + elapsedSec + 's');
+        logLine('🧭 Chẩn đoán globalId: cache ' + gidStats.cacheHit
           + ' · HTTP ' + gidStats.httpHit
           + ' · WS ' + gidStats.wsHit
           + ' · Ext ' + gidStats.extHit
@@ -5414,18 +5414,7 @@
           + ' · lần dò chưa ra ' + gidStats.unknown
           + ' · batch nạp ' + gidStats.batchMappings + ' mapping'
           + ' · lane HTTP ' + ctxFetchLane.getLimit()
-          + ' / Ext ' + gidExtLane.getLimit();
-        // Một số callback nền chốt số TRƯỚC rồi mới ghi dòng kết quả của
-        // chính chat đó (vd Socket bắn-nhả bị FB từ chối). Nếu in TỔNG HỢP
-        // đồng bộ ngay tại đây, dòng chat cuối sẽ lọt xuống dưới TỔNG HỢP
-        // dù đã được đếm. Hoãn 2 dòng chốt sang task kế tiếp để mọi dòng
-        // cá nhân đồng bộ của callback hiện tại luôn nằm trên TỔNG HỢP.
-        const finalRun = runSeq;
-        setTimeout(() => {
-          if (finalRun !== runSeq || !batchStats.finalLogged) return;
-          logLine(finalLine);
-          logLine(diagLine);
-        }, 0);
+          + ' / Ext ' + gidExtLane.getLimit());
       }
     } catch (e) { /* ignore */ }
   }
