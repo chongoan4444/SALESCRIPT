@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE LITE
 // @namespace    salescript
-// @version      1.91.48
+// @version      1.91.49
 // @description  BOTFAKE — panel hiện mọi website; gửi/tải list qua extension background.
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -44,7 +44,7 @@
   /* ============================ HẰNG SỐ ============================ */
 
   const PANEL_ID = 'ssb-root';          // ssb = SaleScript Bulk — không đụng pk-*/adj-*/pancake-* của script khác
-  const APP_VERSION = '1.91.48';        // hiện ở tiêu đề panel — đối chiếu với @version trong header
+  const APP_VERSION = '1.91.49';        // hiện ở tiêu đề panel — đối chiếu với @version trong header
   const STYLE_ID = 'ssb-style';
 
   const MAX_NAME_LIST = 12;             // số tên hiển thị khi xác nhận
@@ -3756,6 +3756,16 @@
     if (platform !== 'facebook') {
       return { ok: false, error: 'Extension chỉ áp dụng cho Facebook ở chế độ này', skipExt: true };
     }
+    // Extension đang trong giờ nghỉ hồi sức (timeout liên tiếp): bỏ qua NGAY từ
+    // đầu, khỏi tốn khâu chuẩn bị/upload rồi lại xếp hàng chờ vô ích. Chat này
+    // chưa hề bắn lệnh Ext nào nên chuyển Socket/API là an toàn, không trùng.
+    if (isExtBreakerOpen()) {
+      extTimeoutStats.skipped++;
+      return {
+        ok: false, sent: false, skipExt: true, extBreakerOpen: true,
+        error: 'Extension đang quá tải (đang nghỉ hồi sức) — tạm bỏ qua Ext để thử kênh khác',
+      };
+    }
     const full = await ctxFull(conv, ctx);
     if (!full) return { ok: false, error: 'Không lấy được thông tin đoạn chat' };
     const pageId = full.page_id || conv.pageId || String(conv.id).split('_')[0];
@@ -3826,6 +3836,8 @@
     // đúng shape app: chỉ có files/photoUrl khi gửi ảnh (text-only: app để undefined → bỏ key)
     if (files) payload.files = files;
     if (photo) payload.photoUrl = photo.url;
+    let extSendPermit = null;
+    let extSendStartedAt = 0;
     try {
       // Tách bước chuẩn bị HTTP (ctxFull + uploadPhotoForPage + resolveGlobalId chạy ở extPrepLane)
       // khỏi bước bắn Extension thật (extSendLane): khi vào adapter.send là đã có sẵn
@@ -3835,17 +3847,52 @@
       // và trả ok GIẢ (dup-block) trong khi ảnh chưa hề được gửi.
       const ownLock = !!(ctx && ctx.ownsOutbound);
       if (!ownLock && !acquireOutbound(conv.id)) return dupBlockedResult(conv.id);
-      const res = await extSendLane(() => adapter.send(payload, { timeout: 35000 }));
+      extSendPermit = await acquireExtSendPermit();
+      if (!extSendPermit) {
+        if (!ownLock) releaseOutbound(conv.id);
+        if (state.stopRequested) return { ok: false, sent: false, error: 'Đã dừng' };
+        extTimeoutStats.skipped++;
+        return {
+          ok: false, sent: false, skipExt: true, extBreakerOpen: true,
+          error: 'Extension đang quá tải (đang nghỉ hồi sức) — tạm bỏ qua Ext để thử kênh khác',
+        };
+      }
+      const res = await extSendLane(() => {
+        // Bộ ngắt vừa mở trong lúc lệnh này còn chờ lane: HỦY TRƯỚC KHI BẮN.
+        // Chưa hề có lệnh nào tới Extension nên hủy ở đây không thể gây trùng.
+        if (!extSendPermit.probe && isExtBreakerOpen()) {
+          return {
+            ok: false, sent: false, extBreakerSkipped: true,
+            error: 'Extension đang quá tải — đã hủy lệnh Ext trước khi bắn',
+          };
+        }
+        extSendStartedAt = Date.now();
+        return adapter.send(payload, { timeout: 35000 });
+      });
+      if (res && res.extBreakerSkipped) {
+        releaseExtSendPermit(extSendPermit);
+        if (!ownLock) releaseOutbound(conv.id);
+        extTimeoutStats.skipped++;
+        return {
+          ok: false, sent: false, skipExt: true, extBreakerOpen: true,
+          error: res.error,
+        };
+      }
       if (res && res.ok === false && res.sent === false && res.error) {
         if (String(res.error).indexOf('Lỗi kênh:') === 0) {
           // adapter.send VĂNG exception (lane bọc thành 'Lỗi kênh:…') — không rõ đã bắn
           // hay chưa (có thể văng SAU khi gửi) → "không rõ", cấm kênh khác bắn lần 2 (LẶP)
+          noteExtSendOutcome('timeout', extSendPermit);
+          extTimeoutStats.timeout++;
+          if (!ownLock) scheduleExtTimeoutVerify(conv, text, photo, extSendStartedAt);
           return { ok: false, sent: 'maybe', error: 'Extension lỗi giữa chừng — không gửi thêm để tránh trùng' };
         }
+        releaseExtSendPermit(extSendPermit);
         if (!ownLock) releaseOutbound(conv.id);
         return { ok: false, sent: false, error: res.error };
       }
       if (res && res.success) {
+        noteExtSendOutcome('responded', extSendPermit);
         // HỌC THEO app (onSuccess → update_global_id): globalUserId extension trả về có thể ĐÚNG
         // hơn giá trị mình đoán (có khách globalId là FBID 1000… chứ không phải PSID) — cache lại
         // theo conv id + báo update_global_id lên server để các lần gửi sau có sẵn trong DB
@@ -3883,7 +3930,11 @@
         if (!why) {
           // success:false mà KHÔNG kèm lý do = đúng hình dạng adapter trả khi HẾT GIỜ chờ
           // (setTimeout trong __ExtensionAdapter__.send) — Extension có thể ĐÃ gửi rồi mà
-          // phản hồi về chậm. Kết luận "chưa gửi" ở đây là bắn lần 2 (LẶP) → phải là "không rõ"
+          // phản hồi về chậm. Kết luận "chưa gửi" ở đây là bắn lần 2 (LẶP) → phải là "không rõ".
+          // Chỉ đăng ký kiểm chứng bằng lịch sử tin; không bắn kênh khác cho chat này.
+          noteExtSendOutcome('timeout', extSendPermit);
+          extTimeoutStats.timeout++;
+          if (!ownLock) scheduleExtTimeoutVerify(conv, text, photo, extSendStartedAt);
           return { ok: false, sent: 'maybe', error: 'Extension không phản hồi (quá hạn) — không gửi thêm để tránh trùng' };
         }
         const errStr = 'Extension không gửi được' + (why ? ' (' + why + ')' : '');
@@ -3896,6 +3947,7 @@
         // không có gid", nên ca này là GID CHƯA RÕ → kênh sau/Pass 2 dò lại, không
         // được kết luận recipientUnavailable.
         const gidUnknownThread = !globalUserId && /INCORRECT THREAD/i.test(String(why || ''));
+        noteExtSendOutcome('responded', extSendPermit);
         if (!ownLock) releaseOutbound(conv.id);
         return {
           ok: false, sent: false,
@@ -3906,8 +3958,18 @@
         };
       }
       // không có phản hồi (timeout/hủy) → extension có thể đã gửi → KHÔNG rõ
+      noteExtSendOutcome('timeout', extSendPermit);
+      extTimeoutStats.timeout++;
+      if (!ownLock) scheduleExtTimeoutVerify(conv, text, photo, extSendStartedAt);
       return { ok: false, sent: 'maybe', error: 'Extension không phản hồi' };
     } catch (e) {
+      if (extSendPermit) {
+        noteExtSendOutcome(extSendStartedAt ? 'timeout' : 'other', extSendPermit);
+        if (extSendStartedAt) {
+          extTimeoutStats.timeout++;
+          if (!ctx.ownsOutbound) scheduleExtTimeoutVerify(conv, text, photo, extSendStartedAt);
+        }
+      }
       return { ok: false, sent: 'maybe', error: 'Extension lỗi: ' + (e && e.message || e) };
     }
   }
@@ -4313,6 +4375,86 @@
   const extPrepLane = makeLane(PREP_PARALLEL_EXT);
   const extSendLane = makeLane(BUS_PARALLEL_EXT);
   const extLane = extPrepLane;
+
+  // ===== BỘ NGẮT SỨC KHỎE EXTENSION KHI GỬI (CIRCUIT BREAKER) =====
+  // Mọi lệnh REPLY_INBOX_PHOTO đều đi qua đúng 1 Pancake Extension. Nếu Extension
+  // nghẽn/mất phản hồi mà vẫn tiếp tục nạp lệnh, mỗi lệnh giữ lane 35s rồi timeout
+  // theo cụm 6 — đúng cảnh cả nghìn chat phía sau bị "khung delay" ăn hết thời gian.
+  // Sau 3 timeout liên tiếp: NGỪNG nạp thêm lệnh Ext trong 45s (tăng dần tối đa
+  // 180s), chat chưa bắn Ext sẽ đi Socket/API ngay hoặc chờ Pass 2. Hết giờ nghỉ
+  // chỉ cho 1 lệnh THĂM DÒ; có phản hồi thì mở lại, timeout tiếp thì nghỉ tiếp.
+  // Lệnh đã bắn rồi mà timeout vẫn là "không rõ" — chỉ kiểm chứng bằng lịch sử
+  // tin, TUYỆT ĐỐI không bắn lại mò (lệnh gốc có thể vẫn nằm trong Extension).
+  const EXT_SEND_BREAKER_THRESHOLD = 3;
+  const EXT_SEND_BREAKER_BASE_MS = 45000;
+  const EXT_SEND_BREAKER_MAX_MS = 180000;
+  const extSendCtl = { timeoutStreak: 0, openUntil: 0, openStreak: 0, probeInFlight: false, probeToken: 0 };
+  function isExtBreakerOpen() {
+    return Date.now() < extSendCtl.openUntil;
+  }
+  async function acquireExtSendPermit() {
+    while (!state.stopRequested) {
+      const now = Date.now();
+      if (now < extSendCtl.openUntil) return null; // đang nghỉ hồi sức — bỏ qua Ext ngay
+      if (extSendCtl.probeInFlight) { await sleep(250); continue; } // chờ kết quả lệnh thăm dò
+      if (extSendCtl.openUntil) {
+        extSendCtl.probeInFlight = true;
+        extSendCtl.probeToken++;
+        return { probe: true, token: extSendCtl.probeToken };
+      }
+      return { probe: false, token: 0 };
+    }
+    return null;
+  }
+  function releaseExtSendPermit(permit) {
+    if (permit && permit.probe && extSendCtl.probeToken === permit.token) {
+      extSendCtl.probeInFlight = false;
+    }
+  }
+  function noteExtSendOutcome(kind, permit) {
+    try {
+      const now = Date.now();
+      if (kind === 'responded') {
+        // Extension CÓ trả lời (dù thành công hay báo lỗi rõ ràng) = còn sống.
+        extSendCtl.timeoutStreak = 0;
+        if (permit && permit.probe) {
+          releaseExtSendPermit(permit);
+          extSendCtl.openUntil = 0;
+          extSendCtl.openStreak = 0;
+          logLine('🟢 Extension đã phản hồi lại — đóng bộ ngắt quá tải, gửi qua Ext bình thường.');
+        } else if (!extSendCtl.probeInFlight && extSendCtl.openUntil && now >= extSendCtl.openUntil) {
+          extSendCtl.openUntil = 0;
+          extSendCtl.openStreak = 0;
+        }
+        return;
+      }
+      if (kind !== 'timeout') { releaseExtSendPermit(permit); return; }
+      // Đang có lệnh thăm dò quyết định sức khỏe: kết quả của các lệnh thường
+      // phát ra từ trước lúc mở ngắt không được tự ý mở/đóng ngắt nữa.
+      if (!permit || !permit.probe) {
+        if (extSendCtl.probeInFlight) return;
+      }
+      if (permit && permit.probe) {
+        releaseExtSendPermit(permit);
+        extSendCtl.openStreak = Math.min(4, (extSendCtl.openStreak || 0) + 1);
+        const backoffMs = Math.min(EXT_SEND_BREAKER_MAX_MS,
+          EXT_SEND_BREAKER_BASE_MS * Math.pow(2, extSendCtl.openStreak - 1));
+        extSendCtl.openUntil = now + backoffMs;
+        extSendCtl.timeoutStreak = 0;
+        logLine('🧯 Extension vẫn không phản hồi ở lệnh thăm dò — tạm ngừng bắn Ext '
+          + Math.round(backoffMs / 1000) + 's; chat sau đi Socket/API hoặc chờ Pass 2.');
+        return;
+      }
+      extSendCtl.timeoutStreak++;
+      if (extSendCtl.timeoutStreak >= EXT_SEND_BREAKER_THRESHOLD && !isExtBreakerOpen()) {
+        extSendCtl.openStreak = 1;
+        extSendCtl.openUntil = now + EXT_SEND_BREAKER_BASE_MS;
+        extSendCtl.timeoutStreak = 0;
+        logLine('🧯 Extension không phản hồi ' + EXT_SEND_BREAKER_THRESHOLD
+          + ' lần liên tiếp — tạm ngừng bắn Ext 45s để tránh cả nghìn lệnh cùng chờ 35s; chat sau sẽ thử Socket/API trước.');
+      }
+    } catch (e) { releaseExtSendPermit(permit); }
+  }
   const socketLane = makeLane(BUS_PARALLEL_SOCKET);
   const pageSocketLanes = {};
   function getPageSocketLane(pageId) {
@@ -5116,6 +5258,8 @@
   const sockVerifyPending = {}; // convId → runSeq đang có kiểm chứng chờ (chống đăng ký trùng)
   const sockVerifyFired = {}; // convId → runSeq đã bắn cứu sau kiểm chứng (mỗi lượt tối đa 1 lần/chat)
   const verifyStats = { found: 0, fired: 0, unknown: 0 }; // theo lượt — in ở dòng TỔNG HỢP
+  const extVerifyPending = {}; // convId → runSeq đang chờ kiểm chứng sau khi Ext timeout
+  const extTimeoutStats = { timeout: 0, skipped: 0, found: 0, notFound: 0, unknown: 0 }; // theo lượt — in ở dòng TỔNG HỢP
   let bgWatchdogTimer = null;
   const BG_SETTLE_DEADLINE_MS = 90000;
   function noteBgPending(conv, via) {
@@ -5200,7 +5344,8 @@
     const skipLateTotal = summaryCounters.skipLate;
     const settled = okTotal + failTotal + unsureTotal + skipLateTotal;
     const verifyPendingNow = Object.keys(sockVerifyPending).filter((id) => sockVerifyPending[id] === runSeq).length;
-    const pending = Math.max(0, (batchStats.total || 0) - settled) + verifyPendingNow;
+    const extVerifyPendingNow = Object.keys(extVerifyPending).filter((id) => extVerifyPending[id] === runSeq).length;
+    const pending = Math.max(0, (batchStats.total || 0) - settled) + verifyPendingNow + extVerifyPendingNow;
     return {
       total: batchStats.total || 0,
       okTotal, okApi, okExt, okSocket,
@@ -5253,6 +5398,9 @@
             : '')
           + ((verifyStats.found || verifyStats.fired || verifyStats.unknown)
             ? ' | 🔎 Kiểm chứng ACK: đã đến nơi ' + verifyStats.found + ' · bắn cứu ' + verifyStats.fired + ' · không kiểm chứng được ' + verifyStats.unknown
+            : '')
+          + ((extTimeoutStats.timeout || extTimeoutStats.skipped || extTimeoutStats.found || extTimeoutStats.notFound || extTimeoutStats.unknown)
+            ? ' | 🧯 Ext quá hạn ' + extTimeoutStats.timeout + ' · kiểm chứng thấy tin ' + extTimeoutStats.found + ' · chưa thấy tin ' + extTimeoutStats.notFound + ' · không kiểm chứng được ' + extTimeoutStats.unknown + ' · bỏ qua lúc Ext quá tải ' + extTimeoutStats.skipped
             : '')
           + ((sendDiag.sockRetry || sendDiag.photoRetry)
             ? ' | 🔂 Socket bắn lại sau rejected: ' + sendDiag.sockRetry + ' · bắn lại ảnh: ' + sendDiag.photoRetry
@@ -5586,6 +5734,80 @@
     }, SOCK_VERIFY_DELAY_MS);
   }
 
+  // KIỂM CHỨNG SAU KHI EXTENSION TIMEOUT: lệnh Ext đã phát đi nhưng adapter
+  // không trả phản hồi. Khác Socket mất ACK, lệnh Ext gốc vẫn có thể nằm trong
+  // hàng đợi của Extension và đi sau đó — vì vậy kiểm chứng này CHỈ được phép
+  // lật ⚠ thành ✅ khi thấy đúng tin trong lịch sử. Không thấy tin thì vẫn giữ
+  // ⚠, không bắn cứu, không mở khóa outbound (tránh trùng tuyệt đối).
+  const EXT_VERIFY_DELAY_MS = 20000; // sau mốc adapter timeout 35s → tổng phân xử khoảng 55–60s
+  function scheduleExtTimeoutVerify(conv, text, photo, sentAtMs) {
+    if (!conv || !conv.id || !sentAtMs) return;
+    const want = normalizeMsgText(text);
+    if (!want) return; // ảnh trơ/không có chữ: không có bằng chứng đủ mạnh để khớp
+    if (extVerifyPending[conv.id]) return;
+    if (deliveredIds[conv.id] || finalFailedIds[conv.id]) return;
+    const myRun = runSeq;
+    extVerifyPending[conv.id] = myRun;
+    const nm = conv.name || conv.id;
+    const delayMs = EXT_VERIFY_DELAY_MS + Math.floor(Math.random() * 5000); // rải nhịp khi timeout theo cụm
+    setTimeout(async () => {
+      try {
+        if (myRun !== runSeq) return;
+        if (state.stopRequested) return;
+        if (deliveredIds[conv.id] || finalFailedIds[conv.id]) return;
+        let f = null;
+        try { f = peekConv(conv); } catch (e) { f = null; }
+        if (!f || !(f.page_id || f.pageId)) {
+          try { f = await ctxFull(conv, {}); } catch (e) { f = null; }
+        }
+        f = f || conv;
+        const pageId = f.page_id || f.pageId || conv.pageId || String(conv.id || '').split('_')[0];
+        const convId = f.id || conv.id;
+        const custId = String(f.customerId || conv.customerId
+          || (f.customers && f.customers[0] && f.customers[0].id)
+          || (conv.customers && conv.customers[0] && conv.customers[0].id) || '');
+        if (!pageId) { extTimeoutStats.unknown++; return; }
+        const url = apiBase() + '/v1/pages/' + pageId
+          + '/conversations/' + encodeURIComponent(convId)
+          + '/messages?customer_id=' + encodeURIComponent(custId)
+          + '&user_view=true&is_new_api=true&separate_pos=true';
+        const res = await ctxFetchLane(() => fetchJson(url, 1, { timeoutMs: 8000 }));
+        if (!res || !res.ok || !res.data || res.data.success === false) {
+          extTimeoutStats.unknown++;
+          return;
+        }
+        const msgs = res.data.messages || (res.data.data && res.data.data.messages) || null;
+        if (!Array.isArray(msgs)) { extTimeoutStats.unknown++; return; }
+        const found = msgs.some((m) => {
+          if (!m || m.is_removed) return false;
+          if (!m.from || String(m.from.id) !== String(pageId)) return false; // chỉ tin DO PAGE gửi
+          if (photo && !(Array.isArray(m.attachments) && m.attachments.length)) return false;
+          if (normalizeMsgText(m.message) !== want) return false;
+          const rawT = String(m.inserted_at || '');
+          if (!rawT) return false; // không có mốc giờ → bằng chứng yếu, không tính
+          const t = Date.parse(/[zZ+]|\\+\\d{2}:?\\d{2}$/.test(rawT) ? rawT : rawT + 'Z');
+          if (isNaN(t)) return false;
+          if (t < sentAtMs - 60000) return false; // tin cũ cùng nội dung — không tính
+          return true;
+        });
+        if (found) {
+          extTimeoutStats.found++;
+          markDelivered(conv.id, 'ext');
+          try { postSendSideEffects(conv); } catch (e) { /* ignore */ }
+          logLine('🔎 ' + nm + ' — kiểm chứng Ext: tin ĐÃ đến nơi dù Extension không trả phản hồi — tính ✅ Ext');
+          return;
+        }
+        extTimeoutStats.notFound++;
+        // Không log từng ca "chưa thấy" để tránh ngập log khi timeout theo cụm;
+        // số tổng nằm ở dòng TỔNG HỢP. Vẫn giữ ⚠ và không bắn lại.
+      } catch (e) {
+        extTimeoutStats.unknown++;
+      } finally {
+        delete extVerifyPending[conv.id];
+      }
+    }, delayMs);
+  }
+
   // Nhóm chat theo NỘI DUNG sẽ gửi: chat thuộc câu nào → ĐÚNG chữ của câu đó;
   // chat lẻ (không thuộc câu nào) → câu đang gõ trên ô textarea. Trả về [{text, list}].
   function buildSendGroups(matches, savedLists, typedText) {
@@ -5691,6 +5913,9 @@
     batchStats.loopFinished = false;
     buStats.ok = 0; buStats.cancelled = 0; buStats.byWhy = {};
     verifyStats.found = 0; verifyStats.fired = 0; verifyStats.unknown = 0;
+    extTimeoutStats.timeout = 0; extTimeoutStats.skipped = 0; extTimeoutStats.found = 0;
+    extTimeoutStats.notFound = 0; extTimeoutStats.unknown = 0;
+    extSendCtl.probeInFlight = false; // lượt mới không được kẹt bởi thăm dò của lượt cũ đã dừng
     resetGidStats();
     sendDiag.sockRetry = 0; sendDiag.photoRetry = 0;
     batchStats.finalLogged = false;
