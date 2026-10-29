@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE LITE
 // @namespace    salescript
-// @version      1.91.54
+// @version      1.91.55
 // @description  BOTFAKE — panel hiện mọi website; gửi/tải list qua extension background.
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -44,7 +44,7 @@
   /* ============================ HẰNG SỐ ============================ */
 
   const PANEL_ID = 'ssb-root';          // ssb = SaleScript Bulk — không đụng pk-*/adj-*/pancake-* của script khác
-  const APP_VERSION = '1.91.54';        // hiện ở tiêu đề panel — đối chiếu với @version trong header
+  const APP_VERSION = '1.91.55';        // hiện ở tiêu đề panel — đối chiếu với @version trong header
   const STYLE_ID = 'ssb-style';
 
   const MAX_NAME_LIST = 12;             // số tên hiển thị khi xác nhận
@@ -3957,7 +3957,7 @@
         if (String(res.error).indexOf('Lỗi kênh:') === 0) {
           // adapter.send VĂNG exception (lane bọc thành 'Lỗi kênh:…') — không rõ đã bắn
           // hay chưa (có thể văng SAU khi gửi) → "không rõ", cấm kênh khác bắn lần 2 (LẶP)
-          noteExtSendOutcome('timeout', extSendPermit);
+          noteExtSendOutcome('timeout', extSendPermit, extSendStartedAt ? Date.now() - extSendStartedAt : null);
           extTimeoutStats.timeout++;
           if (!ownLock) scheduleExtTimeoutVerify(conv, text, photo, extSendStartedAt);
           return { ok: false, sent: 'maybe', error: 'Extension lỗi giữa chừng — không gửi thêm để tránh trùng' };
@@ -3967,7 +3967,7 @@
         return { ok: false, sent: false, error: res.error };
       }
       if (res && res.success) {
-        noteExtSendOutcome('responded', extSendPermit);
+        noteExtSendOutcome('responded', extSendPermit, extSendStartedAt ? Date.now() - extSendStartedAt : null);
         // HỌC THEO app (onSuccess → update_global_id): globalUserId extension trả về có thể ĐÚNG
         // hơn giá trị mình đoán (có khách globalId là FBID 1000… chứ không phải PSID) — cache lại
         // theo conv id + báo update_global_id lên server để các lần gửi sau có sẵn trong DB
@@ -4007,7 +4007,7 @@
           // (setTimeout trong __ExtensionAdapter__.send) — Extension có thể ĐÃ gửi rồi mà
           // phản hồi về chậm. Kết luận "chưa gửi" ở đây là bắn lần 2 (LẶP) → phải là "không rõ".
           // Chỉ đăng ký kiểm chứng bằng lịch sử tin; không bắn kênh khác cho chat này.
-          noteExtSendOutcome('timeout', extSendPermit);
+          noteExtSendOutcome('timeout', extSendPermit, extSendStartedAt ? Date.now() - extSendStartedAt : null);
           extTimeoutStats.timeout++;
           if (!ownLock) scheduleExtTimeoutVerify(conv, text, photo, extSendStartedAt);
           return { ok: false, sent: 'maybe', error: 'Extension không phản hồi (quá hạn) — không gửi thêm để tránh trùng' };
@@ -4025,7 +4025,7 @@
         // không có gid", nên ca này là GID CHƯA RÕ → kênh sau/Pass 2 dò lại, không
         // được kết luận recipientUnavailable.
         const gidUnknownThread = !globalUserId && /INCORRECT THREAD/i.test(String(why || ''));
-        noteExtSendOutcome('responded', extSendPermit);
+        noteExtSendOutcome('responded', extSendPermit, extSendStartedAt ? Date.now() - extSendStartedAt : null);
         if (!ownLock) releaseOutbound(conv.id);
         return {
           ok: false, sent: false,
@@ -4036,13 +4036,13 @@
         };
       }
       // không có phản hồi (timeout/hủy) → extension có thể đã gửi → KHÔNG rõ
-      noteExtSendOutcome('timeout', extSendPermit);
+      noteExtSendOutcome('timeout', extSendPermit, extSendStartedAt ? Date.now() - extSendStartedAt : null);
       extTimeoutStats.timeout++;
       if (!ownLock) scheduleExtTimeoutVerify(conv, text, photo, extSendStartedAt);
       return { ok: false, sent: 'maybe', error: 'Extension không phản hồi' };
     } catch (e) {
       if (extSendPermit) {
-        noteExtSendOutcome(extSendStartedAt ? 'timeout' : 'other', extSendPermit);
+        noteExtSendOutcome(extSendStartedAt ? 'timeout' : 'other', extSendPermit, extSendStartedAt ? Date.now() - extSendStartedAt : null);
         if (extSendStartedAt) {
           extTimeoutStats.timeout++;
           if (!ctx.ownsOutbound) scheduleExtTimeoutVerify(conv, text, photo, extSendStartedAt);
@@ -4264,7 +4264,9 @@
   //  • photoUploadLane (96 luồng): điều tiết POST /contents/facebook (reusable=false) riêng cho từng chat.
   //  • gidExtLane (thích ứng 8, dải 3–16): điều tiết GET_GLOBAL_ID_FOR_CONV khi HTTP/WS chưa có global_id.
   //  • extPrepLane (160 luồng): chuẩn bị chung cho các chat CHƯA có sẵn global_id trong RAM.
-  //  • extSendLane (6 luồng): bắn REPLY_INBOX_PHOTO qua Extension khi đã cầm đủ payload.
+  //  • extSendLane (thích ứng 6, dải 6–16): bắn REPLY_INBOX_PHOTO qua Extension khi đã cầm đủ payload.
+  //    Tự tăng khi Extension trả nhanh/rõ liên tục, tự giảm khi timeout (AIMD trong noteExtSendOutcome);
+  //    bộ ngắt quá tải 3-timeout vẫn giữ nguyên vai trò bảo vệ phía trên lane này.
   //  • getPageSocketLane (24 luồng/page): điều tiết số frame /ls_req in-flight trên mỗi kết nối WebSocket
   //    của từng fanpage (tránh vượt ngưỡng burst của edge-chat.facebook.com gây markOptimisticMessageFailed).
   //  • sideEffectLane (4 luồng): điều tiết các request phụ nền (fill_admin_name, update_global_id).
@@ -4281,7 +4283,9 @@
   const GID_EXT_MIN = 3;
   const GID_EXT_MAX = 16;
   const PREP_PARALLEL_EXT = 160;  // số chat chưa có global_id chuẩn bị HTTP/WS song song (không bị chặn bởi gidExtLane)
-  const BUS_PARALLEL_EXT = 6;     // số lệnh adapter.send (REPLY_INBOX_PHOTO) chạy song song
+  const BUS_PARALLEL_EXT = 6;     // số lệnh adapter.send (REPLY_INBOX_PHOTO) chạy song song — điểm bắt đầu của làn thích ứng Ext
+  const EXT_SEND_MIN = 6;         // sàn làn Ext gửi: không thấp hơn mức đã kiểm chứng ổn định
+  const EXT_SEND_MAX = 16;        // trần làn Ext gửi: chỉ đạt khi Extension trả nhanh/rõ liên tục
   const BUS_PARALLEL_SOCKET = 64; // số frame Socket (/ls_req) in-flight trên mỗi kết nối WebSocket (kèm giãn nhịp 2ms chống burst; vẫn giữ retry + socketRejectStreak bảo vệ)
   const SIDE_EFFECT_PARALLEL = 4; // số request nền (fill_admin_name / update_global_id) chạy song song
   function makeLane(parallel) {
@@ -4451,7 +4455,7 @@
     return false;
   }
   const extPrepLane = makeLane(PREP_PARALLEL_EXT);
-  const extSendLane = makeLane(BUS_PARALLEL_EXT);
+  const extSendLane = makeAdaptiveLane(BUS_PARALLEL_EXT, EXT_SEND_MIN, EXT_SEND_MAX);
   const extLane = extPrepLane;
 
   // ===== BỘ NGẮT SỨC KHỎE EXTENSION KHI GỬI (CIRCUIT BREAKER) =====
@@ -4466,7 +4470,7 @@
   const EXT_SEND_BREAKER_THRESHOLD = 3;
   const EXT_SEND_BREAKER_BASE_MS = 45000;
   const EXT_SEND_BREAKER_MAX_MS = 180000;
-  const extSendCtl = { timeoutStreak: 0, openUntil: 0, openStreak: 0, probeInFlight: false, probeToken: 0 };
+  const extSendCtl = { timeoutStreak: 0, openUntil: 0, openStreak: 0, probeInFlight: false, probeToken: 0, fastStreak: 0 };
   function isExtBreakerOpen() {
     return Date.now() < extSendCtl.openUntil;
   }
@@ -4489,12 +4493,25 @@
       extSendCtl.probeInFlight = false;
     }
   }
-  function noteExtSendOutcome(kind, permit) {
+  function noteExtSendOutcome(kind, permit, latencyMs) {
     try {
       const now = Date.now();
       if (kind === 'responded') {
         // Extension CÓ trả lời (dù thành công hay báo lỗi rõ ràng) = còn sống.
         extSendCtl.timeoutStreak = 0;
+        // AIMD làn Ext gửi: trả nhanh (<3s) liên tục 24 lần → tăng +2 slot (tối đa 16).
+        // Trả chậm dù rõ ràng → reset chuỗi tăng, giữ nguyên limit hiện tại.
+        if (latencyMs != null) {
+          if (latencyMs < 3000) {
+            extSendCtl.fastStreak++;
+            if (extSendCtl.fastStreak >= 24) {
+              extSendCtl.fastStreak = 0;
+              extSendLane.setLimit(extSendLane.getLimit() + 2);
+            }
+          } else {
+            extSendCtl.fastStreak = 0;
+          }
+        }
         if (permit && permit.probe) {
           releaseExtSendPermit(permit);
           extSendCtl.openUntil = 0;
@@ -4507,6 +4524,10 @@
         return;
       }
       if (kind !== 'timeout') { releaseExtSendPermit(permit); return; }
+      // Timeout = Extension đang ì: cắt chuỗi tăng + giảm ngay limit làn Ext gửi
+      // (×0.6, sàn 6) trước cả khi bộ ngắt 3-timeout kịp mở.
+      extSendCtl.fastStreak = 0;
+      extSendLane.setLimit(extSendLane.getLimit() * 0.6);
       // Đang có lệnh thăm dò quyết định sức khỏe: kết quả của các lệnh thường
       // phát ra từ trước lúc mở ngắt không được tự ý mở/đóng ngắt nữa.
       if (!permit || !permit.probe) {
@@ -5514,7 +5535,8 @@
           + ' · Ext trả không có gid ' + gidStats.extRespondedNoGid
           + ' · gate bỏ Ext no-gid ' + gidStats.gateSkip
           + ' · lane HTTP ' + ctxFetchLane.getLimit()
-          + ' / Ext ' + gidExtLane.getLimit());
+          + ' / Ext dò ' + gidExtLane.getLimit()
+          + ' / Ext gửi ' + extSendLane.getLimit());
       }
     } catch (e) { /* ignore */ }
   }
