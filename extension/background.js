@@ -315,8 +315,12 @@ async function pancakeCookieJar(url) {
 
 function urlWithJwt(url, jwt) {
   if (!jwt) return url;
+  const enc = encodeURIComponent(jwt);
   if (/access_token=cookie_session/.test(url)) {
-    return url.replace(/access_token=cookie_session/, 'access_token=' + encodeURIComponent(jwt));
+    return url.replace(/access_token=cookie_session/, 'access_token=' + enc);
+  }
+  if (!/[?&]access_token=/.test(url)) {
+    return url + (url.indexOf('?') > -1 ? '&' : '?') + 'access_token=' + enc;
   }
   return url;
 }
