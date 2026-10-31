@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE LITE
 // @namespace    salescript
-// @version      1.91.56
+// @version      1.91.57
 // @description  BOTFAKE — panel hiện mọi website; gửi/tải list qua extension background.
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -44,7 +44,7 @@
   /* ============================ HẰNG SỐ ============================ */
 
   const PANEL_ID = 'ssb-root';          // ssb = SaleScript Bulk — không đụng pk-*/adj-*/pancake-* của script khác
-  const APP_VERSION = '1.91.56';        // hiện ở tiêu đề panel — đối chiếu với @version trong header
+  const APP_VERSION = '1.91.57';        // hiện ở tiêu đề panel — đối chiếu với @version trong header
   const STYLE_ID = 'ssb-style';
 
   const MAX_NAME_LIST = 12;             // số tên hiển thị khi xác nhận
@@ -2995,9 +2995,11 @@
           } else {
             // Bằng chứng từ _app @903213: null của findGlobalIdForConv bao gồm cả
             // mất kết nối/success:false/exception nên mọi null đều là CHƯA RÕ.
+            // Tuy nhiên nếu Extension ĐÃ phản hồi rõ ràng (extFinderRespondedNoGid = true),
+            // thì về mặt sức khỏe làn, Extension vẫn phản hồi tốt (responded = true).
             if (!alreadySettled) {
               gidStats.extUnknown++;
-              if ((source || 'ext') === 'ext') noteGidExtResult(false, false, elapsedMs);
+              if ((source || 'ext') === 'ext') noteGidExtResult(!!extFinderRespondedNoGid, false, elapsedMs);
             }
             cutWsShort();
             resolve(null);
@@ -3150,7 +3152,7 @@
       const ccEntry = key ? convCtxCache[key] : null;
       const httpOkNoGid = !!((ctx.httpState === 'ok-no-gid' || ctx.gidDiscoveryState === 'server-no-gid')
         || (ccEntry && ccEntry.fetched && !ccEntry.gid));
-      const batchSettled = !!(pageId && batchGidFetchedPages[pageId] && !batchGidPromises[pageId]);
+      const batchSettled = !!(pageId && !batchGidPromises[pageId]);
       if (isLargeBatch && httpOkNoGid && batchSettled && extFinderRespondedNoGid) {
         ctx.noGidConfirmedByExt = true;
         ctx.gidGateSkipExt = true;
@@ -3654,8 +3656,8 @@
         if (deliveredIds[conv.id]) return { ok: true, id: gid, sendBy: 'socket', sent: true };
         ctx.socketRetriedOnce = true;
         sendDiag.sockRetry++;
-        await sleep(100);
-        // Kiểm tra xem trong 100ms đó WebSocket threadMappingStoreV2 có nạp được global_id mới hơn không
+        await sleep(350 + Math.floor(Math.random() * 250));
+        // Kiểm tra xem trong nhịp nghỉ đó WebSocket threadMappingStoreV2 có nạp được global_id mới hơn không
         if (threadId && pageId) {
           try {
             const sk2 = helper.SOCKETS && helper.SOCKETS[pageId];
@@ -4320,15 +4322,15 @@
   const CTX_FETCH_MIN = 8;
   const CTX_FETCH_MAX = 64;
   const PHOTO_UPLOAD_PARALLEL = 96;
-  const GID_EXT_INITIAL = 8;
-  const GID_EXT_MIN = 3;
-  const GID_EXT_MAX = 16;
+  const GID_EXT_INITIAL = 12;
+  const GID_EXT_MIN = 4;
+  const GID_EXT_MAX = 24;
   const PREP_PARALLEL_EXT = 160;  // số chat chưa có global_id chuẩn bị HTTP/WS song song (không bị chặn bởi gidExtLane)
-  const BUS_PARALLEL_EXT = 6;     // số lệnh adapter.send (REPLY_INBOX_PHOTO) chạy song song — điểm bắt đầu của làn thích ứng Ext
+  const BUS_PARALLEL_EXT = 10;    // số lệnh adapter.send (REPLY_INBOX_PHOTO) chạy song song — điểm bắt đầu của làn thích ứng Ext
   const EXT_SEND_MIN = 6;         // sàn làn Ext gửi: không thấp hơn mức đã kiểm chứng ổn định
-  const EXT_SEND_MAX = 16;        // trần làn Ext gửi: chỉ đạt khi Extension trả nhanh/rõ liên tục
-  const BUS_PARALLEL_SOCKET = 64; // số frame Socket (/ls_req) in-flight trên mỗi kết nối WebSocket (kèm giãn nhịp 2ms chống burst; vẫn giữ retry + socketRejectStreak bảo vệ)
-  const SIDE_EFFECT_PARALLEL = 4; // số request nền (fill_admin_name / update_global_id) chạy song song
+  const EXT_SEND_MAX = 24;        // trần làn Ext gửi: mở tới 24 khi Extension trả lời nhanh/rõ ở lô lớn
+  const BUS_PARALLEL_SOCKET = 64; // số frame Socket (/ls_req) in-flight trên mỗi kết nối WebSocket (kèm giãn nhịp 6ms chống burst; vẫn giữ retry + socketRejectStreak bảo vệ)
+  const SIDE_EFFECT_PARALLEL = 8; // số request nền (fill_admin_name / update_global_id) chạy song song
   function makeLane(parallel) {
     let active = 0;
     const waiters = [];
@@ -4451,20 +4453,20 @@
       }
       gidHttpCtl.bad = 0;
       gidHttpCtl.backoffStreak = 0;
-      if (latencyMs < 700) {
+      if (latencyMs < 1000) {
         gidHttpCtl.good++;
-        if (gidHttpCtl.good >= 24) {
+        if (gidHttpCtl.good >= 12) {
           gidHttpCtl.good = 0;
           ctxFetchLane.setLimit(ctxFetchLane.getLimit() + 4);
         }
       } else {
-        gidHttpCtl.good = 0;
+        gidHttpCtl.good = Math.max(0, gidHttpCtl.good - 2);
       }
     } catch (e) { /* điều tiết lỗi không được làm hỏng lượt gửi */ }
   }
-  function noteGidExtResult(ok, timedOut, latencyMs) {
+  function noteGidExtResult(responded, timedOut, latencyMs) {
     try {
-      if (timedOut || latencyMs > 6000) {
+      if (timedOut || !responded || latencyMs > 12000) {
         gidExtCtl.good = 0;
         gidExtCtl.bad++;
         if (gidExtCtl.bad >= 3) {
@@ -4474,14 +4476,14 @@
         return;
       }
       gidExtCtl.bad = 0;
-      if (ok && latencyMs < 1500) {
+      if (latencyMs < 5000) {
         gidExtCtl.good++;
-        if (gidExtCtl.good >= 20) {
+        if (gidExtCtl.good >= 10) {
           gidExtCtl.good = 0;
           gidExtLane.setLimit(gidExtLane.getLimit() + 2);
         }
       } else {
-        gidExtCtl.good = 0;
+        gidExtCtl.good = Math.max(0, gidExtCtl.good - 2);
       }
     } catch (e) { /* ignore */ }
   }
@@ -4540,17 +4542,17 @@
       if (kind === 'responded') {
         // Extension CÓ trả lời (dù thành công hay báo lỗi rõ ràng) = còn sống.
         extSendCtl.timeoutStreak = 0;
-        // AIMD làn Ext gửi: trả nhanh (<3s) liên tục 24 lần → tăng +2 slot (tối đa 16).
-        // Trả chậm dù rõ ràng → reset chuỗi tăng, giữ nguyên limit hiện tại.
+        // AIMD làn Ext gửi: trả nhanh (<5s) tích lũy 10 lần → tăng +2 slot (tối đa 24).
+        // Có 1 lệnh hơi chậm (>5s nhưng không timeout) chỉ trừ nhẹ bộ đếm chứ không xóa về 0.
         if (latencyMs != null) {
-          if (latencyMs < 3000) {
+          if (latencyMs < 5000) {
             extSendCtl.fastStreak++;
-            if (extSendCtl.fastStreak >= 24) {
+            if (extSendCtl.fastStreak >= 10) {
               extSendCtl.fastStreak = 0;
               extSendLane.setLimit(extSendLane.getLimit() + 2);
             }
           } else {
-            extSendCtl.fastStreak = 0;
+            extSendCtl.fastStreak = Math.max(0, extSendCtl.fastStreak - 2);
           }
         }
         if (permit && permit.probe) {
@@ -4698,10 +4700,10 @@
     const hasExt = seq.indexOf('ext') > -1;
     if (!hasSock || !hasExt) return seq;
     const hint = channelHints[conv.id];
-    const sockReady = isPageSocketReady(pageId);
+    const sockReady = isPageSocketReady(pageId) || !!(pageId && socketWarmPromises[pageId]);
     const hasRealGid = !!(ctx && ctx.gid && !ctx.gidFromPsid);
     // Khớp 100% với __sendBySocketCacheFB__ trong _app (@927067 & @937200):
-    // CHỈ ưu tiên bắn qua Socket trước khi WebSocket đang kết nối (sockReady) VÀ ĐÃ CÓ global_id THẬT (hasRealGid)!
+    // Ưu tiên bắn qua Socket trước khi WebSocket đang kết nối (hoặc đang khởi động ở đầu lượt) VÀ ĐÃ CÓ global_id THẬT (hasRealGid)!
     // Tuyệt đối không ưu tiên Socket khi chưa có global_id thật (vì Socket không nhận from_psid).
     const preferSocket = sockReady && hasRealGid && (hint === 'socket' || hasRealGid);
     const first = preferSocket ? 'socket' : 'ext';
@@ -4860,9 +4862,13 @@
     if (opts.dynamicDirect && conv.type !== 'comment' && (seq[0] === 'ext' || seq[0] === 'socket')) {
       const fastGid0 = peekFastGlobalId(conv, peeked0, '');
       const tid0 = (peeked0 && (peeked0.thread_id || peeked0.threadId)) || conv.threadId || '';
-      if (fastGid0 && (tid0 || isPageSocketReady(pid0))) {
+      if (fastGid0 && (tid0 || isPageSocketReady(pid0) || (pid0 && socketWarmPromises[pid0]))) {
         const srvGid0 = peeked0 && (gidFromPayload(peeked0) || peeked0.globalId
           || (peeked0.customers && peeked0.customers[0] && peeked0.customers[0].global_id));
+        if (!ctx.fastHitCounted) {
+          ctx.fastHitCounted = true;
+          gidStats.cacheHit++;
+        }
         ctx.full = peeked0;
         ctx.fullLoaded = true;
         if (tid0) {
@@ -5279,7 +5285,7 @@
       // Khớp payload app (@897543): app luôn kèm timeRangeMin. Gửi 0 = lấy mọi mốc,
       // tránh Extension hiểu thiếu trường là không có mapping nào trong khoảng lọc.
       timeRangeMin: 0,
-    }, { timeout: 15000 })).then((res) => {
+    }, { timeout: 2500 })).then((res) => {
       delete batchGidPromises[pageId];
       const list = res && res.success && res.data && res.data.threadsWithGlobalId;
       if (!Array.isArray(list)) {
@@ -5367,7 +5373,7 @@
     } catch (e) { /* ignore */ }
   }
 
-  // Chờ BATCH_GET_GLOBAL_ID nạp xong vào RAM trước khi phân loại fastList/discoveryList trong sendBatch
+  // Chờ WebSocket của page & BATCH_GET_GLOBAL_ID nạp xong trước khi 192 worker quét danh sách
   async function waitInitialGidWarmup(targets, maxWaitMs) {
     try {
       const prs = [];
@@ -5377,9 +5383,10 @@
         if (!pid || seen[pid]) return;
         seen[pid] = true;
         if (batchGidPromises[pid]) prs.push(batchGidPromises[pid]);
+        if (socketWarmPromises[pid]) prs.push(socketWarmPromises[pid]);
       });
       if (prs.length) {
-        await Promise.race([Promise.all(prs), sleep(maxWaitMs || 1500)]);
+        await Promise.race([Promise.all(prs), sleep(maxWaitMs || 3000)]);
       }
       const h = window.__MqttHelper__;
       if (h) {
@@ -6563,7 +6570,7 @@
     try {
       try {
         warmUpSockets(targets, { forceBatch: true });
-        await waitInitialGidWarmup(targets, 1500);
+        await waitInitialGidWarmup(targets, 3000);
       } catch (e) { /* làm nóng lỗi không được làm hỏng lô */ }
       // SW gửi inbox thất bại: jwt → #551; cookie jar → Invalid access_token. Chỉ tab pancake.vn.
       for (let gi = 0; gi < sendGroups.length && !state.stopRequested; gi++) {
