@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE LITE
 // @namespace    salescript
-// @version      1.91.57
+// @version      1.91.58
 // @description  BOTFAKE — panel hiện mọi website; gửi/tải list qua extension background.
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -44,7 +44,7 @@
   /* ============================ HẰNG SỐ ============================ */
 
   const PANEL_ID = 'ssb-root';          // ssb = SaleScript Bulk — không đụng pk-*/adj-*/pancake-* của script khác
-  const APP_VERSION = '1.91.57';        // hiện ở tiêu đề panel — đối chiếu với @version trong header
+  const APP_VERSION = '1.91.58';        // hiện ở tiêu đề panel — đối chiếu với @version trong header
   const STYLE_ID = 'ssb-style';
 
   const MAX_NAME_LIST = 12;             // số tên hiển thị khi xác nhận
@@ -2585,8 +2585,9 @@
       let done = false;
       if (!left) { resolve(null); return; }
       promises.forEach((pr) => {
-        Promise.resolve(pr).then((v) => {
-          if (!done && v) { done = true; resolve(v); return; }
+        const task = (typeof pr === 'function') ? pr() : pr;
+        Promise.resolve(task).then((v) => {
+          if (!done && v && (typeof v === 'string' || typeof v === 'number')) { done = true; resolve(v); return; }
           if (!done && --left === 0) resolve(null);
         }, () => {
           if (!done && --left === 0) resolve(null);
@@ -2850,9 +2851,9 @@
       }
     };
 
-    const extWaitMs = 25000;
+    const extWaitMs = 10000;
     const wsWaitMs = hasExtFinder ? extWaitMs : 6000;
-    const extStartDelayMs = discoveryPass === 2 ? 0 : 250;
+    const extStartDelayMs = discoveryPass === 2 ? 0 : 80;
     const raceTasks = [];
 
     // Nhánh 1: WebSocket PENDING_MESSAGES + wakingUpLoadThread + wsPoll 60ms (bắt ngay global_id ở <60ms khi loadThread về,
@@ -2911,10 +2912,10 @@
                 if (!settled) {
                   foundSource = 'ws';
                   if (ctx) ctx.gidFromServerOrCache = false;
+                  cleanupRace(false);
                 }
               }
               if (!settled) {
-                cleanupRace(false);
                 resolve(val);
               }
             },
@@ -3064,10 +3065,12 @@
               return;
             }
           } catch (e) { /* cứ thử gửi lệnh dò */ }
-          // Gọi thẳng adapter để giữ được shape success/data và đặt timeout 8s.
-          // window.findGlobalIdForConv nuốt hết mọi lý do thất bại thành null,
-          // còn adapter timeout trả { success:false, data:null } — vẫn là CHƯA RÕ,
-          // nhưng ít nhất không phải chờ timeout mặc định 30s của Pancake.
+          // Gọi thẳng adapter để giữ được shape success/data và đặt timeout 10s.
+          // Trong __ExtensionAdapter__.send (@715835 của _app):
+          //   • Timeout hết giờ trả { success: false, data: null } (res.data === null) -> CHƯA RÕ.
+          //   • Extension CÓ phản hồi (GET_GLOBAL_ID_FOR_CONV_SUCCESS không có globalId, hoặc
+          //     GET_GLOBAL_ID_FOR_CONV_FAILURE trả { success: false, data: { type: '..._FAILURE', ... } })
+          //     và không phải lỗi mất kết nối REOPEN_BROWSER -> xác nhận Extension đã dò nhưng không có gid.
           Promise.resolve().then(() => adapter.send(
             Object.assign({ type: 'GET_GLOBAL_ID_FOR_CONV' }, finderPayload),
             { timeout: extWaitMs }
@@ -3076,9 +3079,10 @@
               && String(res.data.globalId) !== badGid) ? String(res.data.globalId) : '';
             if (val) finishExt(val, 'ext');
             else {
-              // Chỉ success=true mới là "Extension đã trả lời rõ ràng mà không có gid".
-              // success:false/data:null là hình dạng timeout/mất phản hồi → vẫn CHƯA RÕ.
-              if (res && res.success) {
+              const d = res && res.data;
+              const errStr = (d && typeof d === 'object') ? String(d.errorMessage || d.error || d.reason || '') : '';
+              const isConnErr = /REOPEN_BROWSER|unableToConnect|extensionDisconnected/i.test(errStr);
+              if (res && (res.success || (d && typeof d === 'object' && !isConnErr))) {
                 extFinderRespondedNoGid = true;
                 if (ctx) ctx.extFinderRespondedNoGid = true;
                 gidStats.extRespondedNoGid++;
@@ -3095,7 +3099,7 @@
           tryMessengerLink();
         }
         }));
-      }));
+      })());
     } else if (!hasExtFinder) {
       // Dự phòng nếu không có Extension: thử lấy từ ensureConvCtx
       raceTasks.push((async () => {
