@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE LITE
 // @namespace    salescript
-// @version      1.91.58
+// @version      1.91.59
 // @description  BOTFAKE — panel hiện mọi website; gửi/tải list qua extension background.
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -44,7 +44,7 @@
   /* ============================ HẰNG SỐ ============================ */
 
   const PANEL_ID = 'ssb-root';          // ssb = SaleScript Bulk — không đụng pk-*/adj-*/pancake-* của script khác
-  const APP_VERSION = '1.91.58';        // hiện ở tiêu đề panel — đối chiếu với @version trong header
+  const APP_VERSION = '1.91.59';        // hiện ở tiêu đề panel — đối chiếu với @version trong header
   const STYLE_ID = 'ssb-style';
 
   const MAX_NAME_LIST = 12;             // số tên hiển thị khi xác nhận
@@ -3538,19 +3538,13 @@
       }
     } catch (e0) { /* ignore */ }
 
-    // 2) CƠ CHẾ LƯỚT SIÊU TỐC QUA "CỤC KHÁCH ĐÃ CHẶN PAGE" (Cluster-Skip Probe v1.66.0):
-    //    • Bình thường (socketRejectStreak < 3): upload attachment ảnh riêng (reusable=false) rồi bắn gộp [Ảnh + Chữ].
-    //    • Khi gặp chuỗi >= 3 khách liên tiếp bị từ chối (socketRejectStreak[pageId] >= 3 — tức là đang đi vào
-    //      "cục khách đã chặn page" như dải 130..287) và tin nhắn có cả chữ lẫn ảnh:
-    //      TẠM NGỪNG gọi HTTP POST /contents/facebook upload ảnh trước! Bắn gói Chữ qua WebSocket trước (~30ms,
-    //      0 HTTP request upload ảnh!):
-    //        - Nếu khách đã chặn (99.9% trong cục): FB trả rejected sau 30ms → báo lỗi ngay mà KHÔNG TỐN 1 lần upload ảnh nào!
-    //        - Nếu gặp khách còn sống nằm lẫn trong cục: gói Chữ đi thành công (ok) → reset streak = 0 và lập tức
-    //          upload ảnh bắn tiếp phần Ảnh ngay lập tức (khách sống vẫn nhận đủ 100% cả chữ lẫn ảnh)!
+    // 2) LUÔN GỘP NGUYÊN KHỐI [ẢNH + CHỮ] TRONG CÙNG 1 KHUNG /ls_req:
+    //    Tuyệt đối không tách "gửi chữ trước, chờ ACK mới upload ảnh gửi sau" (inBlockedCluster cũ),
+    //    vì ở chế độ bắn-nhả hàng loạt gói ảnh thứ 2 bị đẩy xuống cuối hàng đợi pageLane sau hàng nghìn
+    //    gói chữ khác, gây hiện tượng "gửi câu trước, ảnh tới sau 1 phút" và làm đứng tiến độ giữa chừng.
     const hasTextMsg = !!(text && String(text).trim().length > 0);
-    const inBlockedCluster = !!(photo && hasTextMsg && !ctx.nonReusableFbId && (socketRejectStreak[pageId] || 0) >= 3);
     let attFbIds = null;
-    if (photo && !inBlockedCluster) {
+    if (photo) {
       const up = await uploadOneTimePhoto(pageId, photo, conv.id, ctx, false);
       if (!up || !up.ok || !up.fbId) {
         return { ok: false, sent: false, error: 'Không gắn được ảnh cho Socket (' + ((up && up.error) || 'lỗi upload') + ')' };
@@ -3580,55 +3574,23 @@
 
     try {
       const pageLane = getPageSocketLane(pageId);
+      const runPrioritySocket = (fn) => (typeof pageLane.priority === 'function' ? pageLane.priority(fn) : pageLane(fn));
       // settleSocketResult: TOÀN BỘ xử lý sau khi có kết quả publish (retry khi bị từ chối, bù ảnh,
       // phân loại lỗi…) — dùng chung cho đường chờ ACK (lô nhỏ) và đường bắn-nhả (lô lớn, chạy nền).
       const settleSocketResult = async (rawIn) => {
       let raw = rawIn;
-      // Tiêu thụ xong fbId của lần bắn này: nếu có bắn lại phải lấy fbId mới tinh
-      if (photo && !inBlockedCluster) ctx.nonReusableFbId = null;
-
-      // Nếu đang ở chế độ thăm dò trong cục khách chặn (inBlockedCluster) mà gói Chữ đi THÀNH CÔNG (gặp khách sống!):
-      // Reset ngay socketRejectStreak = 0 và lập tức upload ảnh + bắn bù RIÊNG PHẦN ẢNH (text = '') cho khách này!
-      if (inBlockedCluster && raw && raw.kind === 'ok' && photo) {
-        socketRejectStreak[pageId] = 0;
-        let probePhotoUp = await uploadOneTimePhoto(pageId, photo, conv.id, ctx, false);
-        if (probePhotoUp && probePhotoUp.ok && probePhotoUp.fbId) {
-          ctx.nonReusableFbId = null;
-          let sendPhotoRes = await pageLane(() => socketPublishSend(helper, pageId, gid, '', (probePhotoUp.fbIds && probePhotoUp.fbIds.length) ? probePhotoUp.fbIds : [probePhotoUp.fbId]));
-          if (sendPhotoRes && sendPhotoRes.kind === 'ok') {
-            recordSocketGidSuccess();
-            return { ok: true, id: gid, sendBy: 'socket', sent: true };
-          }
-          // Nếu gói Ảnh bắn sát ngay sau gói Chữ trên cùng thread bị nhịp trễ, nghỉ 80ms và thử lại 1 lần với fbId mới
-          await sleep(80);
-          probePhotoUp = await uploadOneTimePhoto(pageId, photo, conv.id, ctx, true);
-          if (probePhotoUp && probePhotoUp.ok && probePhotoUp.fbId) {
-            ctx.nonReusableFbId = null;
-            sendDiag.photoRetry++;
-            sendPhotoRes = await pageLane(() => socketPublishSend(helper, pageId, gid, '', (probePhotoUp.fbIds && probePhotoUp.fbIds.length) ? probePhotoUp.fbIds : [probePhotoUp.fbId]));
-            if (sendPhotoRes && sendPhotoRes.kind === 'ok') {
-              recordSocketGidSuccess();
-              return { ok: true, id: gid, sendBy: 'socket', sent: true };
-            }
-          }
-        }
-        const extPhotoFallback = await sendViaExtension(conv, '', photo, ctx);
-        if (extPhotoFallback && extPhotoFallback.ok) {
-          recordSocketGidSuccess();
-          return { ok: true, id: gid, sendBy: 'socket', sent: true };
-        }
-        return { ok: false, sent: 'maybe', error: 'Socket: đã gửi được chữ nhưng FB từ chối ảnh đính kèm' };
-      }
+      if (photo) ctx.nonReusableFbId = null;
 
       // Trường hợp đặc biệt: chữ đã đi thành công nhưng task ảnh bị markOptimisticMessageFailed
-      // → TUYỆT ĐỐI không gửi lại chữ (tránh trùng chữ), mà upload 1 fbId mới và bắn bù RIÊNG PHẦN ẢNH (text = '')!
+      // → TUYỆT ĐỐI không gửi lại chữ (tránh trùng chữ), mà upload 1 fbId mới và bắn bù RIÊNG PHẦN ẢNH (text = '')
+      // ngay ở ĐẦU hàng đợi pageLane (runPrioritySocket) để ảnh đến ngay tức thì, không xếp sau chat khác!
       if (raw && raw.kind === 'photo_failed_text_ok' && photo) {
         socketRejectStreak[pageId] = 0;
         const freshPhotoUp = await uploadOneTimePhoto(pageId, photo, conv.id, ctx, true);
         if (freshPhotoUp && freshPhotoUp.ok && freshPhotoUp.fbId) {
           ctx.nonReusableFbId = null;
           sendDiag.photoRetry++;
-          const retryPhotoOnly = await pageLane(() => socketPublishSend(helper, pageId, gid, '', (freshPhotoUp.fbIds && freshPhotoUp.fbIds.length) ? freshPhotoUp.fbIds : [freshPhotoUp.fbId]));
+          const retryPhotoOnly = await runPrioritySocket(() => socketPublishSend(helper, pageId, gid, '', (freshPhotoUp.fbIds && freshPhotoUp.fbIds.length) ? freshPhotoUp.fbIds : [freshPhotoUp.fbId]));
           if (retryPhotoOnly && retryPhotoOnly.kind === 'ok') {
             recordSocketGidSuccess();
             return { ok: true, id: gid, sendBy: 'socket', sent: true };
@@ -3645,11 +3607,8 @@
 
       // CHỐNG BỎ SÓT TIN DO FACEBOOK MQTT BURST-REJECT:
       // Mọi ca đã có globalId thật mà bị rejected đều được bắn lại Socket
-      // đúng 1 lần sau 100ms. Chuỗi rejected dài chỉ còn dùng để thăm dò
-      // ảnh trong cụm khách chặn, KHÔNG còn quyền tước lần bắn lại này:
-      // thực địa 7.224 chat cho thấy một khách sống nằm giữa cụm khách
-      // chết đã bị chốt oan vì streak > 4, nhưng chạy lại thì gửi được.
-      // Chỉ khi lần bắn lại vẫn rejected mới kết luận khách không nhận tin.
+      // đúng 1 lần sau ~120ms ngay ở ĐẦU hàng đợi pageLane (runPrioritySocket) để chốt kết quả tức thì,
+      // không dồn hàng nghìn lệnh retry về cuối lô làm đứng tiến độ.
       if (raw && raw.kind === 'rejected') {
         socketRejectStreak[pageId] = (socketRejectStreak[pageId] || 0) + 1;
       } else if (raw && raw.kind === 'ok') {
@@ -3660,7 +3619,7 @@
         if (deliveredIds[conv.id]) return { ok: true, id: gid, sendBy: 'socket', sent: true };
         ctx.socketRetriedOnce = true;
         sendDiag.sockRetry++;
-        await sleep(350 + Math.floor(Math.random() * 250));
+        await sleep(120 + Math.floor(Math.random() * 100));
         // Kiểm tra xem trong nhịp nghỉ đó WebSocket threadMappingStoreV2 có nạp được global_id mới hơn không
         if (threadId && pageId) {
           try {
@@ -3674,53 +3633,34 @@
             }
           } catch (e0) { /* ignore */ }
         }
-        if (photo && !inBlockedCluster) {
+        // Nếu khung vừa bị rejected có CẢ CHỮ LẪN ẢNH (hasTextMsg) mà cả task chữ cũng bị từ chối
+        // (replaced.length === 0), nghĩa là hội thoại từ chối nhận tin trước khi tiêu thụ attachment:
+        // tái sử dụng ngay attFbIds vừa bind cho đúng conv.id này, tránh bắn thêm hàng nghìn request
+        // HTTP /contents/facebook vô ích vào cụm khách chết. Chỉ bind lại khi tin chỉ có ảnh (!hasTextMsg).
+        if (photo && (!hasTextMsg || !Array.isArray(attFbIds) || !attFbIds.length)) {
           const freshUp = await uploadOneTimePhoto(pageId, photo, conv.id, ctx, true);
           if (!freshUp || !freshUp.ok || !freshUp.fbId) {
             return { ok: false, sent: false, error: 'Socket: server báo gửi thất bại' };
           }
           ctx.nonReusableFbId = null;
           attFbIds = (freshUp.fbIds && freshUp.fbIds.length) ? freshUp.fbIds.slice() : [freshUp.fbId];
-        } else if (inBlockedCluster) {
-          // Cụm khách chặn: lần bắn đầu mới là gói chữ thăm dò. Bắn lại
-          // đúng gói chữ đó để xác nhận, chưa upload ảnh cho tới khi chữ qua.
-          attFbIds = null;
         }
-        raw = await pageLane(() => socketPublishSend(helper, pageId, gid, text, attFbIds));
-        if (inBlockedCluster && raw && raw.kind === 'ok') {
-          socketRejectStreak[pageId] = 0;
-          let probePhotoUp = await uploadOneTimePhoto(pageId, photo, conv.id, ctx, false);
-          if (probePhotoUp && probePhotoUp.ok && probePhotoUp.fbId) {
-            ctx.nonReusableFbId = null;
-            let sendPhotoRes = await pageLane(() => socketPublishSend(helper, pageId, gid, '', (probePhotoUp.fbIds && probePhotoUp.fbIds.length) ? probePhotoUp.fbIds : [probePhotoUp.fbId]));
-            if (sendPhotoRes && sendPhotoRes.kind === 'ok') {
-              recordSocketGidSuccess();
-              return { ok: true, id: gid, sendBy: 'socket', sent: true };
-            }
-            await sleep(80);
-            probePhotoUp = await uploadOneTimePhoto(pageId, photo, conv.id, ctx, true);
-            if (probePhotoUp && probePhotoUp.ok && probePhotoUp.fbId) {
-              ctx.nonReusableFbId = null;
-              sendDiag.photoRetry++;
-              sendPhotoRes = await pageLane(() => socketPublishSend(helper, pageId, gid, '', (probePhotoUp.fbIds && probePhotoUp.fbIds.length) ? probePhotoUp.fbIds : [probePhotoUp.fbId]));
-              if (sendPhotoRes && sendPhotoRes.kind === 'ok') {
-                recordSocketGidSuccess();
-                return { ok: true, id: gid, sendBy: 'socket', sent: true };
-              }
-            }
-          }
-          const extPhotoFallback = await sendViaExtension(conv, '', photo, ctx);
-          if (extPhotoFallback && extPhotoFallback.ok) {
-            recordSocketGidSuccess();
-            return { ok: true, id: gid, sendBy: 'socket', sent: true };
-          }
-          return { ok: false, sent: 'maybe', error: 'Socket: đã gửi được chữ nhưng FB từ chối ảnh đính kèm' };
-        }
+        raw = await runPrioritySocket(() => socketPublishSend(helper, pageId, gid, text, attFbIds));
         if (raw && raw.kind === 'ok') {
           socketRejectStreak[pageId] = 0;
         }
         if (raw && raw.kind === 'photo_failed_text_ok' && photo) {
           socketRejectStreak[pageId] = 0;
+          const freshPhotoUp2 = await uploadOneTimePhoto(pageId, photo, conv.id, ctx, true);
+          if (freshPhotoUp2 && freshPhotoUp2.ok && freshPhotoUp2.fbId) {
+            ctx.nonReusableFbId = null;
+            sendDiag.photoRetry++;
+            const retryPhotoOnly2 = await runPrioritySocket(() => socketPublishSend(helper, pageId, gid, '', (freshPhotoUp2.fbIds && freshPhotoUp2.fbIds.length) ? freshPhotoUp2.fbIds : [freshPhotoUp2.fbId]));
+            if (retryPhotoOnly2 && retryPhotoOnly2.kind === 'ok') {
+              recordSocketGidSuccess();
+              return { ok: true, id: gid, sendBy: 'socket', sent: true };
+            }
+          }
           const extPhotoOnly2 = await sendViaExtension(conv, '', photo, ctx);
           if (extPhotoOnly2 && extPhotoOnly2.ok) {
             recordSocketGidSuccess();
@@ -3827,21 +3767,48 @@
             });
         };
         // Giữ đúng BUS_PARALLEL_SOCKET (64) frame in-flight trên mỗi kết nối WebSocket:
-        // Worker được trả về ngay ở 0ms (fired: true), còn pageLane giữ slot cho tới khi
-        // publishPromise nhận được /ls_resp (hoặc hết 15s) rồi mới mở cho frame kế tiếp.
-        pageLane(() => socketPublishSend(helper, pageId, gid, text, attFbIds))
+        // Worker chờ tới đúng lúc chiếm được ghế trong pageLane (bắt đầu bắn frame) rồi trả về ngay
+        // (fired: true) mà không chờ /ls_resp ACK. Nhờ đó 192 worker không xả tràn hàng nghìn lệnh
+        // vào pageLane.waiters ở giây thứ 0 (tránh nghẽn HTTP upload ảnh & tránh đứng tiến độ).
+        let notifySlotStarted = null;
+        const slotStartedPromise = new Promise((resolve) => { notifySlotStarted = resolve; });
+        pageLane(() => {
+          if (notifySlotStarted) { const fn0 = notifySlotStarted; notifySlotStarted = null; fn0(true); }
+          return socketPublishSend(helper, pageId, gid, text, attFbIds);
+        })
           .then((rawSync) => {
+            if (notifySlotStarted) {
+              const fn0 = notifySlotStarted;
+              notifySlotStarted = null;
+              fn0(false);
+              return;
+            }
             settleAndFinalize(rawSync && rawSync.kind ? rawSync : { kind: 'noack' });
           })
-          .catch(() => settleAndFinalize({ kind: 'noack' }));
-        if (photo && !inBlockedCluster) ctx.nonReusableFbId = null;
+          .catch(() => {
+            if (notifySlotStarted) {
+              const fn0 = notifySlotStarted;
+              notifySlotStarted = null;
+              fn0(false);
+              return;
+            }
+            settleAndFinalize({ kind: 'noack' });
+          });
+        if (photo) ctx.nonReusableFbId = null;
+        const slotStarted = await slotStartedPromise;
+        if (!slotStarted) {
+          sockFiredPending.delete(conv.id);
+          releaseOutbound(conv.id);
+          return { ok: false, sent: false, error: 'Đã dừng' };
+        }
         return { ok: true, id: gid, sendBy: 'socket', sent: true, fired: true };
       }
       if (!acquireOutbound(conv.id)) return dupBlockedResult(conv.id);
       ctx.ownsOutbound = true; // Ext bù ảnh trong settleSocketResult dùng chung khóa này
       let settled;
       try {
-        const rawSync = await pageLane(() => socketPublishSend(helper, pageId, gid, text, attFbIds));
+        const laneRunner = ctx.prioritySocket ? runPrioritySocket : pageLane;
+        const rawSync = await laneRunner(() => socketPublishSend(helper, pageId, gid, text, attFbIds));
         settled = await settleSocketResult(rawSync);
         if (settled && settled.noAck) scheduleSocketVerify(conv, text, photo, Date.now() - 15000);
       } finally { ctx.ownsOutbound = false; }
@@ -4265,6 +4232,49 @@
     return [];
   }
 
+  // Khi người dùng chọn ảnh bằng click trên giao diện (imgState.url, chưa có content_id),
+  // tự động đối chiếu URL ảnh với Câu nhanh (Quick Replies) và Kho nội dung (/contents) của page
+  // để lấy content_id. Có content_id thì POST /contents/facebook chỉ mất ~25ms thay vì ~1,47s qua urls!
+  async function resolveContentIdForPageUrl(pageId, rawUrl) {
+    if (!pageId || !rawUrl) return '';
+    const keyOf = (u) => String(u || '').split('?')[0].replace(/_thumb(\.[a-z0-9]+)$/i, '$1').split('/').pop().toLowerCase();
+    const cleanOf = (u) => String(u || '').split('?')[0].replace(/_thumb(\.[a-z0-9]+)$/i, '$1');
+    const targetKey = keyOf(rawUrl);
+    const targetClean = cleanOf(rawUrl);
+    if (!targetKey) return '';
+    try {
+      const recs = await fetchQuickRepliesForPage(pageId);
+      for (let i = 0; i < (recs || []).length; i++) {
+        const q = normalizeQuickReply(recs[i], i);
+        const items = (q && q.items) || [];
+        for (let j = 0; j < items.length; j++) {
+          const it = items[j];
+          if (it && it.id && (cleanOf(it.url) === targetClean || keyOf(it.url) === targetKey)) {
+            return String(it.id);
+          }
+        }
+      }
+    } catch (e) { /* ignore */ }
+    try {
+      const token = getToken();
+      if (token) {
+        const res = await fetchT(apiBase() + '/v1/pages/' + pageId + '/contents?page_number=1&access_token=' + encodeURIComponent(token), {
+          headers: { Accept: 'application/json' }, credentials: 'include',
+        }, 5000);
+        const j = await res.json().catch(() => null);
+        const arr = (j && (Array.isArray(j.data) ? j.data : (j.data && Array.isArray(j.data.data) ? j.data.data : null))) || [];
+        for (let i = 0; i < arr.length; i++) {
+          const it = arr[i];
+          const u = (it && (it.url || (it.image_data && it.image_data.url))) || '';
+          if (it && it.id && u && (cleanOf(u) === targetClean || keyOf(u) === targetKey)) {
+            return String(it.id);
+          }
+        }
+      }
+    } catch (e) { /* ignore */ }
+    return '';
+  }
+
   function currentPanelPageId() {
     const m = String(location.pathname || '').match(/\/(\d{6,})(?:\/|$)/);
     if (m) return m[1];
@@ -4338,7 +4348,8 @@
   function makeLane(parallel) {
     let active = 0;
     const waiters = [];
-    const enqueue = function (fn) {
+    const enqueue = function (fn, opts) {
+      const isPriority = !!(opts && opts.priority);
       return new Promise((resolve) => {
         const start = () => {
           if (state.stopRequested) { resolve({ ok: false, sent: false, error: 'Đã dừng' }); return; }
@@ -4361,9 +4372,15 @@
             });
         };
         if (active < parallel && !waiters.length) start();
-        else waiters.push(start);
+        else if (isPriority) {
+          if (active < parallel) start();
+          else waiters.unshift(start);
+        } else {
+          waiters.push(start);
+        }
       });
     };
+    enqueue.priority = (fn) => enqueue(fn, { priority: true });
     enqueue.busy = () => active >= parallel || waiters.length > 0;
     enqueue.activeCount = () => active;
     enqueue.waitingCount = () => waiters.length;
@@ -4657,9 +4674,8 @@
       ctx.threadId = threadId || null;
       ctx.threadResolved = true;
     }
-    const skipPhotoForBlockedCluster = !!(ctx.hasTextMsg && (socketRejectStreak[pageId] || 0) >= 3 && isPageSocketReady(pageId));
     if (!ctx.gidResolved && ctx.threadId) {
-      if (ctx.fastOnly && photo && !ctx.nonReusableFbId && !ctx.nonReusableFbIds && !skipPhotoForBlockedCluster) {
+      if (ctx.fastOnly && photo && !ctx.nonReusableFbId && !ctx.nonReusableFbIds) {
         const [gidRes, upRes] = await Promise.all([
           resolveGlobalId(full, ctx.threadId, conv.id, conv.fromPsid, ctx.gidForceFind, ctx),
           uploadOneTimePhoto(pageId, photo, conv.id, ctx, false),
@@ -4688,8 +4704,7 @@
       recycleUnusedFbId(pageId, ctx);
       return ctx;
     }
-    const skipNow = !!(ctx.hasTextMsg && (socketRejectStreak[pageId] || 0) >= 3 && ctx.gid && !ctx.gidFromPsid && isPageSocketReady(pageId));
-    if (photo && !ctx.nonReusableFbId && !ctx.nonReusableFbIds && canSend && !skipNow) {
+    if (photo && !ctx.nonReusableFbId && !ctx.nonReusableFbIds && canSend) {
       const up = await uploadOneTimePhoto(pageId, photo, conv.id, ctx, false);
       if (up && up.ok && up.fbId) ctx.nonReusableFbId = up.fbId;
       if (up && up.ok && up.fbIds && up.fbIds.length > 1) ctx.nonReusableFbIds = up.fbIds;
@@ -4783,6 +4798,7 @@
             sockFired: !!opts.sockFired,
           };
         }
+        directOpts.prioritySocket = !!opts.prioritySocket;
         if (opts.awaitDirect) {
           return sendOne(conv, text, photo, directOpts);
         }
@@ -4814,12 +4830,15 @@
         });
         return { ok: true, id: '', sendBy: 'direct', sent: true, fired: true };
       }
-      return fireApiAndWatch(conv, text, photo);
+      if (!opts.syncMultiPart) {
+        return fireApiAndWatch(conv, text, photo);
+      }
     }
     // ngữ cảnh dùng chung cho các kênh của CÙNG 1 chat: conversation, threadId, globalId, nonReusableFbId…
     const ctx = (opts.deferredCtx && typeof opts.deferredCtx === 'object') ? opts.deferredCtx : {};
     ctx.fastOnly = !!opts.fastOnly;
     ctx.sockFired = !!opts.sockFired;
+    ctx.prioritySocket = !!opts.prioritySocket;
     ctx.hasTextMsg = !!(text && String(text).trim().length > 0);
     ctx.deferredToExt = false;
     if (!ctx.fastOnly && ctx.gidResolved && !ctx.gid) {
@@ -6131,6 +6150,7 @@
     let photo = null;
     const fbIdByPage = {};
     const apiFbIdsByPage = {};
+    const contentIdByPage = {};
     const qrPhotoByPage = {};
     const qrSel = state.quickReply;
     if (qrSel && Array.isArray(qrSel.items) && qrSel.items.length) {
@@ -6208,11 +6228,19 @@
       });
       for (let i = 0; i < pageIds.length; i++) {
         if (state.stopRequested) break;
-        const up2 = await uploadPhotoForPage(pageIds[i], photo);
+        let pagePhoto = photo;
+        if (!photo.id && photo.url) {
+          const cid = await resolveContentIdForPageUrl(pageIds[i], photo.url);
+          if (cid) {
+            contentIdByPage[pageIds[i]] = cid;
+            pagePhoto = Object.assign({}, photo, { id: cid });
+          }
+        }
+        const up2 = await uploadPhotoForPage(pageIds[i], pagePhoto);
         if (up2.ok) {
           fbIdByPage[pageIds[i]] = up2.fbId;
           apiFbIdsByPage[pageIds[i]] = up2.fbIds || [up2.fbId];
-          logLine('☁️ Page ' + pageIds[i] + ': gắn ảnh OK');
+          logLine('☁️ Page ' + pageIds[i] + ': gắn ảnh OK' + (contentIdByPage[pageIds[i]] ? ' (content_id)' : ''));
         } else {
           logLine('⚠ Page ' + pageIds[i] + ': không gắn được ảnh (' + up2.error + ') — chat page này sẽ báo lỗi');
         }
@@ -6283,11 +6311,16 @@
         const pArg = (pt.items && pt.items.length)
           ? { items: pt.items, url: pt.items[0].url, id: pt.items[0].id, fbId: (pt.apiFbIds && pt.apiFbIds[0]) || '', fbIds: pt.apiFbIds || [], w: pt.items[0].w || 0, h: pt.items[0].h || 0 }
           : null;
-        // CÂU NHIỀU ĐOẠN: MỌI đoạn đều gửi ĐỒNG BỘ (kể cả đoạn 0). Đoạn 0 bắn-nhả sẽ nằm
-        // trong apiSendLane trong khi đoạn 1 đi thẳng → đảo thứ tự; ACK đoạn 0 về còn set
-        // deliveredIds làm đoạn 2+ bị guard chặn trả ok giả. Đồng bộ hết = xác nhận thật,
-        // đúng thứ tự; nhả khóa chống trùng giữa các đoạn.
-        const ptOpts = Object.assign({}, sendOpts, { quick: false, sockFired: false });
+        // CÂU NHIỀU ĐOẠN: MỌI đoạn đều gửi ĐỒNG BỘ (kể cả đoạn 0) nhưng vẫn giữ dynamicDirect
+        // (0ms Fast-Path chọn Socket cho chat ngoài 24h). Đoạn 1+ dùng prioritySocket để phát
+        // nối đuôi ngay sau đoạn 0 mà không bị xếp sau hàng đợi của các chat khác.
+        const ptOpts = Object.assign({}, sendOpts, {
+          quick: sendOpts.quick,
+          awaitDirect: true,
+          sockFired: false,
+          syncMultiPart: true,
+          prioritySocket: i > 0,
+        });
         if (i > 0) {
           ptOpts.fastOnly = false;
           ptOpts.deferredCtx = null;
@@ -6367,7 +6400,7 @@
         } else {
           const photoArg = photo.qr
             ? { items: qrPage.items, url: qrPage.url, id: qrPage.id, fbId: fbIdByPage[p] || '', fbIds: apiFbIdsByPage[p] || [], w: qrPage.w || 0, h: qrPage.h || 0 }
-            : { url: photo.url, id: photo.id, fbId: fbIdByPage[p] || '', w: photo.w, h: photo.h };
+            : { url: photo.url, id: photo.id || contentIdByPage[p] || '', fbId: fbIdByPage[p] || '', w: photo.w, h: photo.h };
           const fbId = photoArg.fbId || '';
           if (!fbId && c.type === 'comment') {
             done++;
