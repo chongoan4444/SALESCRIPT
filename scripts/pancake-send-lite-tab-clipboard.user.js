@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE LITE (Tab + Clipboard)
 // @namespace    salescript
-// @version      1.91.60
+// @version      1.91.61
 // @description  BOTFAKE — bản hỗ trợ phím Tab kích hoạt Chạy (có xác nhận) + nút chuyển chế độ gửi bằng Câu trên giao diện / Dữ liệu đang copy trên Clipboard.
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -44,7 +44,7 @@
   /* ============================ HẰNG SỐ ============================ */
 
   const PANEL_ID = 'ssb-root';          // ssb = SaleScript Bulk — không đụng pk-*/adj-*/pancake-* của script khác
-  const APP_VERSION = '1.91.60';        // hiện ở tiêu đề panel — đối chiếu với @version trong header
+  const APP_VERSION = '1.91.61';        // hiện ở tiêu đề panel — đối chiếu với @version trong header
   const STYLE_ID = 'ssb-style';
 
   const MAX_NAME_LIST = 12;             // số tên hiển thị khi xác nhận
@@ -3264,9 +3264,36 @@
     } catch (e) { return false; }
   }
 
+  function isSocketSynced(sock) {
+    if (!isSocketAlive(sock)) return false;
+    if (typeof sock.requestId === 'number' && sock.requestId < 1) return false;
+    if (typeof sock.connectAt === 'number' && Date.now() - sock.connectAt < 1000) return false;
+    return true;
+  }
+
+  async function waitForSocketSynced(helper, pageId, maxWaitMs) {
+    const limit = maxWaitMs || 2500;
+    const deadline = Date.now() + limit;
+    let sawJustSynced = false;
+    while (Date.now() < deadline && !state.stopRequested) {
+      const s = helper && helper.SOCKETS && helper.SOCKETS[pageId];
+      if (!isSocketAlive(s)) return s;
+      if (isSocketSynced(s)) {
+        if (sawJustSynced) await sleep(180);
+        return helper && helper.SOCKETS && helper.SOCKETS[pageId];
+      }
+      sawJustSynced = true;
+      await sleep(60);
+    }
+    return helper && helper.SOCKETS && helper.SOCKETS[pageId];
+  }
+
   async function ensureAliveSocket(helper, pageId, forceReconnect) {
     let sock = helper.SOCKETS && helper.SOCKETS[pageId];
-    if (!forceReconnect && isSocketAlive(sock)) return sock;
+    if (!forceReconnect && isSocketAlive(sock)) {
+      if (!isSocketSynced(sock)) sock = await waitForSocketSynced(helper, pageId, 2500);
+      return sock;
+    }
     if (socketReconnectPromises[pageId]) {
       await Promise.race([socketReconnectPromises[pageId], sleep(12000)]);
       return helper.SOCKETS && helper.SOCKETS[pageId];
@@ -3279,6 +3306,7 @@
           }
           if (helper.SOCKETS) delete helper.SOCKETS[pageId];
           await Promise.race([Promise.resolve().then(() => helper.initSocket(pageId)), sleep(12000)]);
+          await waitForSocketSynced(helper, pageId, 2500);
           socketNoAckStreak[pageId] = 0;
         } catch (e) { /* ignore */ }
         socketReconnectPromises[pageId] = null;
@@ -3288,7 +3316,7 @@
     return helper.SOCKETS && helper.SOCKETS[pageId];
   }
 
-  // Gửi TRỰC TIẾP khung /ls_req của app qua helper.publish — BỎ BƯỚC CHỜ 1S bên trong helper.sendMessage.
+  // Gửi TRỰC TIẾP khung /ls_req của app qua helper.publish — BỎ BƯỚC CHỜ 1S trên từng tin sau khi socket đã ấm.
   // Hỗ trợ đầy đủ cả ẢNH (task label "46" với attachment_fbids, send_type: 3, source: 0) lẫn TEXT
   // (task label "46" với send_type: 1, source: 4456448) + watermark label "21", khớp 100% với
   // ef.Z.sendMessage (@831250) trong _app-9331d46f21a84eb1.v6.js!
@@ -3310,6 +3338,8 @@
     if (!isSocketAlive(sock) || wantForceRc) {
       if (wantForceRc) sockForceRc[pageId] = (sockForceRc[pageId] || 0) + 1;
       sock = await ensureAliveSocket(helper, pageId, wantForceRc);
+    } else if (!isSocketSynced(sock)) {
+      sock = await waitForSocketSynced(helper, pageId, 2500);
     }
     if (!isSocketAlive(sock)) return { kind: 'dead' };
     if (typeof helper.publish !== 'function' || typeof helper.findAllBlockActions !== 'function') {
@@ -3368,6 +3398,7 @@
     };
     await paceSocketPublish(pageId);
     const nextReqId = (typeof sock.requestId === 'number') ? (sock.requestId + 1) : null;
+    const ackWaitMs = (batchStats && batchStats.total > 0 && batchStats.total <= 30) ? 8000 : 15000;
     const publishPromise = new Promise((resolve) => {
       let done = false;
       const timer = setTimeout(() => {
@@ -3383,7 +3414,7 @@
           }
         } catch (e0) { /* ignore */ }
         resolve({ success: false, data: null, timedOut: true });
-      }, 15000);
+      }, ackWaitMs);
       Promise.resolve()
         .then(() => helper.publish(pageId, '/ls_req', frame, 3))
         .then((res) => {
@@ -4060,7 +4091,8 @@
             const fId = (full.from && full.from.id) || conv.fromPsid || '';
             if (pId && fId && !updatedGidConvSet.has(conv.id)) {
               updatedGidConvSet.add(conv.id);
-              sideEffectLane(() => fetch(apiBase() + '/v1/pages/' + pId + '/customers/' + encodeURIComponent(fId) + '/update_global_id?', {
+              const qTok = token ? ('?access_token=' + encodeURIComponent(token)) : '?';
+              sideEffectLane(() => fetch(apiBase() + '/v1/pages/' + pId + '/customers/' + encodeURIComponent(fId) + '/update_global_id' + qTok, {
                 method: 'POST',
                 headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
                 credentials: 'include',
@@ -4697,7 +4729,7 @@
     try {
       const h = window.__MqttHelper__;
       const sk = h && h.SOCKETS && h.SOCKETS[pageId];
-      return isSocketAlive(sk);
+      return isSocketSynced(sk);
     } catch (e) { return false; }
   }
 
@@ -4769,10 +4801,11 @@
     const hasExt = seq.indexOf('ext') > -1;
     if (!hasSock || !hasExt) return seq;
     const hint = channelHints[conv.id];
-    const sockReady = isPageSocketReady(pageId) || !!(pageId && socketWarmPromises[pageId]);
+    const isSmallBatch = !!(batchStats && batchStats.total > 0 && batchStats.total <= 20);
+    const sockReady = isPageSocketReady(pageId) || (!isSmallBatch && !!(pageId && socketWarmPromises[pageId]));
     const hasRealGid = !!(ctx && ctx.gid && !ctx.gidFromPsid);
     // Khớp 100% với __sendBySocketCacheFB__ trong _app (@927067 & @937200):
-    // Ưu tiên bắn qua Socket trước khi WebSocket đang kết nối (hoặc đang khởi động ở đầu lượt) VÀ ĐÃ CÓ global_id THẬT (hasRealGid)!
+    // Ưu tiên bắn qua Socket trước khi WebSocket đang kết nối (hoặc đang khởi động ở đầu lượt lô lớn) VÀ ĐÃ CÓ global_id THẬT (hasRealGid)!
     // Tuyệt đối không ưu tiên Socket khi chưa có global_id thật (vì Socket không nhận from_psid).
     const preferSocket = sockReady && hasRealGid && (hint === 'socket' || hasRealGid);
     const first = preferSocket ? 'socket' : 'ext';
@@ -5358,7 +5391,7 @@
       // Khớp payload app (@897543): app luôn kèm timeRangeMin. Gửi 0 = lấy mọi mốc,
       // tránh Extension hiểu thiếu trường là không có mapping nào trong khoảng lọc.
       timeRangeMin: 0,
-    }, { timeout: 2500 })).then((res) => {
+    }, { timeout: 6000 })).then((res) => {
       delete batchGidPromises[pageId];
       const list = res && res.success && res.data && res.data.threadsWithGlobalId;
       if (!Array.isArray(list)) {
@@ -5417,7 +5450,7 @@
           }
           if (h.SOCKETS && h.SOCKETS[pid]) {
             h.SOCKETS[pid].maxLoadThreadCount = Math.max(h.SOCKETS[pid].maxLoadThreadCount || 0, 5000);
-            if (h.SOCKETS[pid].instance && typeof h.wakingUpLoadThread === 'function') {
+            if (isSocketSynced(h.SOCKETS[pid]) && typeof h.wakingUpLoadThread === 'function') {
               h.wakingUpLoadThread(pid);
             }
           }
@@ -5427,15 +5460,16 @@
         if (socketWarmPromises[pid]) return; // đang kết nối dở — khỏi làm trùng
         socketWarmPromises[pid] = Promise.resolve()
           .then(() => h.initSocket(pid))
-          .then((res) => {
+          .then(async (res) => {
+            await waitForSocketSynced(h, pid, 2500);
             delete socketWarmPromises[pid];
             syncSocketMappingsToCache(h, pid);
-            // Chủ động kích hoạt cuộn tải trước threadMappingStoreV2 ở nền (đã vá ~60–80ms/trang)
+            // Chủ động kích hoạt cuộn tải trước threadMappingStoreV2 ở nền sau khi socket đã subscribe /ls_resp
             try {
               if (h.SOCKETS && h.SOCKETS[pid]) {
                 h.SOCKETS[pid].maxLoadThreadCount = Math.max(h.SOCKETS[pid].maxLoadThreadCount || 0, 5000);
               }
-              if (typeof h.wakingUpLoadThread === 'function' && h.SOCKETS && h.SOCKETS[pid]) {
+              if (typeof h.wakingUpLoadThread === 'function' && h.SOCKETS && h.SOCKETS[pid] && isSocketSynced(h.SOCKETS[pid])) {
                 h.wakingUpLoadThread(pid);
               }
             } catch (e2) { /* ignore */ }
@@ -5446,24 +5480,37 @@
     } catch (e) { /* ignore */ }
   }
 
-  // Chờ WebSocket của page & BATCH_GET_GLOBAL_ID nạp xong trước khi 192 worker quét danh sách
+  // Chờ BATCH_GET_GLOBAL_ID nạp xong (chỉ khi thực sự có chat ngoài 24h chưa có gid trong RAM)
+  // Không chặn đầu lượt bằng socketWarmPromises (chat API bắn ngay ở 0ms; chat Socket tự chờ trong socketPublishSend).
   async function waitInitialGidWarmup(targets, maxWaitMs) {
     try {
-      const prs = [];
-      const seen = {};
+      const needBatchPids = {};
       (targets || []).forEach((c) => {
-        const pid = (c && c.pageId) || String((c && c.id) || '').split('_')[0];
-        if (!pid || seen[pid]) return;
-        seen[pid] = true;
+        if (!c || c.type === 'comment') return;
+        const full0 = peekConv(c) || c;
+        const pid = (full0 && (full0.page_id || full0.pageId)) || c.pageId || String(c.id || '').split('_')[0];
+        if (!pid) return;
+        const idleDiff = getConvIdleMs(c, full0);
+        const isIdleLong = !isNaN(idleDiff) && idleDiff > 86400000;
+        if (isIdleLong && !peekFastGlobalId(c, full0, '')) {
+          needBatchPids[pid] = true;
+        }
+      });
+      const prs = [];
+      Object.keys(needBatchPids).forEach((pid) => {
         if (batchGidPromises[pid]) prs.push(batchGidPromises[pid]);
-        if (socketWarmPromises[pid]) prs.push(socketWarmPromises[pid]);
       });
       if (prs.length) {
-        await Promise.race([Promise.all(prs), sleep(maxWaitMs || 3000)]);
+        const capMs = (targets && targets.length <= 50) ? Math.min(maxWaitMs || 600, 600) : Math.min(maxWaitMs || 1500, 1500);
+        await Promise.race([Promise.all(prs), sleep(capMs)]);
       }
       const h = window.__MqttHelper__;
       if (h) {
-        Object.keys(seen).forEach((pid) => syncSocketMappingsToCache(h, pid));
+        const seen = {};
+        (targets || []).forEach((c) => {
+          const pid = (c && c.pageId) || String((c && c.id) || '').split('_')[0];
+          if (pid && !seen[pid]) { seen[pid] = true; syncSocketMappingsToCache(h, pid); }
+        });
       }
     } catch (e) { /* ignore */ }
   }
@@ -5882,7 +5929,7 @@
    *     qua scheduleBuRetry (đủ guard chống trùng như đường bù API).
    *   • Không đọc được lịch sử / thiếu dữ kiện → GIỮ NGUYÊN ⚠, tuyệt đối không bắn mò.
    * Chỉ áp dụng cho tin CHỈ CÓ CHỮ: ca có ảnh khớp nội dung qua API không đủ tin cậy. */
-  const SOCK_VERIFY_DELAY_MS = 10000; // chờ thêm sau thời điểm mất ACK rồi mới đọc lịch sử (tổng phân xử ~25s: tin đã tới FB thì lịch sử có trong vài giây)
+  const SOCK_VERIFY_DELAY_MS = 1500; // chờ 1.5s sau thời điểm mất ACK (lúc này đã qua 8–15s kể từ publish) rồi đọc lịch sử và bắn cứu ngay nếu chưa có tin
   // sockVerifyPending / sockVerifyFired / verifyStats: khai báo ở vùng sổ nền (cạnh pendingBg)
   // để getBatchSummaryCounts tính được ca đang chờ kiểm chứng vào "pending" giữ lượt.
 
@@ -6246,7 +6293,7 @@
     reportExtJob({ phase: 'send', pct: 0, ok: 0, total: 0 }); // sau reset — không bị lượt cũ đổi thành idle
     render();
     // Khởi động warmUpSockets + BATCH_GET_GLOBAL_ID NGAY TỪ ĐẦU (chạy song song với lọc tag + upload ảnh)
-    try { warmUpSockets(targets); } catch (e) { /* ignore */ }
+    try { warmUpSockets(targets, { forceBatch: true }); } catch (e) { /* ignore */ }
 
 
     // Chuẩn bị ảnh (nếu có): upload 1 lần → gắn attachment cho từng page
@@ -6590,7 +6637,7 @@
     let gtextRef = '';
     const sendBatch = async (gtext, batch) => {
       gtextRef = gtext;
-      // Đánh thức WebSocket loadThread ngay đầu lượt cho mọi page có trong batch
+      // Đánh thức WebSocket loadThread ngay đầu lượt cho mọi page có trong batch (chỉ khi socket đã subscribe /ls_resp)
       try {
         const mh = window.__MqttHelper__;
         if (mh && typeof mh.wakingUpLoadThread === 'function') {
@@ -6599,7 +6646,10 @@
             const p0 = batch[i].pageId || String(batch[i].id || '').split('_')[0];
             if (p0 && !seenP.has(p0)) {
               seenP.add(p0);
-              try { mh.wakingUpLoadThread(p0); } catch (e0) { /* ignore */ }
+              const sk0 = mh.SOCKETS && mh.SOCKETS[p0];
+              if (isSocketSynced(sk0)) {
+                try { mh.wakingUpLoadThread(p0); } catch (e0) { /* ignore */ }
+              }
             }
           }
         }
@@ -6651,12 +6701,13 @@
 
       // ⚡ GID PREFETCH (v1.70.0): pipeline chạy nền SONG SONG với làn gửi, đi trước để nạp sẵn
       // ngữ cảnh + global_id (GET /messages, có dedupe inflight trong ensureConvCtx) cho các chat
-      // phía sau — tới lượt worker gửi thì gid đã có sẵn trong cache (0ms), không phải đứng chờ HTTP.
-      // Không await ở đây: prefetch chậm hơn làn gửi cũng vô hại (toàn cache hit),
-      // nhanh hơn thì làn gửi bứt tốc. Số worker chỉ là nhịp nạp hàng đợi; thông
-      // lượng HTTP thật do ctxFetchLane thích ứng (8–64) quyết định.
+      // ngoài 24h chưa có sẵn global_id trong RAM — tới lượt worker gửi thì gid đã có sẵn trong cache (0ms).
       const gidPrefetchPromise = runPool(batch, async (c) => {
-        if (state.stopRequested) return;
+        if (state.stopRequested || !c || c.type === 'comment') return;
+        const full0 = peekConv(c) || c;
+        const idleDiff0 = getConvIdleMs(c, full0);
+        const isIdleLong0 = !isNaN(idleDiff0) && idleDiff0 > 86400000;
+        if (!isIdleLong0 || peekFastGlobalId(c, full0, '')) return;
         try { await ensureConvCtx(c, { force: true }); } catch (e) { /* ignore */ }
       }, 48).catch(() => {});
 
@@ -6709,8 +6760,7 @@
     let sendErr = null;
     try {
       try {
-        warmUpSockets(targets, { forceBatch: true });
-        await waitInitialGidWarmup(targets, 3000);
+        await waitInitialGidWarmup(targets, 1500);
       } catch (e) { /* làm nóng lỗi không được làm hỏng lô */ }
       // SW gửi inbox thất bại: jwt → #551; cookie jar → Invalid access_token. Chỉ tab pancake.vn.
       for (let gi = 0; gi < sendGroups.length && !state.stopRequested; gi++) {
