@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE LITE (Tab + Clipboard)
 // @namespace    salescript
-// @version      1.91.64
+// @version      1.91.63
 // @description  BOTFAKE — bản hỗ trợ phím Tab kích hoạt Chạy (có xác nhận) + nút chuyển chế độ gửi bằng Câu trên giao diện / Dữ liệu đang copy trên Clipboard.
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -44,7 +44,7 @@
   /* ============================ HẰNG SỐ ============================ */
 
   const PANEL_ID = 'ssb-root';          // ssb = SaleScript Bulk — không đụng pk-*/adj-*/pancake-* của script khác
-  const APP_VERSION = '1.91.64';        // hiện ở tiêu đề panel — đối chiếu với @version trong header
+  const APP_VERSION = '1.91.63';        // hiện ở tiêu đề panel — đối chiếu với @version trong header
   const STYLE_ID = 'ssb-style';
 
   const MAX_NAME_LIST = 12;             // số tên hiển thị khi xác nhận
@@ -768,7 +768,6 @@
 
   function setRangeStart(info) {
     if (!info) return;
-    const inList = !!(state.allRows && state.allRows.has(info.id));
     const rich = enrichRowWithRedux(info);
     state.mode = 'range';
     state.target = null;
@@ -783,11 +782,9 @@
     };
     computeMatches();
     logLine('🅰 Đã chọn & đặt ĐẦU CHUỖI: ' + (info.name || info.id)
-      + (inList
-        ? ' — đã có sẵn trong danh sách (giữ Alt nhấp tiếp dòng CUỐI chuỗi nếu muốn chọn cả dải)'
-        : ' — đang tự nạp đoạn này (giữ Alt nhấp tiếp dòng CUỐI chuỗi nếu muốn chọn cả dải)'));
+      + ' — đang tự tải dữ liệu đoạn này (giữ Alt nhấp tiếp dòng CUỐI chuỗi nếu muốn chọn cả dải)');
     render();
-    if (!inList && typeof schedulePreloadSelectedChats === 'function') schedulePreloadSelectedChats(true);
+    if (typeof schedulePreloadSelectedChats === 'function') schedulePreloadSelectedChats(true);
   }
 
   async function completeRange(endInfo) {
@@ -803,16 +800,13 @@
       snippetRaw: endInfo.snippetRaw || richEnd.snippetRaw,
       time: endInfo.time || richEnd.time,
     };
-    // Nếu cả 2 đầu chuỗi ĐÃ CÓ SẴN trong danh sách đã tải (state.allRows) -> lấy ngay lập tức, KHÔNG tải lại danh sách!
-    // Chỉ khi chưa tải danh sách hoặc 1 trong 2 đầu chuỗi nằm ngoài phạm vi đã tải trong state.allRows -> mới tự động gọi API tải tới đoạn đó!
-    const alreadyInList = !!(state.allRows && state.allRows.has(start.id) && state.allRows.has(endInfo.id));
+    // Hiển thị tạm ngay từ dữ liệu sẵn có trên màn hình/Redux để UI phản hồi tức thì,
+    // sau đó LUÔN tự động gọi API tải mới danh sách cho đúng chuỗi vừa chọn (kể cả khi trước đó đã có danh sách)!
     computeMatches({ silentMissingLog: true });
-    if (!alreadyInList) {
-      logLine('⚡ Đoạn chọn chưa có đủ trong danh sách — đang tự tải danh sách tới: ' + (start.name || start.id) + ' → ' + (endInfo.name || endInfo.id) + '…');
-      render();
-      await scanFullList({ forRange: true, restartIfBusy: true });
-      computeMatches({ silentMissingLog: true });
-    }
+    logLine('⚡ Đang tự tải danh sách cho chuỗi đã chọn: ' + (start.name || start.id) + ' → ' + (endInfo.name || endInfo.id) + '…');
+    render();
+    await scanFullList({ forRange: true, restartIfBusy: true });
+    computeMatches({ silentMissingLog: true });
     const hasStart = state.matches.some((m) => m.id === start.id);
     const hasEnd = state.matches.some((m) => m.id === endInfo.id);
 
@@ -820,15 +814,12 @@
     if (!hasStart || !hasEnd || !n) {
       logLine('🔗 CHUỖI CHỌN: ' + (start.name || start.id) + ' → ' + (endInfo.name || endInfo.id)
         + ' — ⚠ Không tìm thấy đủ 2 đầu chuỗi trong danh sách hiện tại.');
-    } else if (alreadyInList) {
-      logLine('🔗 CHUỖI CHỌN: ' + (start.name || start.id) + ' → ' + (endInfo.name || endInfo.id)
-        + ' — ' + n + ' chat trong chuỗi (đã có sẵn trong danh sách)');
     } else {
       logLine('🔗 CHUỖI CHỌN: ' + (start.name || start.id) + ' → ' + (endInfo.name || endInfo.id)
-        + ' — ' + n + ' chat trong chuỗi (đã tự tải xong danh sách đoạn chọn)');
+        + ' — ' + n + ' chat trong chuỗi (đang tự nạp sẵn dữ liệu hội thoại…)');
     }
     render();
-    if (!alreadyInList && typeof schedulePreloadSelectedChats === 'function') schedulePreloadSelectedChats(true);
+    if (typeof schedulePreloadSelectedChats === 'function') schedulePreloadSelectedChats(true);
   }
 
   function clearSelection() {
@@ -7834,11 +7825,8 @@
       const btn = root.getElementById('ssb-to-end');
       if (btn) btn.disabled = true;
       try {
-        const alreadyHasToEnd = !!(state.allRows && state.allRows.size && !state.allRowsPartial && state.allRows.has(info.id));
-        if (!alreadyHasToEnd) {
-          logLine('⚡ Đoạn chọn chưa có đủ tới cuối danh sách — tự tải qua API để lấy từ ' + (info.name || info.id) + ' tới cuối…');
-          await scanFullList({ full: true, restartIfBusy: true });
-        }
+        logLine('⚡ Đang tự tải danh sách qua API để lấy từ ' + (info.name || info.id) + ' tới cuối…');
+        await scanFullList({ full: true, restartIfBusy: true });
         const rows = sourceRows();
         const idx = rows.findIndex((r) => r.id === info.id);
         if (idx < 0) {
@@ -7859,7 +7847,7 @@
         computeMatches();
         logLine('⬇ CHỌN TỪ ĐÂY XUỐNG CUỐI: ' + (info.name || info.id) + ' → cuối danh sách — '
           + state.matches.length + ' chat trong lựa chọn');
-        if (!alreadyHasToEnd) schedulePreloadSelectedChats(true);
+        schedulePreloadSelectedChats(true);
       } finally {
         if (btn) btn.disabled = false;
         render();
@@ -8408,15 +8396,16 @@
       const snippet = info.snippetRaw || info.snippet;
       const idx = state.matches.findIndex((m) => m.id === info.id);
       const same = state.matches.filter((m) => (m.snippetRaw || m.snippet) === snippet);
-      const inList = !!(state.allRows && state.allRows.has(info.id));
       if (idx >= 0 && same.length > 1) {
         const allChecked = same.every((m) => m.checked);
         same.forEach((m) => { m.checked = !allChecked; });
         logLine((allChecked ? '✅ Bỏ chọn' : '✅ Chọn') + ' ' + same.length + ' đoạn cùng snippet: “' + clip(snippet, 60) + '”');
+        schedulePreloadSelectedChats(true);
       } else if (idx >= 0) {
         state.matches[idx].checked = !state.matches[idx].checked;
-        logLine((state.matches[idx].checked ? '✅ Đã chọn lại: ' : '⬜ Đã bỏ chọn: ') + (info.name || info.id));
+        logLine((state.matches[idx].checked ? '✅ Đã chọn lại & tự nạp: ' : '⬜ Đã bỏ chọn: ') + (info.name || info.id));
         highlightRows();
+        if (state.matches[idx].checked) schedulePreloadSelectedChats(true);
       } else {
         const rich = enrichRowWithRedux(info);
         state.mode = 'pick';
@@ -8426,10 +8415,9 @@
           isTarget: true,
           mark: 'target',
         });
-        logLine('✅ Đã chọn đoạn chat: ' + (rich.name || rich.id) + ' (đã chọn ' + state.matches.length + ' chat)'
-          + (inList ? '' : ' — đang tự nạp dữ liệu…'));
+        logLine('✅ Đã chọn & tự nạp đoạn chat: ' + (rich.name || rich.id) + ' (đã chọn ' + state.matches.length + ' chat)');
         highlightRows();
-        if (!inList) schedulePreloadSelectedChats(true);
+        schedulePreloadSelectedChats(true);
       }
       render();
       return;
@@ -8441,11 +8429,8 @@
       state.lastAltClickId = null;
       state.lastAltClickTime = 0;
       (async () => {
-        const alreadyHasToEnd = !!(state.allRows && state.allRows.size && !state.allRowsPartial && state.allRows.has(info.id));
-        if (!alreadyHasToEnd) {
-          logLine('⚡ Đoạn chọn chưa có đủ tới cuối danh sách — tự tải qua API để lấy từ ' + (info.name || info.id) + ' xuống cuối…');
-          await scanFullList({ full: true, restartIfBusy: true });
-        }
+        logLine('⚡ Đang tự tải danh sách qua API để lấy từ ' + (info.name || info.id) + ' xuống cuối…');
+        await scanFullList({ full: true, restartIfBusy: true });
         state.mode = 'range';
         state.target = null;
         state.rangeStart = enrichRowWithRedux(info);
@@ -8459,7 +8444,7 @@
           };
           computeMatches();
           logLine('🅰⬇ Chọn từ ' + (info.name || info.id) + ' xuống hết cuối danh sách — ' + state.matches.length + ' chat');
-          if (!alreadyHasToEnd) schedulePreloadSelectedChats(true);
+          schedulePreloadSelectedChats(true);
         } else {
           state.rangeEnd = null;
           computeMatches();
