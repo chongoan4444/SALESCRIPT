@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "BOTFAKE LITE",
-  "version": "1.91.67",
+  "version": "1.91.68",
   "description": "Gửi hàng loạt Pancake trong background + overlay Pancake #1/#2 khi đổi tab",
   "permissions": [
     "tabs",
