@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE LITE
 // @namespace    salescript
-// @version      1.91.66
+// @version      1.91.67
 // @description  BOTFAKE — panel hiện mọi website; gửi/tải list qua extension background.
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -44,7 +44,7 @@
   /* ============================ HẰNG SỐ ============================ */
 
   const PANEL_ID = 'ssb-root';          // ssb = SaleScript Bulk — không đụng pk-*/adj-*/pancake-* của script khác
-  const APP_VERSION = '1.91.66';        // hiện ở tiêu đề panel — đối chiếu với @version trong header
+  const APP_VERSION = '1.91.67';        // hiện ở tiêu đề panel — đối chiếu với @version trong header
   const STYLE_ID = 'ssb-style';
 
   const MAX_NAME_LIST = 12;             // số tên hiển thị khi xác nhận
@@ -7148,6 +7148,7 @@
   }
 
   function buildPanel() {
+    if (window.__BOTFAKE_TAB_CLIPBOARD_ACTIVE__) return;
     if (document.getElementById(PANEL_ID)) return;
     ensureStyle();
     const host = document.createElement('div');
@@ -8230,6 +8231,7 @@
 
   // Chặn ở các event "down/up" của chuột — app không được mở chat khi đang chọn chuỗi
   function onRowGesture(e) {
+    if (window.__BOTFAKE_TAB_CLIPBOARD_ACTIVE__) return;
     if (!rowGuardOn()) return;                  // người dùng đã bỏ tích "Chặn mở chat"
     if (!altHeldNow(e) && !ctrlHeldNow(e) && !state.pickMode) return; // chuột thường → không can thiệp
     const info = convRowTarget(e);
@@ -8238,6 +8240,7 @@
   }
 
   function onDocClick(e) {
+    if (window.__BOTFAKE_TAB_CLIPBOARD_ACTIVE__) return;
     // Xử lý click trong panel BOTFAKE (#ssb-list): Ctrl+click chọn/bỏ chọn cùng snippet
     const listEl = shadow && shadow.getElementById('ssb-list');
     if (listEl && listEl.contains(e.target)) {
@@ -8378,6 +8381,7 @@
   }
 
   function onKeydown(e) {
+    if (window.__BOTFAKE_TAB_CLIPBOARD_ACTIVE__) return;
     if (e.key === 'Escape' && state.imgPick) {
       if (typeof window.__botfakeImgPick__ === 'function') window.__botfakeImgPick__(false);
       logLine('🖼 Đã hủy chọn ảnh');
@@ -8456,6 +8460,7 @@
   window.addEventListener('blur', () => { modState.altAt = 0; modState.ctrlAt = 0; });
 
   function showBotfakePanel() {
+    if (window.__BOTFAKE_TAB_CLIPBOARD_ACTIVE__) return;
     buildPanel();
     const host = document.getElementById(PANEL_ID);
     if (host) host.style.display = '';
@@ -8468,6 +8473,7 @@
   }
 
   extListen((m, _s, sendResponse) => {
+    if (window.__BOTFAKE_TAB_CLIPBOARD_ACTIVE__) return;
     if (m && m.type === 'BOTFAKE_SHOW_PANEL') {
       showBotfakePanel();
       sendResponse && sendResponse({ ok: true });
@@ -8481,6 +8487,7 @@
   }
 
   function init() {
+    if (window.__BOTFAKE_TAB_CLIPBOARD_ACTIVE__) return;
     if (!isPancakeHost()) return;
     showBotfakePanel();
     logLine('Sẵn sàng. Panel chỉ trên pancake.vn — tab khác chỉ hiện thanh tiến độ khi đang chạy.');

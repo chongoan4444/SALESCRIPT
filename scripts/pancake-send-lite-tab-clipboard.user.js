@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE LITE (Tab + Clipboard)
 // @namespace    salescript
-// @version      1.91.66
+// @version      1.91.67
 // @description  BOTFAKE — bản hỗ trợ phím Tab kích hoạt Chạy (có xác nhận) + nút chuyển chế độ gửi bằng Câu trên giao diện / Dữ liệu đang copy trên Clipboard.
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -41,10 +41,13 @@
 (function () {
   'use strict';
 
+  if (window.__BOTFAKE_TAB_CLIPBOARD_ACTIVE__) return;
+  window.__BOTFAKE_TAB_CLIPBOARD_ACTIVE__ = true;
+
   /* ============================ HẰNG SỐ ============================ */
 
   const PANEL_ID = 'ssb-root';          // ssb = SaleScript Bulk — không đụng pk-*/adj-*/pancake-* của script khác
-  const APP_VERSION = '1.91.66';        // hiện ở tiêu đề panel — đối chiếu với @version trong header
+  const APP_VERSION = '1.91.67';        // hiện ở tiêu đề panel — đối chiếu với @version trong header
   const STYLE_ID = 'ssb-style';
 
   const MAX_NAME_LIST = 12;             // số tên hiển thị khi xác nhận
@@ -6377,8 +6380,11 @@
   async function readClipboardText() {
     try {
       if (navigator.clipboard && typeof navigator.clipboard.readText === 'function') {
-        const txt = await navigator.clipboard.readText();
-        if (typeof txt === 'string') {
+        const txt = await Promise.race([
+          navigator.clipboard.readText(),
+          new Promise((_, reject) => setTimeout(() => reject(new Error('clipboard timeout')), 800)),
+        ]);
+        if (typeof txt === 'string' && txt.trim()) {
           state.lastCopiedText = txt;
           return txt;
         }
@@ -6388,6 +6394,7 @@
   }
 
   async function sendToAll() {
+    try { markSendIdleIfSettled(); } catch (e0) { /* ignore */ }
     if (state.sending || state.confirmingSend) return; // chặn bấm đúp / gọi đúp → gửi TRÙNG
     if (state.listIncomplete) {
       alert('Danh sách tải CHƯA ĐẦY ĐỦ nên chưa thể gửi.\nHãy bấm “⚡ Tải danh sách” để tải lại cho đủ rồi mới gửi.');
@@ -6411,10 +6418,12 @@
         const msgEl = shadow && shadow.getElementById('ssb-msg');
         typedText = (msgEl && msgEl.value || '').trim() || ((state.quickReply && state.quickReply.text) || '');
       }
+      // Nhường 20ms để chu kỳ keydown/keyup của phím Tab hoàn tất trước khi mở hộp thoại modal alert/confirm
+      await sleep(20);
       const imgState = state.image || null;
       let targets = state.matches.filter((m) => m.checked);
       if (!targets.length) {
-        alert('Chưa có đoạn chat nào được chọn.\nHãy bấm ⚡ Tải danh sách rồi ☑ Chọn tất cả.');
+        alert('Chưa có đoạn chat nào được chọn.\nHãy bấm ⚡ Tải danh sách rồi ☑ Chọn tất cả (hoặc Alt+Click chọn chat).');
         return;
       }
       {
@@ -7201,10 +7210,16 @@
   }
 
   function buildPanel() {
-    if (document.getElementById(PANEL_ID)) return;
+    const existingHost = document.getElementById(PANEL_ID);
+    if (existingHost) {
+      if (existingHost.getAttribute('data-tab-clip') === '1' && shadow) return;
+      try { existingHost.remove(); } catch (e0) { /* ignore */ }
+      shadow = null;
+    }
     ensureStyle();
     const host = document.createElement('div');
     host.id = PANEL_ID;
+    host.setAttribute('data-tab-clip', '1');
     host.style.cssText = 'position:fixed;right:12px;bottom:12px;z-index:2147483646;font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;';
     shadow = host.attachShadow({ mode: 'open' });
     shadow.innerHTML = `
@@ -8005,11 +8020,17 @@
       }
     });
     const triggerSendRun = () => {
-      if (state.sending || state.confirmingSend) return;
+      try { markSendIdleIfSettled(); } catch (e0) { /* ignore */ }
+      if (state.confirmingSend) return;
+      if (state.sending) {
+        logLine('⏳ Đang trong lượt gửi — hãy chờ hoàn tất hoặc bấm ⏹ Dừng trước khi chạy lượt mới.');
+        return;
+      }
       if (state.sentIds && state.sentIds.size > 0) {
         logLine('⏩ Có ' + state.sentIds.size + ' chat đã gửi ở lượt trước — sẽ bỏ qua, chỉ gửi phần còn lại.');
       }
       sendToAll().catch((err) => {
+        state.confirmingSend = false;
         // Đường chốt cuối: exception nào thoát khỏi sendToAll cũng phải nhả nút + tắt overlay
         logLine('⛔ Lỗi ngoài dự kiến khi gửi: ' + (err && err.message || err) + ' — dừng lượt.');
         state.stopRequested = true;
@@ -8471,6 +8492,29 @@
   }
 
   function onKeydown(e) {
+    if (!e || e.__botfakeKeyHandled) return;
+    const isTabKey = (e.key === 'Tab' || e.code === 'Tab' || e.keyCode === 9 || e.which === 9);
+    // Phím Tab: kích hoạt nút ▶ Chạy (luôn hiện hộp xác nhận trước khi gửi)
+    if (isTabKey && !e.altKey && !e.ctrlKey && !e.metaKey && !e.shiftKey && !e.isComposing) {
+      if (!state.enabled || !isPancakeHost()) return;
+      e.__botfakeKeyHandled = true;
+      e.preventDefault();
+      e.stopPropagation();
+      if (e.stopImmediatePropagation) e.stopImmediatePropagation();
+      if (e.repeat) return;
+      if (!shadow || !document.getElementById(PANEL_ID)) {
+        try { showBotfakePanel(); } catch (e0) { /* ignore */ }
+      }
+      if (typeof window.__botfakeTriggerSend__ === 'function') {
+        window.__botfakeTriggerSend__();
+      } else {
+        try { markSendIdleIfSettled(); } catch (e1) { /* ignore */ }
+        if (!state.sending && !state.confirmingSend) {
+          sendToAll().catch(() => { state.confirmingSend = false; });
+        }
+      }
+      return;
+    }
     if (e.key === 'Escape' && state.imgPick) {
       if (typeof window.__botfakeImgPick__ === 'function') window.__botfakeImgPick__(false);
       logLine('🖼 Đã hủy chọn ảnh');
@@ -8524,6 +8568,45 @@
 
   hookNetwork();
 
+  // Theo dõi sự kiện copy/cut trên trang và khi quay lại tab để cập nhật ngay bản xem trước Clipboard
+  const onCopyOrCut = (e) => {
+    try {
+      let copied = '';
+      if (e && e.clipboardData && typeof e.clipboardData.getData === 'function') {
+        copied = e.clipboardData.getData('text/plain') || '';
+      }
+      if (!copied && window.getSelection) {
+        copied = String(window.getSelection() || '');
+      }
+      if (!copied) {
+        const ae = document.activeElement;
+        if (ae && (ae.tagName === 'TEXTAREA' || ae.tagName === 'INPUT') && typeof ae.selectionStart === 'number') {
+          copied = String(ae.value || '').slice(ae.selectionStart, ae.selectionEnd);
+        }
+      }
+      if (copied && copied.trim()) {
+        state.lastCopiedText = copied;
+        const previewEl = shadow && shadow.getElementById('ssb-clip-preview-text');
+        if (previewEl) {
+          previewEl.textContent = 'Đang có trên Clipboard: “' + clip(copied.trim(), 120) + '” — bấm ▶ Chạy (hoặc phím Tab) để xác nhận & gửi.';
+        }
+      }
+    } catch (err) { /* ignore */ }
+  };
+  window.addEventListener('copy', onCopyOrCut, true);
+  window.addEventListener('cut', onCopyOrCut, true);
+  window.addEventListener('focus', () => {
+    if (state.msgSource === 'clipboard' && !state.confirmingSend) {
+      readClipboardText().then((txt) => {
+        const clean = String(txt || '').trim();
+        const previewEl = shadow && shadow.getElementById('ssb-clip-preview-text');
+        if (clean && previewEl) {
+          previewEl.textContent = 'Đang có trên Clipboard: “' + clip(clean, 120) + '” — bấm ▶ Chạy (hoặc phím Tab) để xác nhận & gửi.';
+        }
+      }).catch(() => {});
+    }
+  });
+
   // GẮN LISTENER CHUỘT NGAY TẠI ĐÂY (script chạy ở document-start → TRƯỚC khi JS của app
   // gắn listener của nó). Đây là lý do phải gắn sớm: nếu app đăng ký listener capture trên
   // window trước ta thì stopImmediatePropagation của ta vô hiệu (listener đăng ký trước chạy trước).
@@ -8532,6 +8615,7 @@
   window.addEventListener('click', onDocClick, true);
   ROW_GUARD_EVENTS.forEach((ev) => window.addEventListener(ev, onRowGesture, true));
   window.addEventListener('keydown', onKeydown, true);
+  document.addEventListener('keydown', onKeydown, true);
 
   // Theo dõi Alt / Ctrl THẬT SỰ đang được giữ (dùng khi event click không còn kèm altKey/ctrlKey
   // do người dùng nhả phím hơi sớm). Có keyup + blur + đáo hạn 900ms nên KHÔNG bao giờ "dính" lâu
