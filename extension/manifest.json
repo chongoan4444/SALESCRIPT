@@ -1,9 +1,16 @@
 {
   "manifest_version": 3,
   "name": "BOTFAKE LITE",
-  "version": "1.91.61",
+  "version": "1.91.62",
   "description": "Gửi hàng loạt Pancake trong background + overlay Pancake #1/#2 khi đổi tab",
-  "permissions": ["tabs", "storage", "scripting", "cookies", "declarativeNetRequest", "declarativeNetRequestWithHostAccess"],
+  "permissions": [
+    "tabs",
+    "storage",
+    "scripting",
+    "cookies",
+    "declarativeNetRequest",
+    "declarativeNetRequestWithHostAccess"
+  ],
   "host_permissions": [
     "https://pages.fm/*",
     "https://pancake.vn/*",
@@ -47,7 +54,9 @@
         "https://pancake.biz/*",
         "https://socialos.vip/*"
       ],
-      "js": ["pancake-send-lite.user.js"],
+      "js": [
+        "pancake-send-lite.user.js"
+      ],
       "run_at": "document_start",
       "all_frames": false,
       "world": "MAIN"
@@ -64,13 +73,20 @@
         "https://pancake.biz/*",
         "https://socialos.vip/*"
       ],
-      "js": ["bridge.js"],
+      "js": [
+        "bridge.js"
+      ],
       "run_at": "document_start",
       "all_frames": false
     },
     {
-      "matches": ["https://*/*", "http://*/*"],
-      "js": ["overlay.js"],
+      "matches": [
+        "https://*/*",
+        "http://*/*"
+      ],
+      "js": [
+        "overlay.js"
+      ],
       "run_at": "document_idle",
       "all_frames": false
     }
