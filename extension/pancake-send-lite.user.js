@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE LITE
 // @namespace    salescript
-// @version      1.91.59
+// @version      1.91.60
 // @description  BOTFAKE — panel hiện mọi website; gửi/tải list qua extension background.
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -44,7 +44,7 @@
   /* ============================ HẰNG SỐ ============================ */
 
   const PANEL_ID = 'ssb-root';          // ssb = SaleScript Bulk — không đụng pk-*/adj-*/pancake-* của script khác
-  const APP_VERSION = '1.91.59';        // hiện ở tiêu đề panel — đối chiếu với @version trong header
+  const APP_VERSION = '1.91.60';        // hiện ở tiêu đề panel — đối chiếu với @version trong header
   const STYLE_ID = 'ssb-style';
 
   const MAX_NAME_LIST = 12;             // số tên hiển thị khi xác nhận
@@ -3070,25 +3070,45 @@
           //   • Timeout hết giờ trả { success: false, data: null } (res.data === null) -> CHƯA RÕ.
           //   • Extension CÓ phản hồi (GET_GLOBAL_ID_FOR_CONV_SUCCESS không có globalId, hoặc
           //     GET_GLOBAL_ID_FOR_CONV_FAILURE trả { success: false, data: { type: '..._FAILURE', ... } })
-          //     và không phải lỗi mất kết nối REOPEN_BROWSER -> xác nhận Extension đã dò nhưng không có gid.
-          Promise.resolve().then(() => adapter.send(
+          //     và không phải lỗi mất kết nối REOPEN_BROWSER:
+          //     Khi bắn dồn 16–24 lệnh dò song song, vài chat sống có thể bị FB/Extension trả
+          //     FAILURE tạm thời ở lần 1 (hoặc WebSocket loadThread đang cuộn gần tới). Vì vậy nghỉ
+          //     250ms, kiểm tra lại WebSocket cache rồi thử lại GET_GLOBAL_ID_FOR_CONV đúng 1 lần trước
+          //     khi kết luận extFinderRespondedNoGid = true.
+          const callExtFinderOnce = () => Promise.resolve().then(() => adapter.send(
             Object.assign({ type: 'GET_GLOBAL_ID_FOR_CONV' }, finderPayload),
             { timeout: extWaitMs }
-          )).then((res) => {
-            const val = (res && res.success && res.data && res.data.globalId
+          ));
+          callExtFinderOnce().then(async (res) => {
+            let val = (res && res.success && res.data && res.data.globalId
               && String(res.data.globalId) !== badGid) ? String(res.data.globalId) : '';
-            if (val) finishExt(val, 'ext');
-            else {
-              const d = res && res.data;
-              const errStr = (d && typeof d === 'object') ? String(d.errorMessage || d.error || d.reason || '') : '';
-              const isConnErr = /REOPEN_BROWSER|unableToConnect|extensionDisconnected/i.test(errStr);
-              if (res && (res.success || (d && typeof d === 'object' && !isConnErr))) {
+            if (val) { finishExt(val, 'ext'); return; }
+            const hitMid0 = peekFastGlobalId(full, full, badGid);
+            if (hitMid0) { finishExt(hitMid0, 'cache'); return; }
+            const d0 = res && res.data;
+            const errStr0 = (d0 && typeof d0 === 'object') ? String(d0.errorMessage || d0.error || d0.reason || '') : '';
+            const isConnErr0 = /REOPEN_BROWSER|unableToConnect|extensionDisconnected/i.test(errStr0);
+            if (!settled && !extSettled && !state.stopRequested && !isConnErr0 && res && (res.success || (d0 && typeof d0 === 'object'))) {
+              await sleep(250);
+              if (settled || extSettled || state.stopRequested) { onFinderNull(); return; }
+              const hitMid1 = peekFastGlobalId(full, full, badGid);
+              if (hitMid1) { finishExt(hitMid1, 'cache'); return; }
+              const res2 = await callExtFinderOnce().catch(() => null);
+              val = (res2 && res2.success && res2.data && res2.data.globalId
+                && String(res2.data.globalId) !== badGid) ? String(res2.data.globalId) : '';
+              if (val) { finishExt(val, 'ext'); return; }
+              const d2 = res2 && res2.data;
+              const errStr2 = (d2 && typeof d2 === 'object') ? String(d2.errorMessage || d2.error || d2.reason || '') : '';
+              const isConnErr2 = /REOPEN_BROWSER|unableToConnect|extensionDisconnected/i.test(errStr2);
+              if (res2 && (res2.success || (d2 && typeof d2 === 'object' && !isConnErr2))) {
                 extFinderRespondedNoGid = true;
                 if (ctx) ctx.extFinderRespondedNoGid = true;
                 gidStats.extRespondedNoGid++;
               }
               onFinderNull();
+              return;
             }
+            onFinderNull();
           }).catch(() => onFinderNull());
         } else if (typeof window.findGlobalIdForConv === 'function') {
           Promise.resolve().then(() => window.findGlobalIdForConv(finderPayload)).then((v) => {
@@ -3417,7 +3437,9 @@
   const sockFiredPending = new Set();
 
   function recycleUnusedFbId(pageId, ctx) {
-    if (!ctx || !ctx.nonReusableFbId || !pageId) return;
+    if (!ctx) return;
+    ctx.nonReusableFbIds = null;
+    if (!ctx.nonReusableFbId || !pageId) return;
     const pid = String(pageId);
     const unused = String(ctx.nonReusableFbId);
     ctx.nonReusableFbId = null;
@@ -3452,7 +3474,7 @@
       return Promise.resolve({ ok: true, fbId: ctx.nonReusableFbId });
     }
     const pid = String(pageId || '');
-    if (pid && spareFbIdPool[pid] && spareFbIdPool[pid].length > 0) {
+    if (!forceFresh && pid && spareFbIdPool[pid] && spareFbIdPool[pid].length > 0) {
       const pooledFbId = spareFbIdPool[pid].pop();
       if (pooledFbId) {
         if (ctx) ctx.nonReusableFbId = pooledFbId;
@@ -3542,7 +3564,6 @@
     //    Tuyệt đối không tách "gửi chữ trước, chờ ACK mới upload ảnh gửi sau" (inBlockedCluster cũ),
     //    vì ở chế độ bắn-nhả hàng loạt gói ảnh thứ 2 bị đẩy xuống cuối hàng đợi pageLane sau hàng nghìn
     //    gói chữ khác, gây hiện tượng "gửi câu trước, ảnh tới sau 1 phút" và làm đứng tiến độ giữa chừng.
-    const hasTextMsg = !!(text && String(text).trim().length > 0);
     let attFbIds = null;
     if (photo) {
       const up = await uploadOneTimePhoto(pageId, photo, conv.id, ctx, false);
@@ -3559,9 +3580,10 @@
             window.__botfakeSaveGid__(conv.id, pageId, threadId, gid);
           }
           const fId = (full.from && full.from.id) || conv.fromPsid || '';
-          if (pageId && fId && !updatedGidConvSet.has(conv.id) && !(ctx && ctx.gidFromServerOrCache)) {
+          const tok = getToken();
+          if (pageId && fId && tok && !updatedGidConvSet.has(conv.id) && !(ctx && ctx.gidFromServerOrCache)) {
             updatedGidConvSet.add(conv.id);
-            sideEffectLane(() => fetch(apiBase() + '/v1/pages/' + pageId + '/customers/' + encodeURIComponent(fId) + '/update_global_id?', {
+            sideEffectLane(() => fetch(apiBase() + '/v1/pages/' + pageId + '/customers/' + encodeURIComponent(fId) + '/update_global_id?access_token=' + encodeURIComponent(tok), {
               method: 'POST',
               headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
               credentials: 'include',
@@ -3579,7 +3601,10 @@
       // phân loại lỗi…) — dùng chung cho đường chờ ACK (lô nhỏ) và đường bắn-nhả (lô lớn, chạy nền).
       const settleSocketResult = async (rawIn) => {
       let raw = rawIn;
-      if (photo) ctx.nonReusableFbId = null;
+      if (photo) {
+        ctx.nonReusableFbId = null;
+        ctx.nonReusableFbIds = null;
+      }
 
       // Trường hợp đặc biệt: chữ đã đi thành công nhưng task ảnh bị markOptimisticMessageFailed
       // → TUYỆT ĐỐI không gửi lại chữ (tránh trùng chữ), mà upload 1 fbId mới và bắn bù RIÊNG PHẦN ẢNH (text = '')
@@ -3589,6 +3614,7 @@
         const freshPhotoUp = await uploadOneTimePhoto(pageId, photo, conv.id, ctx, true);
         if (freshPhotoUp && freshPhotoUp.ok && freshPhotoUp.fbId) {
           ctx.nonReusableFbId = null;
+          ctx.nonReusableFbIds = null;
           sendDiag.photoRetry++;
           const retryPhotoOnly = await runPrioritySocket(() => socketPublishSend(helper, pageId, gid, '', (freshPhotoUp.fbIds && freshPhotoUp.fbIds.length) ? freshPhotoUp.fbIds : [freshPhotoUp.fbId]));
           if (retryPhotoOnly && retryPhotoOnly.kind === 'ok') {
@@ -3606,11 +3632,14 @@
       }
 
       // CHỐNG BỎ SÓT TIN DO FACEBOOK MQTT BURST-REJECT:
-      // Mọi ca đã có globalId thật mà bị rejected đều được bắn lại Socket
-      // đúng 1 lần sau ~120ms ngay ở ĐẦU hàng đợi pageLane (runPrioritySocket) để chốt kết quả tức thì,
-      // không dồn hàng nghìn lệnh retry về cuối lô làm đứng tiến độ.
+      // Mọi ca đã có globalId thật mà bị rejected đều được nghỉ 400..650ms (đủ thoát cửa sổ burst-reject
+      // của FB MQTT), xin fbId MỚI TINH (vì fbId is_reusable=false đã bị gửi trong Task #1 của Lần 1),
+      // rồi bắn lại ngay ở ĐẦU hàng đợi pageLane (runPrioritySocket).
+      // Đặc biệt: nếu ca này nằm lẻ giữa các khách sống (preRejectStreak <= 2) mà Lần 2 vẫn bị rejected,
+      // nghỉ thêm 700..1000ms và thử nốt 1 lần cuối với fbId mới để không bao giờ sót khách sống!
+      const preRejectStreak = socketRejectStreak[pageId] || 0;
       if (raw && raw.kind === 'rejected') {
-        socketRejectStreak[pageId] = (socketRejectStreak[pageId] || 0) + 1;
+        socketRejectStreak[pageId] = preRejectStreak + 1;
       } else if (raw && raw.kind === 'ok') {
         socketRejectStreak[pageId] = 0;
       }
@@ -3619,7 +3648,7 @@
         if (deliveredIds[conv.id]) return { ok: true, id: gid, sendBy: 'socket', sent: true };
         ctx.socketRetriedOnce = true;
         sendDiag.sockRetry++;
-        await sleep(120 + Math.floor(Math.random() * 100));
+        await sleep(400 + Math.floor(Math.random() * 250));
         // Kiểm tra xem trong nhịp nghỉ đó WebSocket threadMappingStoreV2 có nạp được global_id mới hơn không
         if (threadId && pageId) {
           try {
@@ -3633,19 +3662,36 @@
             }
           } catch (e0) { /* ignore */ }
         }
-        // Nếu khung vừa bị rejected có CẢ CHỮ LẪN ẢNH (hasTextMsg) mà cả task chữ cũng bị từ chối
-        // (replaced.length === 0), nghĩa là hội thoại từ chối nhận tin trước khi tiêu thụ attachment:
-        // tái sử dụng ngay attFbIds vừa bind cho đúng conv.id này, tránh bắn thêm hàng nghìn request
-        // HTTP /contents/facebook vô ích vào cụm khách chết. Chỉ bind lại khi tin chỉ có ảnh (!hasTextMsg).
-        if (photo && (!hasTextMsg || !Array.isArray(attFbIds) || !attFbIds.length)) {
+        // BẮT BUỘC xin fbId mới (forceFresh = true): trong khung /ls_req Lần 1, Task #1 (send_type: 3)
+        // đã gửi attFbIds (is_reusable=false) lên FB nên fbId cũ có thể đã bị FB đốt/vô hiệu hóa!
+        if (photo) {
           const freshUp = await uploadOneTimePhoto(pageId, photo, conv.id, ctx, true);
           if (!freshUp || !freshUp.ok || !freshUp.fbId) {
             return { ok: false, sent: false, error: 'Socket: server báo gửi thất bại' };
           }
           ctx.nonReusableFbId = null;
+          ctx.nonReusableFbIds = null;
           attFbIds = (freshUp.fbIds && freshUp.fbIds.length) ? freshUp.fbIds.slice() : [freshUp.fbId];
         }
         raw = await runPrioritySocket(() => socketPublishSend(helper, pageId, gid, text, attFbIds));
+        if (raw && raw.kind === 'rejected' && preRejectStreak <= 2 && !state.stopRequested && !deliveredIds[conv.id]) {
+          // Ca lẻ nằm giữa vùng khách đang gửi thành công (preRejectStreak <= 2): thử thêm 1 nhịp 700..1000ms
+          // phòng trường hợp nhịp nghẽn MQTT kéo dài ~1s (chống lọt ~5 con khách sống trong list 1.000).
+          await sleep(700 + Math.floor(Math.random() * 300));
+          if (!state.stopRequested && !deliveredIds[conv.id]) {
+            if (photo) {
+              const freshUpIso = await uploadOneTimePhoto(pageId, photo, conv.id, ctx, true);
+              if (freshUpIso && freshUpIso.ok && freshUpIso.fbId) {
+                ctx.nonReusableFbId = null;
+                ctx.nonReusableFbIds = null;
+                attFbIds = (freshUpIso.fbIds && freshUpIso.fbIds.length) ? freshUpIso.fbIds.slice() : [freshUpIso.fbId];
+                raw = await runPrioritySocket(() => socketPublishSend(helper, pageId, gid, text, attFbIds));
+              }
+            } else {
+              raw = await runPrioritySocket(() => socketPublishSend(helper, pageId, gid, text, null));
+            }
+          }
+        }
         if (raw && raw.kind === 'ok') {
           socketRejectStreak[pageId] = 0;
         }
@@ -3654,6 +3700,7 @@
           const freshPhotoUp2 = await uploadOneTimePhoto(pageId, photo, conv.id, ctx, true);
           if (freshPhotoUp2 && freshPhotoUp2.ok && freshPhotoUp2.fbId) {
             ctx.nonReusableFbId = null;
+            ctx.nonReusableFbIds = null;
             sendDiag.photoRetry++;
             const retryPhotoOnly2 = await runPrioritySocket(() => socketPublishSend(helper, pageId, gid, '', (freshPhotoUp2.fbIds && freshPhotoUp2.fbIds.length) ? freshPhotoUp2.fbIds : [freshPhotoUp2.fbId]));
             if (retryPhotoOnly2 && retryPhotoOnly2.kind === 'ok') {
@@ -3794,7 +3841,10 @@
             }
             settleAndFinalize({ kind: 'noack' });
           });
-        if (photo) ctx.nonReusableFbId = null;
+        if (photo) {
+          ctx.nonReusableFbId = null;
+          ctx.nonReusableFbIds = null;
+        }
         const slotStarted = await slotStartedPromise;
         if (!slotStarted) {
           sockFiredPending.delete(conv.id);
@@ -4675,28 +4725,12 @@
       ctx.threadResolved = true;
     }
     if (!ctx.gidResolved && ctx.threadId) {
-      if (ctx.fastOnly && photo && !ctx.nonReusableFbId && !ctx.nonReusableFbIds) {
-        const [gidRes, upRes] = await Promise.all([
-          resolveGlobalId(full, ctx.threadId, conv.id, conv.fromPsid, ctx.gidForceFind, ctx),
-          uploadOneTimePhoto(pageId, photo, conv.id, ctx, false),
-        ]);
-        ctx.gid = gidRes;
-        if (upRes && upRes.ok && upRes.fbId) ctx.nonReusableFbId = upRes.fbId;
-        if (upRes && upRes.ok && upRes.fbIds && upRes.fbIds.length > 1) ctx.nonReusableFbIds = upRes.fbIds;
-        if (ctx.deferredToExt) {
-          // Chưa dùng ở Làn 1 → nhường ngay fbId này vào spareFbIdPool[pageId] cho chat sống tiếp theo dùng ở 0ms!
-          recycleUnusedFbId(pageId, ctx);
-          return ctx;
-        }
-        ctx.gidResolved = true;
-      } else {
-        ctx.gid = await resolveGlobalId(full, ctx.threadId, conv.id, conv.fromPsid, ctx.gidForceFind, ctx);
-        if (ctx.deferredToExt) {
-          recycleUnusedFbId(pageId, ctx);
-          return ctx;
-        }
-        ctx.gidResolved = true;
+      ctx.gid = await resolveGlobalId(full, ctx.threadId, conv.id, conv.fromPsid, ctx.gidForceFind, ctx);
+      if (ctx.deferredToExt) {
+        recycleUnusedFbId(pageId, ctx);
+        return ctx;
       }
+      ctx.gidResolved = true;
     }
     // Nếu không tìm thấy cả globalId thật lẫn xác nhận hội thoại từ Extension → không tốn công upload ảnh
     const canSend = !!((ctx.gid && !ctx.gidFromPsid) || (ctx.threadId && !ctx.noGidConfirmedByExt));
