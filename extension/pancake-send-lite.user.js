@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE LITE
 // @namespace    salescript
-// @version      1.91.63
+// @version      1.91.64
 // @description  BOTFAKE — panel hiện mọi website; gửi/tải list qua extension background.
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -44,7 +44,7 @@
   /* ============================ HẰNG SỐ ============================ */
 
   const PANEL_ID = 'ssb-root';          // ssb = SaleScript Bulk — không đụng pk-*/adj-*/pancake-* của script khác
-  const APP_VERSION = '1.91.63';        // hiện ở tiêu đề panel — đối chiếu với @version trong header
+  const APP_VERSION = '1.91.64';        // hiện ở tiêu đề panel — đối chiếu với @version trong header
   const STYLE_ID = 'ssb-style';
 
   const MAX_NAME_LIST = 12;             // số tên hiển thị khi xác nhận
@@ -2214,7 +2214,6 @@
 
     // 1) Làm nóng sẵn WebSocket + yêu cầu BATCH_GET_GLOBAL_ID cho các đoạn chat đã chọn
     try { if (typeof warmUpSockets === 'function') warmUpSockets(selected); } catch (e) { /* ignore */ }
-    try { if (typeof requestBatchGlobalIds === 'function') requestBatchGlobalIds(selected); } catch (e) { /* ignore */ }
 
     // 2) Với các lựa chọn vừa và nhỏ (<= 150 chat), LUÔN tự động nạp sẵn dữ liệu hội thoại (ensureConvCtx:
     //    GET .../messages -> global_id, ad_clicks, customers) cho toàn bộ các đoạn được chọn,
@@ -3481,7 +3480,7 @@
   const socketRejectStreak = {};
   const socketReconnectPromises = {};
   const socketLastPublishAt = {};
-  const SOCKET_MIN_PACE_MS = 6; // giãn 6ms (~166 khung/s/page) kết hợp pageLane giữ slot tới khi có /ls_resp — chặn ngập hàng nghìn frame in-flight gây mất ACK hàng loạt
+  const SOCKET_MIN_PACE_MS = 10; // giãn 10ms (~100 khung/s/page = 6.000 tin/phút) kết hợp pageLane giữ slot tới khi có /ls_resp — giảm tối đa burst-reject của FB MQTT mà phát 100 tin chỉ mất ~1s
 
   async function paceSocketPublish(pageId) {
     const pid = String(pageId || '');
@@ -3929,12 +3928,17 @@
       } else if (raw && raw.kind === 'ok') {
         socketRejectStreak[pageId] = 0;
       }
+      // Nếu là ca bù từ API sang (ctx.isBuRetry: đã bị API từ chối #551 VÀ Socket lần 1 cũng trả markOptimisticMessageFailed)
+      // → cả 2 kênh độc lập đều đã xác nhận khách khóa nick, chốt ngay ở 0ms mà không bắn lại Socket lần 2!
+      if (raw && raw.kind === 'rejected' && ctx && ctx.isBuRetry) {
+        ctx.socketRetriedOnce = true;
+      }
       if (raw && raw.kind === 'rejected' && (!ctx || !ctx.gidFromPsid) && !ctx.socketRetriedOnce) {
         // Chat đã được kênh khác xác nhận đến nơi trong lúc chờ ACK → dừng, không bắn lại (chống trùng)
         if (deliveredIds[conv.id]) return { ok: true, id: gid, sendBy: 'socket', sent: true };
         ctx.socketRetriedOnce = true;
         sendDiag.sockRetry++;
-        await sleep(400 + Math.floor(Math.random() * 250));
+        await sleep(220 + Math.floor(Math.random() * 130));
         // Kiểm tra xem trong nhịp nghỉ đó WebSocket threadMappingStoreV2 có nạp được global_id mới hơn không
         if (threadId && pageId) {
           try {
@@ -3959,11 +3963,13 @@
           ctx.nonReusableFbIds = null;
           attFbIds = (freshUp.fbIds && freshUp.fbIds.length) ? freshUp.fbIds.slice() : [freshUp.fbId];
         }
-        raw = await runPrioritySocket(() => socketPublishSend(helper, pageId, gid, text, attFbIds));
-        if (raw && raw.kind === 'rejected' && preRejectStreak <= 2 && !state.stopRequested && !deliveredIds[conv.id]) {
-          // Ca lẻ nằm giữa vùng khách đang gửi thành công (preRejectStreak <= 2): thử thêm 1 nhịp 700..1000ms
-          // phòng trường hợp nhịp nghẽn MQTT kéo dài ~1s (chống lọt ~5 con khách sống trong list 1.000).
-          await sleep(700 + Math.floor(Math.random() * 300));
+        // Xếp theo thứ tự FIFO trong pageLane (không dùng runPrioritySocket) để các ca retry của nick khóa
+        // không chèn ngang lên trước các chat chính chưa gửi Lần 1 hoặc các chat đang chờ bù!
+        raw = await pageLane(() => socketPublishSend(helper, pageId, gid, text, attFbIds));
+        if (raw && raw.kind === 'rejected' && preRejectStreak === 0 && !state.stopRequested && !deliveredIds[conv.id]) {
+          // Chỉ khi là ca lẻ đầu tiên ngay sau chuỗi gửi thành công (preRejectStreak === 0) mới thử thêm 1 nhịp ngắn 350..500ms;
+          // khi đã gặp từ 2 ca rejected liên tiếp (cụm nick khóa) thì chốt ngay sau Lần 2 để không ngâm đuôi lượt!
+          await sleep(350 + Math.floor(Math.random() * 150));
           if (!state.stopRequested && !deliveredIds[conv.id]) {
             if (photo) {
               const freshUpIso = await uploadOneTimePhoto(pageId, photo, conv.id, ctx, true);
@@ -3971,10 +3977,10 @@
                 ctx.nonReusableFbId = null;
                 ctx.nonReusableFbIds = null;
                 attFbIds = (freshUpIso.fbIds && freshUpIso.fbIds.length) ? freshUpIso.fbIds.slice() : [freshUpIso.fbId];
-                raw = await runPrioritySocket(() => socketPublishSend(helper, pageId, gid, text, attFbIds));
+                raw = await pageLane(() => socketPublishSend(helper, pageId, gid, text, attFbIds));
               }
             } else {
-              raw = await runPrioritySocket(() => socketPublishSend(helper, pageId, gid, text, null));
+              raw = await pageLane(() => socketPublishSend(helper, pageId, gid, text, null));
             }
           }
         }
@@ -4680,7 +4686,7 @@
   const BUS_PARALLEL_EXT = 10;    // số lệnh adapter.send (REPLY_INBOX_PHOTO) chạy song song — điểm bắt đầu của làn thích ứng Ext
   const EXT_SEND_MIN = 6;         // sàn làn Ext gửi: không thấp hơn mức đã kiểm chứng ổn định
   const EXT_SEND_MAX = 24;        // trần làn Ext gửi: mở tới 24 khi Extension trả lời nhanh/rõ ở lô lớn
-  const BUS_PARALLEL_SOCKET = 64; // số frame Socket (/ls_req) in-flight trên mỗi kết nối WebSocket (kèm giãn nhịp 6ms chống burst; vẫn giữ retry + socketRejectStreak bảo vệ)
+  const BUS_PARALLEL_SOCKET = 36; // số frame Socket (/ls_req) in-flight trên mỗi kết nối WebSocket (kèm giãn nhịp 10ms chống burst; vẫn giữ retry + socketRejectStreak bảo vệ)
   const SIDE_EFFECT_PARALLEL = 8; // số request nền (fill_admin_name / update_global_id) chạy song song
   function makeLane(parallel) {
     let active = 0;
@@ -5621,10 +5627,11 @@
   // gọi hỏng/timeout được phép gọi lại ở lượt sau hoặc trước Pass 2, vì IndexedDB
   // của Extension liên tục được loadThread/gửi tay bổ sung thêm mapping mới.
   function requestBatchGlobalIds(pid, force) {
-    const pageId = String(pid || '');
-    if (!pageId) return Promise.resolve(0);
+    if (!pid || typeof pid === 'object') return Promise.resolve(0);
+    const pageId = String(pid || '').trim();
+    if (!pageId || pageId.indexOf('[object') > -1) return Promise.resolve(0);
     if (batchGidPromises[pageId]) return batchGidPromises[pageId];
-    if (!force && batchGidFetchedPages[pageId]) return Promise.resolve(0);
+    if (batchGidFetchedPages[pageId]) return Promise.resolve(0);
     const adapter = window.__ExtensionAdapter__;
     if (!adapter || typeof adapter.send !== 'function') return Promise.resolve(0);
     const promise = Promise.resolve().then(() => adapter.send({
@@ -5633,16 +5640,14 @@
       // Khớp payload app (@897543): app luôn kèm timeRangeMin. Gửi 0 = lấy mọi mốc,
       // tránh Extension hiểu thiếu trường là không có mapping nào trong khoảng lọc.
       timeRangeMin: 0,
-    }, { timeout: 6000 })).then((res) => {
+    }, { timeout: 2000 })).then((res) => {
       delete batchGidPromises[pageId];
+      batchGidFetchedPages[pageId] = true;
       const list = res && res.success && res.data && res.data.threadsWithGlobalId;
       if (!Array.isArray(list)) {
         gidStats.batchFail++;
-        delete batchGidFetchedPages[pageId];
-        try { logLine('🧭 BATCH_GET_GLOBAL_ID ' + pageId + ': success=' + !!(res && res.success) + ' · không có threadsWithGlobalId'); } catch (e) { /* ignore */ }
         return 0;
       }
-      batchGidFetchedPages[pageId] = true;
       gidStats.batchReturned += list.length;
       let applied = 0;
       list.forEach((it) => {
@@ -5653,12 +5658,14 @@
         }
       });
       gidStats.batchMappings += applied;
-      try { logLine('🧭 BATCH_GET_GLOBAL_ID ' + pageId + ': success=true · threadsWithGlobalId=' + list.length + ' · nạp mới=' + applied); } catch (e) { /* ignore */ }
+      if (list.length > 0) {
+        try { logLine('🧭 BATCH_GET_GLOBAL_ID ' + pageId + ': threadsWithGlobalId=' + list.length + ' · nạp mới=' + applied); } catch (e) { /* ignore */ }
+      }
       return applied;
     }).catch(() => {
       gidStats.batchFail++;
       delete batchGidPromises[pageId];
-      delete batchGidFetchedPages[pageId];
+      batchGidFetchedPages[pageId] = true;
       return 0;
     });
     batchGidPromises[pageId] = promise;
@@ -5676,11 +5683,8 @@
         const pid = c.pageId || String(c.id || '').split('_')[0];
         if (!pid || seen[pid]) return;
         seen[pid] = true;
-        // 1) Gọi BATCH_GET_GLOBAL_ID (@897543 trong _app) 1 lần/page để nạp hàng loạt { threadId, globalId }
-        //    từ IndexedDB của Extension vào cache RAM + localStorage chỉ bằng 1 lệnh duy nhất!
-        //    Đầu mỗi LƯỢT GỬI ép nạp lại (forceBatch): danh sách mới/IndexedDB vừa được
-        //    loadThread bổ sung sau lúc mở panel thì lượt này vẫn lấy được, không chờ phiên sau.
-        if (adapter && typeof adapter.send === 'function') requestBatchGlobalIds(pid, !!(opts && opts.forceBatch));
+        // 1) Gọi BATCH_GET_GLOBAL_ID (@897543 trong _app) 1 lần/page trong phiên để nạp hàng loạt { threadId, globalId }
+        if (adapter && typeof adapter.send === 'function') requestBatchGlobalIds(pid, false);
         if (!h || typeof h.initSocket !== 'function') return;
         syncSocketMappingsToCache(h, pid);
         try {
@@ -5722,30 +5726,9 @@
     } catch (e) { /* ignore */ }
   }
 
-  // Chờ BATCH_GET_GLOBAL_ID nạp xong (chỉ khi thực sự có chat ngoài 24h chưa có gid trong RAM)
-  // Không chặn đầu lượt bằng socketWarmPromises (chat API bắn ngay ở 0ms; chat Socket tự chờ trong socketPublishSend).
-  async function waitInitialGidWarmup(targets, maxWaitMs) {
+  // Đồng bộ tức thì (0ms) global_id từ WebSocket RAM cache trước khi bắn — tuyệt đối không chặn đầu lượt!
+  async function waitInitialGidWarmup(targets) {
     try {
-      const needBatchPids = {};
-      (targets || []).forEach((c) => {
-        if (!c || c.type === 'comment') return;
-        const full0 = peekConv(c) || c;
-        const pid = (full0 && (full0.page_id || full0.pageId)) || c.pageId || String(c.id || '').split('_')[0];
-        if (!pid) return;
-        const idleDiff = getConvIdleMs(c, full0);
-        const isIdleLong = !isNaN(idleDiff) && idleDiff > 86400000;
-        if (isIdleLong && !peekFastGlobalId(c, full0, '')) {
-          needBatchPids[pid] = true;
-        }
-      });
-      const prs = [];
-      Object.keys(needBatchPids).forEach((pid) => {
-        if (batchGidPromises[pid]) prs.push(batchGidPromises[pid]);
-      });
-      if (prs.length) {
-        const capMs = (targets && targets.length <= 50) ? Math.min(maxWaitMs || 600, 600) : Math.min(maxWaitMs || 1500, 1500);
-        await Promise.race([Promise.all(prs), sleep(capMs)]);
-      }
       const h = window.__MqttHelper__;
       if (h) {
         const seen = {};
@@ -6085,7 +6068,7 @@
       }
       if (deliveredIds[conv.id]) return; // trong lúc chờ, tin đã đến nơi qua đường khác — thôi
       if (uncertainIds[conv.id] || finalFailedIds[conv.id]) return; // watchdog đã chốt ⚠/❌ trong lúc chờ bù — không bắn lần 2
-      const buCtx = { gidForceFind: hadDirectFail };
+      const buCtx = { gidForceFind: hadDirectFail, isBuRetry: true };
       busEnqueue(async () => {
         // Kiểm tra LẠI ngay trước khi bắn: trong lúc xếp hàng chờ lane (có thể cả phút ở
         // lô lớn), ACK của lần đầu có thể đã về hoặc watchdog đã chốt — kiểm tra ở timer
@@ -6440,6 +6423,8 @@
     // không chặn đúp ở đây thì bấm lần 2 chạy song song lần 1 (log hiện 2 dòng lọc)
     state.sending = true;
     state.stopRequested = false;
+    if (preloadSelectedTimer) { clearTimeout(preloadSelectedTimer); preloadSelectedTimer = null; }
+    preloadSelectedSeq++;
     applyRunStopButtons();
     startKeepAliveAudio();
     batchSkipApi = false;
@@ -6888,18 +6873,6 @@
         }
       };
 
-      // ⚡ GID PREFETCH (v1.70.0): pipeline chạy nền SONG SONG với làn gửi, đi trước để nạp sẵn
-      // ngữ cảnh + global_id (GET /messages, có dedupe inflight trong ensureConvCtx) cho các chat
-      // ngoài 24h chưa có sẵn global_id trong RAM — tới lượt worker gửi thì gid đã có sẵn trong cache (0ms).
-      const gidPrefetchPromise = runPool(batch, async (c) => {
-        if (state.stopRequested || !c || c.type === 'comment') return;
-        const full0 = peekConv(c) || c;
-        const idleDiff0 = getConvIdleMs(c, full0);
-        const isIdleLong0 = !isNaN(idleDiff0) && idleDiff0 > 86400000;
-        if (!isIdleLong0 || peekFastGlobalId(c, full0, '')) return;
-        try { await ensureConvCtx(c, { force: true }); } catch (e) { /* ignore */ }
-      }, 48).catch(() => {});
-
       const extWorkers = [];
       const nExtWorkers = Math.min(EXT_BACKLOG_WORKERS, Math.max(1, batch.length));
       for (let w = 0; w < nExtWorkers; w++) {
@@ -6922,8 +6895,24 @@
         return r;
       };
 
+      const fastPoolPromise = runPool(batch, runFastItem, Math.min(FAST_HTTP_SOCKET_POOL, batch.length));
+
+      // ⚡ GID PREFETCH: chỉ chạy cho phần đuôi (> FAST_HTTP_SOCKET_POOL) SAU KHI các worker đầu
+      // đã vào vị trí để không bao giờ tranh ghế ctxFetchLane của các chat đầu tiên!
+      if (batch.length > FAST_HTTP_SOCKET_POOL) {
+        const tailBatch = batch.slice(FAST_HTTP_SOCKET_POOL);
+        runPool(tailBatch, async (c) => {
+          if (state.stopRequested || fastScanFinished || !c || c.type === 'comment') return;
+          const full0 = peekConv(c) || c;
+          const idleDiff0 = getConvIdleMs(c, full0);
+          const isIdleLong0 = !isNaN(idleDiff0) && idleDiff0 > 86400000;
+          if (!isIdleLong0 || peekFastGlobalId(c, full0, '')) return;
+          try { await ensureConvCtx(c, { force: true }); } catch (e) { /* ignore */ }
+        }, 24).catch(() => {});
+      }
+
       try {
-        await runPool(batch, runFastItem, Math.min(FAST_HTTP_SOCKET_POOL, batch.length));
+        await fastPoolPromise;
       } finally {
         fastScanFinished = true;
         while (extWaiters.length > 0) {
