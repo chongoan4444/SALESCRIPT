@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE LITE (Tab + Clipboard)
 // @namespace    salescript
-// @version      1.91.62
+// @version      1.91.63
 // @description  BOTFAKE — bản hỗ trợ phím Tab kích hoạt Chạy (có xác nhận) + nút chuyển chế độ gửi bằng Câu trên giao diện / Dữ liệu đang copy trên Clipboard.
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -44,7 +44,7 @@
   /* ============================ HẰNG SỐ ============================ */
 
   const PANEL_ID = 'ssb-root';          // ssb = SaleScript Bulk — không đụng pk-*/adj-*/pancake-* của script khác
-  const APP_VERSION = '1.91.62';        // hiện ở tiêu đề panel — đối chiếu với @version trong header
+  const APP_VERSION = '1.91.63';        // hiện ở tiêu đề panel — đối chiếu với @version trong header
   const STYLE_ID = 'ssb-style';
 
   const MAX_NAME_LIST = 12;             // số tên hiển thị khi xác nhận
@@ -782,8 +782,9 @@
     };
     computeMatches();
     logLine('🅰 Đã chọn & đặt ĐẦU CHUỖI: ' + (info.name || info.id)
-      + ' — tự nạp sẵn dữ liệu (giữ Alt nhấp tiếp dòng CUỐI chuỗi nếu muốn chọn cả dải)');
+      + ' — đang tự tải dữ liệu đoạn này (giữ Alt nhấp tiếp dòng CUỐI chuỗi nếu muốn chọn cả dải)');
     render();
+    if (typeof schedulePreloadSelectedChats === 'function') schedulePreloadSelectedChats(true);
   }
 
   async function completeRange(endInfo) {
@@ -799,21 +800,15 @@
       snippetRaw: endInfo.snippetRaw || richEnd.snippetRaw,
       time: endInfo.time || richEnd.time,
     };
+    // Hiển thị tạm ngay từ dữ liệu sẵn có trên màn hình/Redux để UI phản hồi tức thì,
+    // sau đó LUÔN tự động gọi API tải mới danh sách cho đúng chuỗi vừa chọn (kể cả khi trước đó đã có danh sách)!
     computeMatches({ silentMissingLog: true });
-    let hasStart = state.matches.some((m) => m.id === start.id);
-    let hasEnd = state.matches.some((m) => m.id === endInfo.id);
-    const missingRichMeta = state.matches.some((m) => !m.threadId && !m.customerId && !m.updatedAt);
-
-    // Nếu 1 trong 2 đầu chuỗi đã trôi khỏi DOM và chưa có trong Redux/allRows (hoặc thiếu metadata API),
-    // TỰ ĐỘNG gọi API tải danh sách đến đúng điểm cuối của chuỗi vừa chọn rồi dừng ngay!
-    if ((!hasStart || !hasEnd || missingRichMeta) && !state.scanning) {
-      logLine('⚡ Đang tự tải danh sách cho chuỗi đã chọn: ' + (start.name || start.id) + ' → ' + (endInfo.name || endInfo.id) + '…');
-      render();
-      await scanFullList({ forRange: true });
-      computeMatches({ silentMissingLog: true });
-      hasStart = state.matches.some((m) => m.id === start.id);
-      hasEnd = state.matches.some((m) => m.id === endInfo.id);
-    }
+    logLine('⚡ Đang tự tải danh sách cho chuỗi đã chọn: ' + (start.name || start.id) + ' → ' + (endInfo.name || endInfo.id) + '…');
+    render();
+    await scanFullList({ forRange: true, restartIfBusy: true });
+    computeMatches({ silentMissingLog: true });
+    const hasStart = state.matches.some((m) => m.id === start.id);
+    const hasEnd = state.matches.some((m) => m.id === endInfo.id);
 
     const n = state.matches.length;
     if (!hasStart || !hasEnd || !n) {
@@ -821,10 +816,10 @@
         + ' — ⚠ Không tìm thấy đủ 2 đầu chuỗi trong danh sách hiện tại.');
     } else {
       logLine('🔗 CHUỖI CHỌN: ' + (start.name || start.id) + ' → ' + (endInfo.name || endInfo.id)
-        + ' — ' + n + ' chat trong chuỗi (đang tự nạp sẵn dữ liệu…)');
+        + ' — ' + n + ' chat trong chuỗi (đang tự nạp sẵn dữ liệu hội thoại…)');
     }
     render();
-    if (typeof schedulePreloadSelectedChats === 'function') schedulePreloadSelectedChats();
+    if (typeof schedulePreloadSelectedChats === 'function') schedulePreloadSelectedChats(true);
   }
 
   function clearSelection() {
@@ -1767,12 +1762,20 @@
   async function scanFullList(opts) {
     const scanOpts = opts || {};
     if (state.scanning) {
-      state.scanStopRequested = true;
-      logLine('⏹ Đã yêu cầu dừng tải danh sách — dùng ngay số chat vừa tải!');
-      return;
+      if (scanOpts.restartIfBusy) {
+        state.scanStopRequested = true;
+        let wg = 0;
+        while (state.scanning && wg++ < 80) await sleep(50);
+      } else {
+        state.scanStopRequested = true;
+        logLine('⏹ Đã yêu cầu dừng tải danh sách — dùng ngay số chat vừa tải!');
+        return;
+      }
     }
     const btn = shadow && shadow.getElementById('ssb-scan');
     const setBtn = (t) => { if (btn) btn.textContent = t; };
+    const prevAllRows = state.allRows;
+    const prevAllRowsPartial = !!state.allRowsPartial;
 
     state.scanning = true;
     state.scanStopRequested = false;
@@ -1810,7 +1813,7 @@
         }
         lastSyncedLen = rowsArr.length;
         const cntEl = shadow && shadow.getElementById('ssb-count');
-        if (cntEl) cntEl.textContent = String(state.allRows.size);
+        if (cntEl && !scanOpts.forRange) cntEl.textContent = String(state.allRows.size);
       };
 
       const apiProgress = (n, rowsArr) => {
@@ -1823,14 +1826,19 @@
         const nStop = (api && api.rows && api.rows.length) || (state.allRows && state.allRows.size) || 0;
         if (api && api.rows && api.rows.length) {
           const foundStop = new Map(api.rows.map((r) => [r.id, { ...r }]));
+          if (scanOpts.forRange && prevAllRows && prevAllRows.size) {
+            prevAllRows.forEach((v, k) => { if (!foundStop.has(k)) foundStop.set(k, { ...v }); });
+          }
           let oStop = 0;
           foundStop.forEach((v) => { v.order = oStop++; });
           state.allRows = foundStop;
+        } else if (prevAllRows && prevAllRows.size) {
+          state.allRows = prevAllRows;
         }
         state.allRowsPartial = true;
         state.listIncomplete = false;
         logLine('⏹ Đã dừng tải — dùng ' + nStop + ' chat đã lấy.');
-        setBtn('⚡ Tải danh sách (' + nStop + ' chat)');
+        setBtn('⚡ Tải danh sách (' + ((state.allRows && state.allRows.size) || nStop) + ' chat)');
         setScanProgress(nStop, 100);
         computeMatches();
         render();
@@ -1845,31 +1853,44 @@
       }
       if (api && api.ok && api.incomplete && !api.stopped) {
         state.listIncomplete = true;
-        state.allRows = null;
+        state.allRows = prevAllRows || null;
+        state.allRowsPartial = prevAllRowsPartial;
         logLine('⛔ Tải 2 lần vẫn chưa hết cursor (' + api.rows.length + ' chat) — không dùng list thiếu. Bấm ⚡ lại.');
         setBtn('⚠ Tải chưa đủ — bấm tải lại');
         setScanProgress(api.rows.length, null);
         return;
       }
       if (!(api && api.ok && api.rows.length)) {
+        if (prevAllRows && prevAllRows.size) {
+          state.allRows = prevAllRows;
+          state.allRowsPartial = prevAllRowsPartial;
+        }
         logLine('⚠ ' + ((api && api.error) || 'Tải API thất bại'));
         setBtn('⚠ Tải API lỗi — bấm tải lại');
         return;
       }
       const vis = visibleRows();
       const found = new Map(api.rows.map((r) => [r.id, { ...r }]));
+      if (scanOpts.forRange && prevAllRows && prevAllRows.size) {
+        prevAllRows.forEach((v, k) => {
+          if (!found.has(k)) found.set(k, { ...v });
+        });
+      }
       vis.forEach((r) => {
-        if (found.has(r.id)) found.set(r.id, { ...found.get(r.id), ...r });
+        if (found.has(r.id)) {
+          const cur = found.get(r.id);
+          found.set(r.id, { ...cur, ...r, pageId: cur.pageId || r.pageId, type: r.type || cur.type });
+        }
       });
       let ord = 0;
       found.forEach((v) => { v.order = ord++; });
       state.allRows = found;
-      state.allRowsPartial = !!(api && api.rangePartial);
+      state.allRowsPartial = !!(api && api.rangePartial) && (!prevAllRows || prevAllRowsPartial);
       state.listIncomplete = false;
       setBtn('⚡ Tải danh sách (' + found.size + ' chat)');
-      setScanProgress(found.size, 100);
-      logLine(state.allRowsPartial
-        ? ('⚡ Đã tự tải xong vùng chọn (' + found.size + ' chat đầu danh sách) — dừng ngay tại cuối chuỗi chọn')
+      setScanProgress(api.rows.length, 100);
+      logLine((api && api.rangePartial)
+        ? ('⚡ Đã tự tải xong vùng chọn (' + api.rows.length + ' chat tới cuối chuỗi chọn)')
         : ('⚡ API: ' + found.size + ' chat (next_cursor hết) — không cuộn list'));
       computeMatches();
       render();
@@ -2180,16 +2201,20 @@
   // ngay lúc chọn để khi bấm Chạy là gửi tức thì không phải chờ nạp!
   let preloadSelectedTimer = null;
   let preloadSelectedSeq = 0;
+  let preloadForceLogPending = false;
 
-  function schedulePreloadSelectedChats() {
+  function schedulePreloadSelectedChats(forceLog) {
+    if (forceLog) preloadForceLogPending = true;
     if (preloadSelectedTimer) clearTimeout(preloadSelectedTimer);
     preloadSelectedTimer = setTimeout(() => {
       preloadSelectedTimer = null;
-      preloadSelectedChats().catch(() => {});
+      const fl = preloadForceLogPending;
+      preloadForceLogPending = false;
+      preloadSelectedChats(fl).catch(() => {});
     }, 120);
   }
 
-  async function preloadSelectedChats() {
+  async function preloadSelectedChats(forceLog) {
     if (state.sending || state.scanning) return;
     const selected = (state.matches || []).filter((m) => m && m.checked);
     if (!selected.length) return;
@@ -2199,22 +2224,22 @@
     try { if (typeof warmUpSockets === 'function') warmUpSockets(selected); } catch (e) { /* ignore */ }
     try { if (typeof requestBatchGlobalIds === 'function') requestBatchGlobalIds(selected); } catch (e) { /* ignore */ }
 
-    // 2) Với các lựa chọn vừa và nhỏ (<= 150 chat), tự động nạp sẵn dữ liệu hội thoại (ensureConvCtx)
-    //    cho những đoạn chưa có sẵn global_id / ngữ cảnh trong RAM
+    // 2) Với các lựa chọn vừa và nhỏ (<= 150 chat), LUÔN tự động nạp sẵn dữ liệu hội thoại (ensureConvCtx:
+    //    GET .../messages -> global_id, ad_clicks, customers) cho toàn bộ các đoạn được chọn,
+    //    bất kể trước đó đã có danh sách (state.allRows) hay chưa!
     const MAX_PRELOAD = 150;
     const targets = selected.slice(0, MAX_PRELOAD).filter((c) => {
       if (!c || !c.id) return false;
       const entry = convCtxCache[c.id];
       if (entry && entry.fetched) return false;
-      const full = peekConv(c) || c;
-      const fastGid = typeof peekFastGlobalId === 'function' ? peekFastGlobalId(c, full) : (c.globalId || '');
-      const idleMs = getConvIdleMs(c, full);
-      if (!isNaN(idleMs) && idleMs < 80 * 3600 * 1000 && fastGid && (full.threadId || full.thread_id)) {
-        return false;
-      }
       return true;
     });
-    if (!targets.length) return;
+    if (!targets.length) {
+      if (forceLog && !state.sending && !state.scanning && preloadSelectedSeq === mySeq) {
+        logLine('⚡ Đã tự tải sẵn dữ liệu ' + selected.length + ' đoạn chat đã chọn — sẵn sàng gửi ngay!');
+      }
+      return;
+    }
 
     let idx = 0;
     let fetchedCount = 0;
@@ -2235,7 +2260,7 @@
       })());
     }
     await Promise.all(workers);
-    if (fetchedCount > 0 && !state.sending && !state.scanning && preloadSelectedSeq === mySeq) {
+    if ((fetchedCount > 0 || forceLog) && !state.sending && !state.scanning && preloadSelectedSeq === mySeq) {
       logLine('⚡ Đã tự tải sẵn dữ liệu ' + selected.length + ' đoạn chat đã chọn — sẵn sàng gửi ngay!');
     }
   }
@@ -7773,7 +7798,7 @@
     on('ssb-selall', 'click', async () => {
       if (!state.allRows || !state.allRows.size || state.allRowsPartial) {
         logLine('⚡ Chưa tải đủ danh sách — tự tải toàn bộ rồi chọn tất cả…');
-        await scanFullList({ full: true });
+        await scanFullList({ full: true, restartIfBusy: true });
       }
       const rows = sourceRows();
       if (!rows.length) {
@@ -7800,10 +7825,8 @@
       const btn = root.getElementById('ssb-to-end');
       if (btn) btn.disabled = true;
       try {
-        if (!state.allRows || !state.allRows.size || state.allRowsPartial) {
-          logLine('⚡ Chưa tải đủ danh sách — tự tải qua API để lấy tới cuối…');
-          await scanFullList({ full: true });
-        }
+        logLine('⚡ Đang tự tải danh sách qua API để lấy từ ' + (info.name || info.id) + ' tới cuối…');
+        await scanFullList({ full: true, restartIfBusy: true });
         const rows = sourceRows();
         const idx = rows.findIndex((r) => r.id === info.id);
         if (idx < 0) {
@@ -7824,6 +7847,7 @@
         computeMatches();
         logLine('⬇ CHỌN TỪ ĐÂY XUỐNG CUỐI: ' + (info.name || info.id) + ' → cuối danh sách — '
           + state.matches.length + ' chat trong lựa chọn');
+        schedulePreloadSelectedChats(true);
       } finally {
         if (btn) btn.disabled = false;
         render();
@@ -8366,34 +8390,34 @@
       return;
     }
 
-    // Ctrl/Cmd + click: chọn/bỏ chọn TẤT CẢ đoạn cùng snippet trong danh sách hiện tại (toggle),
-    // hoặc nếu chưa có danh sách / đoạn đó chưa khớp snippet thì chọn/bỏ chọn trực tiếp đoạn chat vừa nhấp!
+    // Ctrl/Cmd + click: chọn/bỏ chọn TẤT CẢ đoạn cùng snippet trong danh sách hiện tại (nếu đoạn vừa nhấp đang nằm trong danh sách và có nhiều đoạn trùng câu),
+    // hoặc chọn/bỏ chọn & tự nạp trực tiếp đoạn chat vừa nhấp!
     if (isCtrl) {
       const snippet = info.snippetRaw || info.snippet;
+      const idx = state.matches.findIndex((m) => m.id === info.id);
       const same = state.matches.filter((m) => (m.snippetRaw || m.snippet) === snippet);
-      if (same.length > 1 || (same.length === 1 && same[0].id !== info.id)) {
+      if (idx >= 0 && same.length > 1) {
         const allChecked = same.every((m) => m.checked);
         same.forEach((m) => { m.checked = !allChecked; });
         logLine((allChecked ? '✅ Bỏ chọn' : '✅ Chọn') + ' ' + same.length + ' đoạn cùng snippet: “' + clip(snippet, 60) + '”');
-        schedulePreloadSelectedChats();
-      } else {
-        const idx = state.matches.findIndex((m) => m.id === info.id);
-        if (idx >= 0) {
-          state.matches[idx].checked = !state.matches[idx].checked;
-          logLine((state.matches[idx].checked ? '✅ Đã chọn lại: ' : '⬜ Đã bỏ chọn: ') + (info.name || info.id));
-        } else {
-          const rich = enrichRowWithRedux(info);
-          state.mode = state.mode || 'pick';
-          state.matches.push({
-            ...rich,
-            checked: rich.type !== 'comment',
-            isTarget: true,
-            mark: 'target',
-          });
-          logLine('✅ Đã chọn & tự nạp đoạn chat: ' + (rich.name || rich.id) + ' (đã chọn ' + state.matches.length + ' chat)');
-        }
+        schedulePreloadSelectedChats(true);
+      } else if (idx >= 0) {
+        state.matches[idx].checked = !state.matches[idx].checked;
+        logLine((state.matches[idx].checked ? '✅ Đã chọn lại & tự nạp: ' : '⬜ Đã bỏ chọn: ') + (info.name || info.id));
         highlightRows();
-        schedulePreloadSelectedChats();
+        if (state.matches[idx].checked) schedulePreloadSelectedChats(true);
+      } else {
+        const rich = enrichRowWithRedux(info);
+        state.mode = 'pick';
+        state.matches.push({
+          ...rich,
+          checked: rich.type !== 'comment',
+          isTarget: true,
+          mark: 'target',
+        });
+        logLine('✅ Đã chọn & tự nạp đoạn chat: ' + (rich.name || rich.id) + ' (đã chọn ' + state.matches.length + ' chat)');
+        highlightRows();
+        schedulePreloadSelectedChats(true);
       }
       render();
       return;
@@ -8405,10 +8429,8 @@
       state.lastAltClickId = null;
       state.lastAltClickTime = 0;
       (async () => {
-        if (!state.allRows || !state.allRows.size || state.allRowsPartial) {
-          logLine('⚡ Chưa tải đủ danh sách — tự tải qua API để lấy từ ' + (info.name || info.id) + ' xuống cuối…');
-          await scanFullList({ full: true });
-        }
+        logLine('⚡ Đang tự tải danh sách qua API để lấy từ ' + (info.name || info.id) + ' xuống cuối…');
+        await scanFullList({ full: true, restartIfBusy: true });
         state.mode = 'range';
         state.target = null;
         state.rangeStart = enrichRowWithRedux(info);
@@ -8422,6 +8444,7 @@
           };
           computeMatches();
           logLine('🅰⬇ Chọn từ ' + (info.name || info.id) + ' xuống hết cuối danh sách — ' + state.matches.length + ' chat');
+          schedulePreloadSelectedChats(true);
         } else {
           state.rangeEnd = null;
           computeMatches();
