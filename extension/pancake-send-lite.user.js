@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE LITE
 // @namespace    salescript
-// @version      1.91.64
+// @version      1.91.65
 // @description  BOTFAKE — panel hiện mọi website; gửi/tải list qua extension background.
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -44,7 +44,7 @@
   /* ============================ HẰNG SỐ ============================ */
 
   const PANEL_ID = 'ssb-root';          // ssb = SaleScript Bulk — không đụng pk-*/adj-*/pancake-* của script khác
-  const APP_VERSION = '1.91.64';        // hiện ở tiêu đề panel — đối chiếu với @version trong header
+  const APP_VERSION = '1.91.65';        // hiện ở tiêu đề panel — đối chiếu với @version trong header
   const STYLE_ID = 'ssb-style';
 
   const MAX_NAME_LIST = 12;             // số tên hiển thị khi xác nhận
@@ -2568,6 +2568,16 @@
   // tự động thử lại 1 lần sau 600ms.
   // Response xem TRONG NỀN: OK → im lặng; THUA RÕ (4xx/success=false) → bù Ext/Socket trong nền;
   // KHÔNG RÕ (5xx/lỗi mạng) → chỉ báo "không rõ" — KHÔNG gửi lại để tránh trùng tin.
+  function isCertainHttpNotSent(status, data, parsed) {
+    if (data && data.success === false) return true;
+    const st = Number(status) || 0;
+    if (st === 408 || st === 499 || st >= 500 || st <= 0) return false;
+    if (st === 400 || st === 401 || st === 403 || st === 404 || st === 405 || st === 413 || st === 415 || st === 422 || st === 429) {
+      return true;
+    }
+    return false;
+  }
+
   function fireApiAndWatch(conv, text, photo) {
     if (photo && !hasValidApiPhoto(photo)) return { ok: false, sent: false, error: 'Không có attachment ảnh cho API' };
     const req = buildInboxSend(conv, text, photo);
@@ -2604,12 +2614,13 @@
       }
       if (myRun !== runSeq) return;
       let data = null;
-      try { data = await res.json(); } catch (e) { data = null; }
+      let parsed = true;
+      try { data = await res.json(); } catch (e) { data = null; parsed = false; }
       if (res.ok && data && data.success) { markDelivered(conv.id, 'api'); postSendSideEffects(conv); return; } // đã đến nơi — im lặng
       const msg = (data && (data.message || data.error)) || ('HTTP ' + res.status);
       if (res.status === 401 || res.status === 403) capturedToken = null;
       const nm = conv.name || conv.id;
-      const certainFail = (res.status >= 400 && res.status < 500) || (res.ok && data && data.success === false);
+      const certainFail = isCertainHttpNotSent(res.status, data, parsed);
       if (certainFail) {
         releaseOutbound(conv.id); // tin chắc chưa đi → kênh khác được bắn (không sót)
         // "(#10)…ngoài khoảng thời gian…"/"(#551)" KHÔNG phải "mọi kênh đều thua": app vẫn fallback
@@ -2693,8 +2704,8 @@
         releaseOutbound(conv.id);
         return { ok: false, sent: false, error: 'Token hết hạn/không hợp lệ (' + res.status + ') — tải lại trang rồi thử lại' };
       }
-      // 200 nhưng không đọc được kết quả, hoặc lỗi 5xx → KHÔNG rõ tin đã đi hay chưa
-      if ((res.ok && (!parsed || !data || data.success === undefined)) || res.status >= 500) {
+      // 200 nhưng không đọc được kết quả, hoặc lỗi 408/499/5xx → KHÔNG rõ tin đã đi hay chưa
+      if ((res.ok && (!parsed || !data || data.success === undefined)) || !isCertainHttpNotSent(res.status, data, parsed)) {
         return { ok: false, sent: 'maybe', error: 'API không trả kết quả rõ (' + res.status + ')' };
       }
       // server trả lời rõ ràng là không gửi được → chắc chắn chưa gửi → nhả khóa để kênh khác bắn (không sót)
@@ -3471,16 +3482,11 @@
   }
 
   const socketNoAckStreak = {};
-  // Ép kết nối lại socket sau lần mất ACK đầu tiên (socket chết ngầm: isSocketAlive vẫn báo
-  // sống vì chỉ nhìn object nội bộ, publish rơi vào hố đen → mất tin thật). Giới hạn số lần
-  // ép mỗi page/lượt để không nướng ~12s/lần vô hạn khi socket page chết hẳn.
-  const SOCK_FORCE_RC_MAX_PER_RUN = 2;
-  const sockForceRc = {}; // pageId → số lần đã ép reconnect trong lượt hiện tại
-  let sockForceRcRun = -1; // runSeq đã đồng bộ với sockForceRc (đổi lượt là tự reset)
   const socketRejectStreak = {};
+  const socketConfirmedDeadStreak = {};
   const socketReconnectPromises = {};
   const socketLastPublishAt = {};
-  const SOCKET_MIN_PACE_MS = 10; // giãn 10ms (~100 khung/s/page = 6.000 tin/phút) kết hợp pageLane giữ slot tới khi có /ls_resp — giảm tối đa burst-reject của FB MQTT mà phát 100 tin chỉ mất ~1s
+  const SOCKET_MIN_PACE_MS = 8; // giãn 8ms (~125 khung/s/page = 7.500 tin/phút) kết hợp pageLane giữ slot tới khi có /ls_resp — giảm tối đa burst-reject của FB MQTT mà vẫn cực nhanh ở lô 5.000 tin
 
   async function paceSocketPublish(pageId) {
     const pid = String(pageId || '');
@@ -3545,10 +3551,9 @@
     if (typeof helper.initSocket === 'function') {
       socketReconnectPromises[pageId] = (async () => {
         try {
-          if (sock && sock.instance && typeof sock.instance.shutdown === 'function') {
+          if (sock && !isSocketAlive(sock) && sock.instance && typeof sock.instance.shutdown === 'function') {
             try { sock.instance.shutdown(); } catch (e0) { /* ignore */ }
           }
-          if (helper.SOCKETS) delete helper.SOCKETS[pageId];
           await Promise.race([Promise.resolve().then(() => helper.initSocket(pageId)), sleep(12000)]);
           await waitForSocketSynced(helper, pageId, 2500);
           socketNoAckStreak[pageId] = 0;
@@ -3571,17 +3576,9 @@
       await Promise.race([warm, sleep(12000)]);
       sock = helper.SOCKETS && helper.SOCKETS[pageId];
     }
-    if (sockForceRcRun !== runSeq) {
-      sockForceRcRun = runSeq;
-      Object.keys(sockForceRc).forEach((k) => delete sockForceRc[k]);
-    }
-    const noAckStreakNow = socketNoAckStreak[pageId] || 0;
-    // Chỉ ép làm mới socket khi đã mất ACK liên tiếp >= 5 lần mà không có bất kỳ gói /ls_resp nào về
-    // (nếu ép shutdown ngay ở lần mất ACK đầu tiên sẽ giết toàn bộ các frame khác đang bay trên cùng kết nối!).
-    const wantForceRc = noAckStreakNow >= 5 && (sockForceRc[pageId] || 0) < SOCK_FORCE_RC_MAX_PER_RUN;
-    if (!isSocketAlive(sock) || wantForceRc) {
-      if (wantForceRc) sockForceRc[pageId] = (sockForceRc[pageId] || 0) + 1;
-      sock = await ensureAliveSocket(helper, pageId, wantForceRc);
+    // TUYỆT ĐỐI không shutdown/xóa socket đang sống giữa lô gửi vì sẽ làm đứt toàn bộ các frame khác đang bay!
+    if (!isSocketAlive(sock)) {
+      sock = await ensureAliveSocket(helper, pageId, false);
     } else if (!isSocketSynced(sock)) {
       // Socket vừa mới được initSocket tạo ra (<1s hoặc chưa gửi sendInitMessages):
       // chờ ~1s cho tới khi onSubscribe('/ls_resp') + sendInitMessages hoàn tất rồi mới publish!
@@ -3643,6 +3640,7 @@
       tasks: tasks,
     };
     await paceSocketPublish(pageId);
+    const publishedAt = Date.now();
     const nextReqId = (typeof sock.requestId === 'number') ? (sock.requestId + 1) : null;
     const ackWaitMs = (batchStats && batchStats.total > 0 && batchStats.total <= 30) ? 8000 : 15000;
     const publishPromise = new Promise((resolve) => {
@@ -3683,11 +3681,11 @@
         // Publish ĐÃ được giao cho helper rồi mới mất phản hồi: socket chết lúc này KHÔNG
         // chứng minh được frame chưa đi (FB có thể đã nhận) → 'noack' = không rõ, cấm bù
         // bắn lần 2. 'dead' thật (socket chết TRƯỚC khi publish) đã bị chặn ở đầu hàm.
-        return { kind: 'noack' };
+        return { kind: 'noack', publishedAt: publishedAt };
       }
       socketNoAckStreak[pageId] = 0;
       let resp = null;
-      try { resp = JSON.parse(g.payload); } catch (e) { return { kind: 'noack' }; }
+      try { resp = JSON.parse(g.payload); } catch (e) { return { kind: 'noack', publishedAt: publishedAt }; }
       const replaced = helper.findAllBlockActions(resp.step, 'replaceOptimsiticMessage') || [];
       const failed = helper.findAllBlockActions(resp.step, 'markOptimisticMessageFailed') || [];
       if (failed.length && !replaced.length) return { kind: 'rejected' };
@@ -3703,8 +3701,8 @@
     // Kết quả thật được classify ở nền khi /ls_resp về và gọi firedCb đúng 1 lần.
     if (typeof firedCb === 'function') {
       publishPromise
-        .then((g) => { try { firedCb(classify(g)); } catch (e) { firedCb({ kind: 'noack' }); } })
-        .catch(() => firedCb({ kind: 'noack' }));
+        .then((g) => { try { firedCb(classify(g)); } catch (e) { firedCb({ kind: 'noack', publishedAt: publishedAt }); } })
+        .catch(() => firedCb({ kind: 'noack', publishedAt: publishedAt }));
       return { kind: 'fired' };
     }
     const g = await publishPromise;
@@ -3712,9 +3710,6 @@
   }
 
   const updatedGidConvSet = new Set();
-  // Hồ dự trữ fbId (is_reusable=false) CHƯA TỪNG TIÊU THỤ theo từng fanpage trong cùng lượt gửi:
-  // Khi chuẩn bị song song (resolveGlobalId + uploadOneTimePhoto) mà phát hiện chat đã khóa nick trước khi bắn,
-  // fbId chưa dùng sẽ được cất vào spareFbIdPool[pageId] để chat sống tiếp theo lấy dùng ngay ở 0ms!
   const spareFbIdPool = {};
   // 🔒 KHÓA CHỐNG TRÙNG (v1.72.0): các chat đã BẮN Socket ở chế độ bắn-nhả mà ACK chưa chốt.
   // Khi chat còn trong tập này: không kênh nào được bắn thêm cho chat đó (kể cả bù Extension) —
@@ -3723,15 +3718,9 @@
 
   function recycleUnusedFbId(pageId, ctx) {
     if (!ctx) return;
+    // Tuyệt đối không đẩy fbId (is_reusable=false, gắn conv_id riêng) của hội thoại A sang hội thoại B!
     ctx.nonReusableFbIds = null;
-    if (!ctx.nonReusableFbId || !pageId) return;
-    const pid = String(pageId);
-    const unused = String(ctx.nonReusableFbId);
     ctx.nonReusableFbId = null;
-    if (!spareFbIdPool[pid]) spareFbIdPool[pid] = [];
-    if (spareFbIdPool[pid].indexOf(unused) < 0) {
-      spareFbIdPool[pid].push(unused);
-    }
   }
 
   // Mỗi cuộc hội thoại gửi kèm ảnh qua Socket hoặc Extension BẮT BUỘC phải có 1 fbId (is_reusable=false)
@@ -3927,10 +3916,12 @@
         socketRejectStreak[pageId] = preRejectStreak + 1;
       } else if (raw && raw.kind === 'ok') {
         socketRejectStreak[pageId] = 0;
+        socketConfirmedDeadStreak[pageId] = 0;
       }
-      // Nếu là ca bù từ API sang (ctx.isBuRetry: đã bị API từ chối #551 VÀ Socket lần 1 cũng trả markOptimisticMessageFailed)
-      // → cả 2 kênh độc lập đều đã xác nhận khách khóa nick, chốt ngay ở 0ms mà không bắn lại Socket lần 2!
-      if (raw && raw.kind === 'rejected' && ctx && ctx.isBuRetry) {
+      // Chỉ khi ca bù từ API sang ĐÃ BỊ API TỪ CHỐI BẰNG MÃ (#551) (ctx.apiRejected551 === true)
+      // VÀ Socket lần 1 cũng trả markOptimisticMessageFailed → cả 2 kênh độc lập đều đã xác nhận khách khóa nick,
+      // chốt ngay ở 0ms mà không bắn lại Socket lần 2! (Nếu API từ chối vì #10 ngoài 24h thì vẫn phải retry Socket bình thường).
+      if (raw && raw.kind === 'rejected' && ctx && ctx.apiRejected551) {
         ctx.socketRetriedOnce = true;
       }
       if (raw && raw.kind === 'rejected' && (!ctx || !ctx.gidFromPsid) && !ctx.socketRetriedOnce) {
@@ -3938,7 +3929,13 @@
         if (deliveredIds[conv.id]) return { ok: true, id: gid, sendBy: 'socket', sent: true };
         ctx.socketRetriedOnce = true;
         sendDiag.sockRetry++;
-        await sleep(220 + Math.floor(Math.random() * 130));
+        const inDeadBlock = preRejectStreak >= 4 && (socketConfirmedDeadStreak[pageId] || 0) >= 2;
+        const retryWaitMs = inDeadBlock
+          ? (180 + Math.floor(Math.random() * 100))
+          : (350 + Math.floor(Math.random() * 200));
+        await sleep(retryWaitMs);
+        if (state.stopRequested) return { ok: false, sent: false, error: 'Đã dừng' };
+        if (deliveredIds[conv.id]) return { ok: true, id: gid, sendBy: 'socket', sent: true };
         // Kiểm tra xem trong nhịp nghỉ đó WebSocket threadMappingStoreV2 có nạp được global_id mới hơn không
         if (threadId && pageId) {
           try {
@@ -3966,9 +3963,13 @@
         // Xếp theo thứ tự FIFO trong pageLane (không dùng runPrioritySocket) để các ca retry của nick khóa
         // không chèn ngang lên trước các chat chính chưa gửi Lần 1 hoặc các chat đang chờ bù!
         raw = await pageLane(() => socketPublishSend(helper, pageId, gid, text, attFbIds));
-        if (raw && raw.kind === 'rejected' && preRejectStreak === 0 && !state.stopRequested && !deliveredIds[conv.id]) {
-          // Chỉ khi là ca lẻ đầu tiên ngay sau chuỗi gửi thành công (preRejectStreak === 0) mới thử thêm 1 nhịp ngắn 350..500ms;
-          // khi đã gặp từ 2 ca rejected liên tiếp (cụm nick khóa) thì chốt ngay sau Lần 2 để không ngâm đuôi lượt!
+        const inDeadBlockNow = preRejectStreak >= 4 && (socketConfirmedDeadStreak[pageId] || 0) >= 2;
+        const allowAttempt3 = (batchStats && batchStats.total > 150)
+          ? !inDeadBlockNow
+          : (preRejectStreak === 0 && (socketConfirmedDeadStreak[pageId] || 0) === 0);
+        if (raw && raw.kind === 'rejected' && allowAttempt3 && !state.stopRequested && !deliveredIds[conv.id]) {
+          // Lô nhỏ (<=150): chỉ thử Lần 3 cho đúng 1 ca lẻ đầu tiên (preRejectStreak === 0);
+          // Lô lớn (>150): cho phép Lần 3 khi chưa gặp >=2 nick khóa đã xác nhận liên tiếp (cứu 100% khách sống dính burst-reject kép mà vẫn cắt ngay khi vào cụm nick khóa).
           await sleep(350 + Math.floor(Math.random() * 150));
           if (!state.stopRequested && !deliveredIds[conv.id]) {
             if (photo) {
@@ -3986,9 +3987,11 @@
         }
         if (raw && raw.kind === 'ok') {
           socketRejectStreak[pageId] = 0;
+          socketConfirmedDeadStreak[pageId] = 0;
         }
         if (raw && raw.kind === 'photo_failed_text_ok' && photo) {
           socketRejectStreak[pageId] = 0;
+          socketConfirmedDeadStreak[pageId] = 0;
           const freshPhotoUp2 = await uploadOneTimePhoto(pageId, photo, conv.id, ctx, true);
           if (freshPhotoUp2 && freshPhotoUp2.ok && freshPhotoUp2.fbId) {
             ctx.nonReusableFbId = null;
@@ -4017,11 +4020,13 @@
         return { ok: false, sent: false, error: raw.error };
       }
       if (raw.kind === 'ok') {
+        socketConfirmedDeadStreak[pageId] = 0;
         recordSocketGidSuccess();
         return { ok: true, id: gid, sendBy: 'socket', sent: true };
       }
       if (raw.kind === 'dead') return { ok: false, sent: false, error: 'Socket không kết nối' };
       if (raw.kind === 'rejected') {
+        socketConfirmedDeadStreak[pageId] = (socketConfirmedDeadStreak[pageId] || 0) + 1;
         // Chỉ kết luận khách không có mặt / đã khóa nick sau khi Socket
         // đã bắn lại đúng 1 lần mà vẫn bị markOptimisticMessageFailed.
         // Một lần rejected trong lô lớn chưa đủ bằng chứng: có thể là
@@ -4039,10 +4044,15 @@
         };
       }
       if (raw.kind === 'noack') {
-        // không có ACK: socket đã chết → frame chưa đi → chắc thua; socket sống → tin CÓ THỂ đã đi
-        const sock = helper.SOCKETS && helper.SOCKETS[pageId];
-        if (!(sock && sock.instance)) return { ok: false, sent: false, error: 'Socket không kết nối' };
-        return { ok: false, sent: 'maybe', noAck: true, error: 'Socket không rõ kết quả (không có ACK)' };
+        // Khi raw.kind === 'noack', frame ĐÃ được gọi qua helper.publish — luôn đưa vào diện
+        // kiểm chứng lịch sử (scheduleSocketVerify) để xác minh tin đã tới chưa rồi mới bắn cứu!
+        return {
+          ok: false,
+          sent: 'maybe',
+          noAck: true,
+          publishedAt: raw.publishedAt || (Date.now() - 15000),
+          error: 'Socket không rõ kết quả (không có ACK)',
+        };
       }
       // legacy — helper không có publish: đường sendMessage cũ (kèm bước chờ 1s của app)
       const res = await pageLane(() => helper.sendMessage(pageId, gid, attFbIds ? { text, attachmentFbIds: attFbIds } : { text }));
@@ -4081,15 +4091,17 @@
           const nm = conv.name || conv.id;
           if (res && res.ok) { markDelivered(conv.id, 'socket'); postSendSideEffects(conv); return; }
           if (res && (res.uncertain || res.sent === 'maybe')) {
-            if (res.noAck) scheduleSocketVerify(conv, text, photo, Date.now() - 15000);
+            if (res.noAck) scheduleSocketVerify(conv, text, photo, res.publishedAt || (Date.now() - 15000));
             if (window && typeof window.__botfakeTrackStatus__ === 'function') window.__botfakeTrackStatus__(conv.id, 'uncertain');
             logLine('⚠ ' + nm + ' — ' + (res.error || 'Socket không rõ kết quả') + ' (xác nhận nền — không gửi thêm để tránh trùng)');
             return;
           }
           releaseOutbound(conv.id); // FB từ chối / chắc fail → nhả khóa để bù kênh khác (không sót)
-          if (res && !res.recipientUnavailable && isRetryableLoss(res.error || '')) {
-            logLine('❌ ' + nm + ' — ' + (res.error || 'Socket thất bại') + ' (xác nhận nền — chốt lỗi, không bù)');
-            chotFailKhongBu(conv); // Socket bị từ chối ở xác nhận nền: chốt ❌, KHÔNG bù (chỉ bù cho API bị từ chối)
+          if (res && !res.recipientUnavailable && res.sent === false && (res.error || '') !== 'Đã dừng') {
+            // Frame CHƯA HỀ được bắn lên FB (ví dụ Socket không kết nối hoặc lỗi xin fbId ảnh khi retry)
+            // và khách KHÔNG phải nick khóa → chuyển bù qua Extension để không bao giờ sót khách sống!
+            logLine('⚠ ' + nm + ' — ' + (res.error || 'Socket không kết nối') + ' (xác nhận nền) — chuyển bù qua Extension');
+            scheduleBuRetry(conv, text, photo, nm, res.error || 'Socket không kết nối', ['socket']);
           } else {
             if (window && typeof window.__botfakeTrackStatus__ === 'function') window.__botfakeTrackStatus__(conv.id, 'fail');
             logLine('❌ ' + nm + ' — ' + ((res && res.error) || 'Socket thất bại') + ' (xác nhận nền)');
@@ -4152,7 +4164,7 @@
         const laneRunner = ctx.prioritySocket ? runPrioritySocket : pageLane;
         const rawSync = await laneRunner(() => socketPublishSend(helper, pageId, gid, text, attFbIds));
         settled = await settleSocketResult(rawSync);
-        if (settled && settled.noAck) scheduleSocketVerify(conv, text, photo, Date.now() - 15000);
+        if (settled && settled.noAck) scheduleSocketVerify(conv, text, photo, settled.publishedAt || (Date.now() - 15000));
       } finally { ctx.ownsOutbound = false; }
       if (!(settled && (settled.ok || settled.sent === 'maybe'))) releaseOutbound(conv.id);
       return settled;
@@ -4686,7 +4698,7 @@
   const BUS_PARALLEL_EXT = 10;    // số lệnh adapter.send (REPLY_INBOX_PHOTO) chạy song song — điểm bắt đầu của làn thích ứng Ext
   const EXT_SEND_MIN = 6;         // sàn làn Ext gửi: không thấp hơn mức đã kiểm chứng ổn định
   const EXT_SEND_MAX = 24;        // trần làn Ext gửi: mở tới 24 khi Extension trả lời nhanh/rõ ở lô lớn
-  const BUS_PARALLEL_SOCKET = 36; // số frame Socket (/ls_req) in-flight trên mỗi kết nối WebSocket (kèm giãn nhịp 10ms chống burst; vẫn giữ retry + socketRejectStreak bảo vệ)
+  const BUS_PARALLEL_SOCKET = 48; // số frame Socket (/ls_req) in-flight trên mỗi kết nối WebSocket (kèm giãn nhịp 8ms chống burst; giữ retry + socketConfirmedDeadStreak bảo vệ)
   const SIDE_EFFECT_PARALLEL = 8; // số request nền (fill_admin_name / update_global_id) chạy song song
   function makeLane(parallel) {
     let active = 0;
@@ -6054,6 +6066,7 @@
     // Chỉ bật gidForceFind khi đã từng thử 'ext' hoặc 'socket' bị từ chối thực sự; nếu mới chỉ thử 'api'
     // hoặc đang cứu ca Socket mất ACK thì global_id trong cache/GET /messages vẫn hoàn toàn hợp lệ!
     const isNoAckRescue = /mất ACK/i.test(String(why || ''));
+    const isApi551 = /\(#551\)|Người này hiện không có mặt/i.test(String(why || ''));
     const hadDirectFail = !isNoAckRescue && (triedCh.indexOf('ext') > -1 || triedCh.indexOf('socket') > -1 || done.length > 0);
     const delay = hadDirectFail ? (150 + Math.min(buRetrySeq++, 6) * BU_SPREAD_MS) : BU_RETRY_EXT_MS;
     logLine('⏳ ' + name + ' — ' + why + ' — đang bù'
@@ -6068,7 +6081,7 @@
       }
       if (deliveredIds[conv.id]) return; // trong lúc chờ, tin đã đến nơi qua đường khác — thôi
       if (uncertainIds[conv.id] || finalFailedIds[conv.id]) return; // watchdog đã chốt ⚠/❌ trong lúc chờ bù — không bắn lần 2
-      const buCtx = { gidForceFind: hadDirectFail, isBuRetry: true };
+      const buCtx = { gidForceFind: hadDirectFail, isBuRetry: true, apiRejected551: isApi551 };
       busEnqueue(async () => {
         // Kiểm tra LẠI ngay trước khi bắn: trong lúc xếp hàng chờ lane (có thể cả phút ở
         // lô lớn), ACK của lần đầu có thể đã về hoặc watchdog đã chốt — kiểm tra ở timer
@@ -6104,6 +6117,7 @@
         }
         const ch = out.ch;
         const r = out.r;
+        const hasMoreAfterSocket = (ch === 'socket') && !isApi551 && remaining.some((c) => c !== 'socket' && triedCh.indexOf(c) < 0 && done.indexOf(c) < 0);
         if (r && r.ok) {
           markDelivered(conv.id, ch);
           postSendSideEffects(conv);
@@ -6114,7 +6128,7 @@
         } else if (r && r.sent === 'maybe') {
           if (window && typeof window.__botfakeTrackStatus__ === 'function') window.__botfakeTrackStatus__(conv.id, 'uncertain');
           logLine('⚠ ' + name + ' — bù không rõ kết quả — KHÔNG gửi thêm (chống trùng)');
-        } else if (r && r.recipientUnavailable) {
+        } else if (r && r.recipientUnavailable && !hasMoreAfterSocket) {
           if (window && typeof window.__botfakeTrackStatus__ === 'function') window.__botfakeTrackStatus__(conv.id, 'fail');
           logLine('❌ ' + name + ' — bù ' + (ch === 'ext' ? 'Extension' : 'Socket') + ' không được: '
             + clip((r && r.error) || 'lỗi không rõ', 90) + ' — khách hiện không nhận được tin (không thử tiếp kênh khác)');
@@ -6152,8 +6166,7 @@
    *   • Đọc được lịch sử mà KHÔNG thấy tin → tin chắc chắn chưa tới FB (publish rơi
    *     vào socket chết ngầm) → nhả khóa outbound, mở lại chốt ⚠, bù đúng 1 vòng
    *     qua scheduleBuRetry (đủ guard chống trùng như đường bù API).
-   *   • Không đọc được lịch sử / thiếu dữ kiện → GIỮ NGUYÊN ⚠, tuyệt đối không bắn mò.
-   * Chỉ áp dụng cho tin CHỈ CÓ CHỮ: ca có ảnh khớp nội dung qua API không đủ tin cậy. */
+   *   • Không đọc được lịch sử / thiếu dữ kiện → GIỮ NGUYÊN ⚠, tuyệt đối không bắn mò. */
   const SOCK_VERIFY_DELAY_MS = 1500; // chờ 1.5s sau thời điểm mất ACK (lúc này đã qua 8–15s kể từ publish) rồi đọc lịch sử và bắn cứu ngay nếu chưa có tin
   // sockVerifyPending / sockVerifyFired / verifyStats: khai báo ở vùng sổ nền (cạnh pendingBg)
   // để getBatchSummaryCounts tính được ca đang chờ kiểm chứng vào "pending" giữ lượt.
@@ -6180,6 +6193,27 @@
       .trim();
   }
 
+  function isMessageDeliveredInHistory(msgs, pageId, want, photo, sentAt) {
+    if (!Array.isArray(msgs) || !msgs.length) return false;
+    const batchStart = (batchStats && batchStats.startedAt) || sentAt;
+    // Chỉ xét tin được tạo trong lượt gửi hiện tại (trừ 3s lệch đồng hồ) và từ lúc bắt đầu bắn chat này (trừ 5s):
+    // TUYỆT ĐỐI không nhìn lùi 60–75s về lượt gửi trước đó (tránh khớp nhầm tin của lượt cũ gây BÙ THIẾU)!
+    const minTime = Math.max(batchStart - 3000, sentAt - 5000);
+    return msgs.some((m) => {
+      if (!m || m.is_removed) return false;
+      if (!m.from || String(m.from.id) !== String(pageId)) return false; // chỉ tin DO PAGE gửi
+      const rawT = String(m.inserted_at || '');
+      if (!rawT) return false;
+      const t = Date.parse(/[zZ+]|\+\d{2}:?\d{2}$/.test(rawT) ? rawT : rawT + 'Z');
+      if (isNaN(t) || t < minTime) return false;
+      const normMsg = normalizeMsgText(m.message);
+      if (want && (normMsg === want || normMsg.indexOf(want) > -1)) return true;
+      if (!want && photo && Array.isArray(m.attachments) && m.attachments.length > 0) return true;
+      if (t >= sentAt - 2000 && (normMsg || (Array.isArray(m.attachments) && m.attachments.length > 0))) return true;
+      return false;
+    });
+  }
+
   function scheduleSocketVerify(conv, text, photo, publishedAtMs) {
     if (!conv || !conv.id) return;
     const want = normalizeMsgText(text);
@@ -6190,6 +6224,7 @@
     sockVerifyPending[conv.id] = myRun;
     const nm = conv.name || conv.id;
     const sentAt = publishedAtMs || Date.now();
+    const verifyDelay = (batchStats && batchStats.total > 50) ? 3000 : SOCK_VERIFY_DELAY_MS;
     setTimeout(async () => {
       try {
         if (myRun !== runSeq) return; // đã sang lượt mới — giữ nguyên ⚠ lượt cũ, không bắn lẫn
@@ -6230,18 +6265,7 @@
           logLine('🔎 ' + nm + ' — không kiểm chứng được tin Socket (lịch sử lạ) — giữ ⚠ như cũ, không gửi lại');
           return;
         }
-        const found = msgs.some((m) => {
-          if (!m || m.is_removed) return false;
-          if (!m.from || String(m.from.id) !== String(pageId)) return false; // chỉ tin DO PAGE gửi
-          if (want && normalizeMsgText(m.message) !== want) return false;
-          if (!want && photo && !(Array.isArray(m.attachments) && m.attachments.length)) return false;
-          const rawT = String(m.inserted_at || '');
-          if (!rawT) return false; // không có mốc giờ → bằng chứng yếu, không tính (tránh khớp nhầm tin cũ cùng nội dung)
-          const t = Date.parse(/[zZ+]|\+\d{2}:?\d{2}$/.test(rawT) ? rawT : rawT + 'Z');
-          if (isNaN(t)) return false; // mốc giờ không đọc được → không tính
-          if (t < sentAt - 60000) return false; // tin cũ cùng nội dung — không tính (cửa sổ 60s chừa lệch đồng hồ máy)
-          return true;
-        });
+        const found = isMessageDeliveredInHistory(msgs, pageId, want, photo, sentAt);
         if (found) {
           verifyStats.found++;
           markDelivered(conv.id, 'socket');
@@ -6268,7 +6292,7 @@
         try { updateBatchSummaryUI(); } catch (e) { /* ignore */ }
         try { markSendIdleIfSettled(); } catch (e) { /* ignore */ }
       }
-    }, SOCK_VERIFY_DELAY_MS);
+    }, verifyDelay);
   }
 
   // KIỂM CHỨNG SAU KHI EXTENSION TIMEOUT: lệnh Ext đã phát đi nhưng adapter
@@ -6280,7 +6304,7 @@
   function scheduleExtTimeoutVerify(conv, text, photo, sentAtMs) {
     if (!conv || !conv.id || !sentAtMs) return;
     const want = normalizeMsgText(text);
-    if (!want) return; // ảnh trơ/không có chữ: không có bằng chứng đủ mạnh để khớp
+    if (!want && !photo) return;
     if (extVerifyPending[conv.id]) return;
     if (deliveredIds[conv.id] || finalFailedIds[conv.id]) return;
     const myRun = runSeq;
@@ -6315,18 +6339,7 @@
         }
         const msgs = res.data.messages || (res.data.data && res.data.data.messages) || null;
         if (!Array.isArray(msgs)) { extTimeoutStats.unknown++; return; }
-        const found = msgs.some((m) => {
-          if (!m || m.is_removed) return false;
-          if (!m.from || String(m.from.id) !== String(pageId)) return false; // chỉ tin DO PAGE gửi
-          if (photo && !(Array.isArray(m.attachments) && m.attachments.length)) return false;
-          if (normalizeMsgText(m.message) !== want) return false;
-          const rawT = String(m.inserted_at || '');
-          if (!rawT) return false; // không có mốc giờ → bằng chứng yếu, không tính
-          const t = Date.parse(/[zZ+]|\\+\\d{2}:?\\d{2}$/.test(rawT) ? rawT : rawT + 'Z');
-          if (isNaN(t)) return false;
-          if (t < sentAtMs - 60000) return false; // tin cũ cùng nội dung — không tính
-          return true;
-        });
+        const found = isMessageDeliveredInHistory(msgs, pageId, want, photo, sentAtMs);
         if (found) {
           extTimeoutStats.found++;
           markDelivered(conv.id, 'ext');
@@ -6445,6 +6458,7 @@
     Object.keys(skippedLateIds).forEach((k) => { delete skippedLateIds[k]; });
     Object.keys(spareFbIdPool).forEach((k) => { delete spareFbIdPool[k]; });
     Object.keys(socketRejectStreak).forEach((k) => { delete socketRejectStreak[k]; });
+    Object.keys(socketConfirmedDeadStreak).forEach((k) => { delete socketConfirmedDeadStreak[k]; });
     summaryCounters.okApi = 0;
     summaryCounters.okExt = 0;
     summaryCounters.okSocket = 0;
