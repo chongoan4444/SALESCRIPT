@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE LITE
 // @namespace    salescript
-// @version      1.91.65
+// @version      1.91.66
 // @description  BOTFAKE — panel hiện mọi website; gửi/tải list qua extension background.
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -44,7 +44,7 @@
   /* ============================ HẰNG SỐ ============================ */
 
   const PANEL_ID = 'ssb-root';          // ssb = SaleScript Bulk — không đụng pk-*/adj-*/pancake-* của script khác
-  const APP_VERSION = '1.91.65';        // hiện ở tiêu đề panel — đối chiếu với @version trong header
+  const APP_VERSION = '1.91.66';        // hiện ở tiêu đề panel — đối chiếu với @version trong header
   const STYLE_ID = 'ssb-style';
 
   const MAX_NAME_LIST = 12;             // số tên hiển thị khi xác nhận
@@ -3486,7 +3486,7 @@
   const socketConfirmedDeadStreak = {};
   const socketReconnectPromises = {};
   const socketLastPublishAt = {};
-  const SOCKET_MIN_PACE_MS = 8; // giãn 8ms (~125 khung/s/page = 7.500 tin/phút) kết hợp pageLane giữ slot tới khi có /ls_resp — giảm tối đa burst-reject của FB MQTT mà vẫn cực nhanh ở lô 5.000 tin
+  const SOCKET_MIN_PACE_MS = 6; // giãn 6ms (~166 khung/s/page) kết hợp pageLane giữ slot tới khi có /ls_resp — chặn ngập hàng nghìn frame in-flight gây mất ACK hàng loạt
 
   async function paceSocketPublish(pageId) {
     const pid = String(pageId || '');
@@ -3929,11 +3929,7 @@
         if (deliveredIds[conv.id]) return { ok: true, id: gid, sendBy: 'socket', sent: true };
         ctx.socketRetriedOnce = true;
         sendDiag.sockRetry++;
-        const inDeadBlock = preRejectStreak >= 4 && (socketConfirmedDeadStreak[pageId] || 0) >= 2;
-        const retryWaitMs = inDeadBlock
-          ? (180 + Math.floor(Math.random() * 100))
-          : (350 + Math.floor(Math.random() * 200));
-        await sleep(retryWaitMs);
+        await sleep(220 + Math.floor(Math.random() * 130));
         if (state.stopRequested) return { ok: false, sent: false, error: 'Đã dừng' };
         if (deliveredIds[conv.id]) return { ok: true, id: gid, sendBy: 'socket', sent: true };
         // Kiểm tra xem trong nhịp nghỉ đó WebSocket threadMappingStoreV2 có nạp được global_id mới hơn không
@@ -3960,31 +3956,9 @@
           ctx.nonReusableFbIds = null;
           attFbIds = (freshUp.fbIds && freshUp.fbIds.length) ? freshUp.fbIds.slice() : [freshUp.fbId];
         }
-        // Xếp theo thứ tự FIFO trong pageLane (không dùng runPrioritySocket) để các ca retry của nick khóa
-        // không chèn ngang lên trước các chat chính chưa gửi Lần 1 hoặc các chat đang chờ bù!
-        raw = await pageLane(() => socketPublishSend(helper, pageId, gid, text, attFbIds));
-        const inDeadBlockNow = preRejectStreak >= 4 && (socketConfirmedDeadStreak[pageId] || 0) >= 2;
-        const allowAttempt3 = (batchStats && batchStats.total > 150)
-          ? !inDeadBlockNow
-          : (preRejectStreak === 0 && (socketConfirmedDeadStreak[pageId] || 0) === 0);
-        if (raw && raw.kind === 'rejected' && allowAttempt3 && !state.stopRequested && !deliveredIds[conv.id]) {
-          // Lô nhỏ (<=150): chỉ thử Lần 3 cho đúng 1 ca lẻ đầu tiên (preRejectStreak === 0);
-          // Lô lớn (>150): cho phép Lần 3 khi chưa gặp >=2 nick khóa đã xác nhận liên tiếp (cứu 100% khách sống dính burst-reject kép mà vẫn cắt ngay khi vào cụm nick khóa).
-          await sleep(350 + Math.floor(Math.random() * 150));
-          if (!state.stopRequested && !deliveredIds[conv.id]) {
-            if (photo) {
-              const freshUpIso = await uploadOneTimePhoto(pageId, photo, conv.id, ctx, true);
-              if (freshUpIso && freshUpIso.ok && freshUpIso.fbId) {
-                ctx.nonReusableFbId = null;
-                ctx.nonReusableFbIds = null;
-                attFbIds = (freshUpIso.fbIds && freshUpIso.fbIds.length) ? freshUpIso.fbIds.slice() : [freshUpIso.fbId];
-                raw = await pageLane(() => socketPublishSend(helper, pageId, gid, text, attFbIds));
-              }
-            } else {
-              raw = await pageLane(() => socketPublishSend(helper, pageId, gid, text, null));
-            }
-          }
-        }
+        // Bắn lại đúng 1 lần qua hàng đợi ưu tiên đan xen công bằng (runPrioritySocket) để giải phóng
+        // ngay lập tức, không dồn ứ hàng nghìn ca retry ở đuôi lượt mà vẫn không chặn các chat Lần 1!
+        raw = await runPrioritySocket(() => socketPublishSend(helper, pageId, gid, text, attFbIds));
         if (raw && raw.kind === 'ok') {
           socketRejectStreak[pageId] = 0;
           socketConfirmedDeadStreak[pageId] = 0;
@@ -4698,11 +4672,13 @@
   const BUS_PARALLEL_EXT = 10;    // số lệnh adapter.send (REPLY_INBOX_PHOTO) chạy song song — điểm bắt đầu của làn thích ứng Ext
   const EXT_SEND_MIN = 6;         // sàn làn Ext gửi: không thấp hơn mức đã kiểm chứng ổn định
   const EXT_SEND_MAX = 24;        // trần làn Ext gửi: mở tới 24 khi Extension trả lời nhanh/rõ ở lô lớn
-  const BUS_PARALLEL_SOCKET = 48; // số frame Socket (/ls_req) in-flight trên mỗi kết nối WebSocket (kèm giãn nhịp 8ms chống burst; giữ retry + socketConfirmedDeadStreak bảo vệ)
+  const BUS_PARALLEL_SOCKET = 64; // số frame Socket (/ls_req) in-flight trên mỗi kết nối WebSocket (kèm giãn nhịp 6ms chống burst; giữ retry + socketConfirmedDeadStreak bảo vệ)
   const SIDE_EFFECT_PARALLEL = 8; // số request nền (fill_admin_name / update_global_id) chạy song song
   function makeLane(parallel) {
     let active = 0;
+    let normalSincePriority = 0;
     const waiters = [];
+    const pWaiters = [];
     const enqueue = function (fn, opts) {
       const isPriority = !!(opts && opts.priority);
       return new Promise((resolve) => {
@@ -4718,27 +4694,38 @@
                 // Đang Dừng: xả HẾT hàng đợi — mỗi start() tự resolve 'Đã dừng' ngay.
                 // Chỉ xả 1 waiter như cũ thì số waiter còn lại kẹt vĩnh viễn (không còn
                 // task nào xong để kéo tiếp) → runPool không bao giờ xong → UI 'Đang dừng…' mãi.
+                while (pWaiters.length) { const w = pWaiters.shift(); w(); }
                 while (waiters.length) { const w = waiters.shift(); w(); }
               } else {
-                const next = waiters.shift();
-                if (next) next(); // giữ thứ tự FIFO cho các lệnh đang chờ
+                let next = null;
+                if (pWaiters.length && (!waiters.length || normalSincePriority >= 1)) {
+                  normalSincePriority = 0;
+                  next = pWaiters.shift();
+                } else if (waiters.length) {
+                  normalSincePriority++;
+                  next = waiters.shift();
+                } else if (pWaiters.length) {
+                  normalSincePriority = 0;
+                  next = pWaiters.shift();
+                }
+                if (next) next();
               }
               resolve(r);
             });
         };
-        if (active < parallel && !waiters.length) start();
+        if (active < parallel && !waiters.length && !pWaiters.length) start();
         else if (isPriority) {
           if (active < parallel) start();
-          else waiters.unshift(start);
+          else pWaiters.push(start);
         } else {
           waiters.push(start);
         }
       });
     };
     enqueue.priority = (fn) => enqueue(fn, { priority: true });
-    enqueue.busy = () => active >= parallel || waiters.length > 0;
+    enqueue.busy = () => active >= parallel || waiters.length > 0 || pWaiters.length > 0;
     enqueue.activeCount = () => active;
-    enqueue.waitingCount = () => waiters.length;
+    enqueue.waitingCount = () => waiters.length + pWaiters.length;
     return enqueue;
   }
 
@@ -4818,7 +4805,7 @@
         ctxFetchLane.setLimit(ctxFetchLane.getLimit() * 0.5);
         return;
       }
-      if (!ok || latencyMs > 2500) {
+      if (!ok) {
         gidHttpCtl.good = 0;
         gidHttpCtl.bad++;
         if (gidHttpCtl.bad >= 3) {
@@ -4827,16 +4814,25 @@
         }
         return;
       }
+      if (latencyMs > 5000) {
+        gidHttpCtl.good = 0;
+        gidHttpCtl.bad++;
+        if (gidHttpCtl.bad >= 4) {
+          gidHttpCtl.bad = 0;
+          ctxFetchLane.setLimit(Math.max(16, Math.round(ctxFetchLane.getLimit() * 0.85)));
+        }
+        return;
+      }
       gidHttpCtl.bad = 0;
       gidHttpCtl.backoffStreak = 0;
-      if (latencyMs < 1000) {
+      if (latencyMs < 1500) {
         gidHttpCtl.good++;
-        if (gidHttpCtl.good >= 12) {
+        if (gidHttpCtl.good >= 10) {
           gidHttpCtl.good = 0;
           ctxFetchLane.setLimit(ctxFetchLane.getLimit() + 4);
         }
       } else {
-        gidHttpCtl.good = Math.max(0, gidHttpCtl.good - 2);
+        gidHttpCtl.good = Math.max(0, gidHttpCtl.good - 1);
       }
     } catch (e) { /* điều tiết lỗi không được làm hỏng lượt gửi */ }
   }
@@ -6459,6 +6455,12 @@
     Object.keys(spareFbIdPool).forEach((k) => { delete spareFbIdPool[k]; });
     Object.keys(socketRejectStreak).forEach((k) => { delete socketRejectStreak[k]; });
     Object.keys(socketConfirmedDeadStreak).forEach((k) => { delete socketConfirmedDeadStreak[k]; });
+    gidHttpCtl.good = 0;
+    gidHttpCtl.bad = 0;
+    gidHttpCtl.backoffStreak = 0;
+    if (ctxFetchLane && typeof ctxFetchLane.setLimit === 'function' && ctxFetchLane.getLimit() < CTX_FETCH_INITIAL) {
+      ctxFetchLane.setLimit(CTX_FETCH_INITIAL);
+    }
     summaryCounters.okApi = 0;
     summaryCounters.okExt = 0;
     summaryCounters.okSocket = 0;
