@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE LITE
 // @namespace    salescript
-// @version      1.91.68
+// @version      1.91.67
 // @description  BOTFAKE — panel hiện mọi website; gửi/tải list qua extension background.
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -44,7 +44,7 @@
   /* ============================ HẰNG SỐ ============================ */
 
   const PANEL_ID = 'ssb-root';          // ssb = SaleScript Bulk — không đụng pk-*/adj-*/pancake-* của script khác
-  const APP_VERSION = '1.91.68';        // hiện ở tiêu đề panel — đối chiếu với @version trong header
+  const APP_VERSION = '1.91.67';        // hiện ở tiêu đề panel — đối chiếu với @version trong header
   const STYLE_ID = 'ssb-style';
 
   const MAX_NAME_LIST = 12;             // số tên hiển thị khi xác nhận
@@ -2948,9 +2948,7 @@
         }
       } catch (e) { /* ignore */ }
     };
-    const badGid = (forceFind && ctx && (ctx.badGid || (ctx.gid && !ctx.gidFromPsid ? ctx.gid : '')))
-      ? String(ctx.badGid || ctx.gid)
-      : '';
+    const badGid = (forceFind && ctx && ctx.gid && !ctx.gidFromPsid) ? String(ctx.gid) : '';
     const mqtt = window.__MqttHelper__;
     const srvGidDirect = full && (gidFromPayload(full) || full.globalId || (full.customers && full.customers[0] && full.customers[0].global_id));
     // 1) Kiểm tra 0ms trong RAM (Cache + full.global_id + MqttHelper.threadMappingStoreV2)
@@ -3318,10 +3316,12 @@
         const adapter = window.__ExtensionAdapter__;
         if (adapter && typeof adapter.send === 'function') {
           try {
-            if (typeof adapter.checkConnection === 'function') {
-              adapter.checkConnection({ silent: true });
+            if (typeof adapter.checkConnection === 'function'
+              && !adapter.checkConnection({ silent: true })) {
+              finishExt(null, 'ext');
+              return;
             }
-          } catch (e) { /* đánh thức CHECK_EXTENSION nếu cờ Redux chưa đồng bộ; vẫn gọi adapter.send như findGlobalIdForConv @903213 */ }
+          } catch (e) { /* cứ thử gửi lệnh dò */ }
           // Gọi thẳng adapter để giữ được shape success/data và đặt timeout 10s.
           // Trong __ExtensionAdapter__.send (@715835 của _app):
           //   • Timeout hết giờ trả { success: false, data: null } (res.data === null) -> CHƯA RÕ.
@@ -3592,17 +3592,14 @@
     const hasPhoto = Array.isArray(attFbIds) && attFbIds.length > 0;
     const hasText = !!(text && String(text).length > 0);
     const tasks = [];
-    let photoOtid = '';
-    let textOtid = '';
     if (hasPhoto) {
-      photoOtid = epochId();
       tasks.push({
         failure_count: null,
         label: '46',
         payload: JSON.stringify({
           attachment_fbids: attFbIds,
           mark_thread_read: 0,
-          otid: photoOtid,
+          otid: epochId(),
           send_type: 3,
           source: 0,
           sync_group: 205,
@@ -3614,13 +3611,12 @@
       });
     }
     if (hasText || !hasPhoto) {
-      textOtid = epochId();
       tasks.push({
         failure_count: null,
         label: '46',
         payload: JSON.stringify({
           mark_thread_read: 1,
-          otid: textOtid,
+          otid: epochId(),
           send_type: 1,
           source: 4456448,
           sync_group: 205,
@@ -3697,11 +3693,6 @@
       // nhưng ảnh bị từ chối (failed.length > 0), TUYỆT ĐỐI không được trả về 'ok' (sẽ làm mất ảnh mà chỉ có chữ!),
       // mà phải báo 'photo_failed_text_ok' để sendViaSocket upload fbId mới và bắn bù riêng phần ảnh!
       if (hasPhoto && hasText && failed.length > 0 && replaced.length > 0) {
-        const failedOtids = failed.map((x) => String((x && x[2]) || ''));
-        const replacedOtids = replaced.map((x) => String((x && x[2]) || ''));
-        if (textOtid && failedOtids.indexOf(textOtid) > -1 && (!photoOtid || replacedOtids.indexOf(photoOtid) > -1)) {
-          return { kind: 'text_failed_photo_ok' };
-        }
         return { kind: 'photo_failed_text_ok' };
       }
       return { kind: 'ok' };
@@ -3774,88 +3765,6 @@
       .catch((e) => ({ ok: false, error: String(e && e.message || e) }));
   }
 
-  // Khôi phục thread_id bị khuyết cho hội thoại INBOX (loaddanhsach.har & batmesss.har có các hội thoại
-  // INBOX của khách thật bị thread_id: null):
-  //   1) Bảo toàn global_id trong cache trước khi gọi __syncMissingThreadId__ (vì hàm eF tại @986671 của _app
-  //      gọi p.Z.set(convId, null) xóa mất global_id đang có trong __GlobalIdCacheTest__!).
-  //   2) Ưu tiên gọi thẳng apiBase()/v1/pages/{pid}/conversations/{cid}/sync_missing_thread_id (cùng origin pancake.vn,
-  //      không bị lỗi chéo miền pages.fm như trong _app).
-  //   3) Nếu vẫn chưa có thread_id, dò qua GET /v1/conversations/customer/{fb_id}?pages[{pid}]=0 (đúng Entry 52 & 185
-  //      trong batmesss.har) để lấy thread_id và thread_key từ lịch sử hội thoại của khách!
-  async function syncMissingThreadIdSafe(pageId, convId, full, conv) {
-    const pid = String(pageId || '');
-    const cid = String(convId || (full && full.id) || (conv && conv.id) || '');
-    let tid = String((full && (full.thread_id || full.threadId)) || (conv && (conv.thread_id || conv.threadId)) || '');
-    if (tid) return tid;
-    if (!pid || !cid) return '';
-    let savedGid = '';
-    try {
-      const g1 = window.__GlobalIdCacheTest__, g2 = window.__tempGlobalIdCache__;
-      savedGid = String((g1 && g1.get(cid)) || (g2 && g2.get(cid)) || (persistentGidMap && persistentGidMap[cid]) || '');
-    } catch (e0) { /* ignore */ }
-    let tKey = '';
-    try {
-      const syncUrl = apiBase() + '/v1/pages/' + pid + '/conversations/' + encodeURIComponent(cid) + '/sync_missing_thread_id';
-      const syncRes = await ctxFetchLane(() => fetchJson(syncUrl, 1, { timeoutMs: 6000 }));
-      if (syncRes && syncRes.ok && syncRes.data && syncRes.data.thread_id) {
-        tid = String(syncRes.data.thread_id);
-        tKey = String(syncRes.data.thread_key || ('t_' + tid));
-      }
-    } catch (e1) { /* ignore */ }
-    if (!tid && typeof window.__syncMissingThreadId__ === 'function') {
-      try {
-        const t2 = await window.__syncMissingThreadId__(pid, cid);
-        if (t2) tid = String(t2);
-      } catch (e2) { /* ignore */ }
-    }
-    if (!tid) {
-      const fbId = String((full && full.from && full.from.id) || (full && full.from_psid)
-        || (conv && conv.fromPsid) || (cid.indexOf('_') > -1 ? cid.split('_')[1] : '') || '');
-      if (fbId) {
-        try {
-          const custUrl = apiBase() + '/v1/conversations/customer/' + encodeURIComponent(fbId)
-            + '?pages[' + encodeURIComponent(pid) + ']=0';
-          const custRes = await ctxFetchLane(() => fetchJson(custUrl, 1, { timeoutMs: 6000 }));
-          const convList = custRes && custRes.ok && custRes.data && custRes.data.conversations;
-          if (Array.isArray(convList)) {
-            const match = convList.find((x) => x && (x.id === cid || (x.type === 'INBOX' && String(x.page_id) === pid)) && x.thread_id);
-            if (match && match.thread_id) {
-              tid = String(match.thread_id);
-              tKey = String(match.thread_key || ('t_' + tid));
-              const mGid = match.global_id || (match.customers && match.customers[0] && match.customers[0].global_id);
-              if (mGid && !savedGid) savedGid = String(mGid);
-            }
-          }
-        } catch (e3) { /* ignore */ }
-      }
-    }
-    if (savedGid) {
-      try {
-        if (window.__GlobalIdCacheTest__) window.__GlobalIdCacheTest__.set(cid, savedGid);
-        if (window.__tempGlobalIdCache__) window.__tempGlobalIdCache__.set(cid, savedGid);
-        if (typeof window.__botfakeSaveGid__ === 'function') {
-          window.__botfakeSaveGid__(cid, pid, tid, savedGid);
-        }
-      } catch (e4) { /* ignore */ }
-    }
-    if (tid) {
-      if (!tKey) {
-        const rConv = getReduxConvById(cid, 0);
-        tKey = String((rConv && (rConv.thread_key || rConv.threadKey)) || (full && (full.thread_key || full.threadKey)) || ('t_' + tid));
-      }
-      if (full) {
-        full.thread_id = tid;
-        full.threadId = tid;
-        full.thread_key = tKey;
-      }
-      if (conv) {
-        conv.threadId = tid;
-        conv.threadKey = tKey;
-      }
-    }
-    return tid || '';
-  }
-
   async function sendViaSocket(conv, text, photo, ctx) {
     if (photo && !ctx && typeof photo === 'object' && !photo.url && !photo.id) {
       // tương thích ngược nếu nơi nào gọi sendViaSocket(conv, text, ctx)
@@ -3877,12 +3786,12 @@
     // 1) Giải quyết threadId & globalId TRƯỚC KHI upload ảnh (đúng thứ tự executeBySocketFB @976000 trong _app):
     //    Nếu chat không tìm được globalId thì dừng ngay, không lãng phí 1 lần upload ảnh reusable=false!
     if (!ctx.threadResolved) {
-      let threadId = full.thread_id || full.threadId || conv.threadId || '';
-      if (!threadId && !ctx.fastOnly) {
-        threadId = await syncMissingThreadIdSafe(pageId, full.id || conv.id, full, conv);
+      let threadId = full.thread_id || full.threadId;
+      if (!threadId && typeof window.__syncMissingThreadId__ === 'function') {
+        try { threadId = await window.__syncMissingThreadId__(pageId, full.id || conv.id); } catch (e) { /* ignore */ }
       }
       ctx.threadId = threadId || null;
-      if (threadId || !ctx.fastOnly) ctx.threadResolved = true;
+      ctx.threadResolved = true;
     }
     const threadId = ctx.threadId;
     if (!ctx.gidResolved) {
@@ -3996,24 +3905,6 @@
         return { ok: false, sent: 'maybe', error: 'Socket: đã gửi được chữ nhưng FB từ chối ảnh đính kèm' };
       }
 
-      // Trường hợp ngược lại: ảnh đã đi thành công nhưng task chữ bị markOptimisticMessageFailed
-      // → TUYỆT ĐỐI không gửi lại ảnh (tránh trùng ảnh), chỉ bắn bù RIÊNG PHẦN CHỮ (attFbIds = null)
-      if (raw && raw.kind === 'text_failed_photo_ok' && text) {
-        socketRejectStreak[pageId] = 0;
-        sendDiag.sockRetry++;
-        const retryTextOnly = await runPrioritySocket(() => socketPublishSend(helper, pageId, gid, text, null));
-        if (retryTextOnly && retryTextOnly.kind === 'ok') {
-          recordSocketGidSuccess();
-          return { ok: true, id: gid, sendBy: 'socket', sent: true };
-        }
-        const extTextOnly = await sendViaExtension(conv, text, null, ctx);
-        if (extTextOnly && extTextOnly.ok) {
-          recordSocketGidSuccess();
-          return { ok: true, id: gid, sendBy: 'socket', sent: true };
-        }
-        return { ok: false, sent: 'maybe', error: 'Socket: đã gửi được ảnh nhưng FB từ chối phần chữ' };
-      }
-
       // CHỐNG BỎ SÓT TIN DO FACEBOOK MQTT BURST-REJECT:
       // Mọi ca đã có globalId thật mà bị rejected đều được nghỉ 400..650ms (đủ thoát cửa sổ burst-reject
       // của FB MQTT), xin fbId MỚI TINH (vì fbId is_reusable=false đã bị gửi trong Task #1 của Lần 1),
@@ -4092,22 +3983,6 @@
             return { ok: true, id: gid, sendBy: 'socket', sent: true };
           }
           return { ok: false, sent: 'maybe', error: 'Socket: đã gửi được chữ nhưng FB từ chối ảnh đính kèm' };
-        }
-        if (raw && raw.kind === 'text_failed_photo_ok' && text) {
-          socketRejectStreak[pageId] = 0;
-          socketConfirmedDeadStreak[pageId] = 0;
-          sendDiag.sockRetry++;
-          const retryTextOnly2 = await runPrioritySocket(() => socketPublishSend(helper, pageId, gid, text, null));
-          if (retryTextOnly2 && retryTextOnly2.kind === 'ok') {
-            recordSocketGidSuccess();
-            return { ok: true, id: gid, sendBy: 'socket', sent: true };
-          }
-          const extTextOnly2 = await sendViaExtension(conv, text, null, ctx);
-          if (extTextOnly2 && extTextOnly2.ok) {
-            recordSocketGidSuccess();
-            return { ok: true, id: gid, sendBy: 'socket', sent: true };
-          }
-          return { ok: false, sent: 'maybe', error: 'Socket: đã gửi được ảnh nhưng FB từ chối phần chữ' };
         }
       }
       if (raw && raw.ok === false && raw.sent === false && raw.error) {
@@ -4282,14 +4157,7 @@
     }
     try {
       if (typeof adapter.checkConnection === 'function' && !adapter.checkConnection({ silent: true })) {
-        await sleep(120);
-        const stAuth = window.__pancakeReduxStore__ && typeof window.__pancakeReduxStore__.getState === 'function'
-          ? (window.__pancakeReduxStore__.getState() || {}).auth
-          : null;
-        const hasExtObj = !!(stAuth && stAuth.extension && typeof stAuth.extension === 'object');
-        if (!hasExtObj && !adapter.checkConnection({ silent: true })) {
-          return { ok: false, error: 'Extension Pancake chưa kết nối', skipExt: true };
-        }
+        return { ok: false, error: 'Extension Pancake chưa kết nối', skipExt: true };
       }
     } catch (e) { /* cứ thử gửi */ }
 
@@ -4312,9 +4180,11 @@
     const pageId = full.page_id || conv.pageId || String(conv.id).split('_')[0];
 
     if (!ctx.threadResolved) {
-      let threadId = full.thread_id || full.threadId || conv.threadId || '';
-      if (!threadId) {
-        threadId = await syncMissingThreadIdSafe(pageId, full.id || conv.id, full, conv);
+      let threadId = full.thread_id || full.threadId;
+      if (!threadId && typeof window.__syncMissingThreadId__ === 'function') {
+        try {
+          threadId = await window.__syncMissingThreadId__(pageId, full.id || conv.id);
+        } catch (e) { /* ignore */ }
       }
       ctx.threadId = threadId || null;
       ctx.threadResolved = true;
@@ -5134,26 +5004,34 @@
     const pageId = full.page_id || full.pageId || conv.pageId || String(conv.id || '').split('_')[0];
     if (!ctx.threadResolved) {
       let threadId = full.thread_id || full.threadId || conv.threadId || '';
-      if (!threadId && !ctx.fastOnly) {
-        threadId = await syncMissingThreadIdSafe(pageId, full.id || conv.id, full, conv);
+      if (!threadId && !ctx.fastOnly && typeof window.__syncMissingThreadId__ === 'function') {
+        try {
+          threadId = await window.__syncMissingThreadId__(pageId, full.id || conv.id);
+          if (threadId) {
+            full.thread_id = threadId;
+            full.threadId = threadId;
+            conv.threadId = threadId;
+            const rConv = getReduxConvById(conv.id, 0);
+            const tKey = (rConv && (rConv.thread_key || rConv.threadKey)) || full.thread_key || ('t_' + threadId);
+            full.thread_key = tKey;
+            conv.threadKey = tKey;
+          }
+        } catch (e) { /* ignore */ }
+      }
+      if (!threadId && ctx.fastOnly) {
+        ctx.deferredToExt = true;
+        return ctx;
       }
       ctx.threadId = threadId || null;
-      if (threadId || !ctx.fastOnly) {
-        ctx.threadResolved = true;
-      }
+      ctx.threadResolved = true;
     }
-    if (!ctx.gidResolved) {
+    if (!ctx.gidResolved && ctx.threadId) {
       ctx.gid = await resolveGlobalId(full, ctx.threadId, conv.id, conv.fromPsid, ctx.gidForceFind, ctx);
       if (ctx.deferredToExt) {
         recycleUnusedFbId(pageId, ctx);
         return ctx;
       }
       ctx.gidResolved = true;
-    }
-    if (!ctx.threadId && (!ctx.gid || ctx.gidFromPsid) && ctx.fastOnly) {
-      ctx.deferredToExt = true;
-      recycleUnusedFbId(pageId, ctx);
-      return ctx;
     }
     // Nếu không tìm thấy cả globalId thật lẫn xác nhận hội thoại từ Extension → không tốn công upload ảnh
     const canSend = !!((ctx.gid && !ctx.gidFromPsid) || (ctx.threadId && !ctx.noGidConfirmedByExt));
@@ -5344,10 +5222,7 @@
     const peeked0 = peekConv(conv) || conv;
     const pid0 = (peeked0 && (peeked0.page_id || peeked0.pageId)) || conv.pageId || String(conv.id || '').split('_')[0];
     if (opts.dynamicDirect && conv.type !== 'comment' && (seq[0] === 'ext' || seq[0] === 'socket')) {
-      const badGid0 = (ctx && ctx.gidForceFind && (ctx.badGid || (ctx.gid && !ctx.gidFromPsid ? ctx.gid : '')))
-        ? String(ctx.badGid || ctx.gid)
-        : '';
-      const fastGid0 = !ctx.gidForceFind ? peekFastGlobalId(conv, peeked0, badGid0) : '';
+      const fastGid0 = peekFastGlobalId(conv, peeked0, '');
       const tid0 = (peeked0 && (peeked0.thread_id || peeked0.threadId)) || conv.threadId || '';
       if (fastGid0 && (tid0 || isPageSocketReady(pid0) || (pid0 && socketWarmPromises[pid0]))) {
         const srvGid0 = peeked0 && (gidFromPayload(peeked0) || peeked0.globalId
@@ -5396,12 +5271,6 @@
           logLine('🛟 ' + (conv.name || conv.id)
             + ' — chưa dò được global_id; chưa kết luận khách khóa nick, sẽ thử Extension theo thread_id'
             + (canApiRescue ? ' và API theo conversation_id như đường gửi tay' : ''));
-        } else if (!ctx.fastOnly && !ctx.threadId && (!ctx.gid || ctx.gidFromPsid)) {
-          // Hội thoại INBOX bị khuyết cả thread_id lẫn global_id thật sau khi đã dò hết ở Làn 2:
-          // Cả Extension (cần thread_id) lẫn Socket (cần global_id) đều không thể gửi được →
-          // nối kênh API (POST /messages theo conv.id) vào cuối để cứu, tránh chốt lỗi oan!
-          const canApiNoThreadRescue = !batchSkipApi && seq.indexOf('api') < 0 && !(photo && !photo.fbId);
-          if (canApiNoThreadRescue) seq.push('api');
         }
       }
       const pid = (ctx.full && (ctx.full.page_id || ctx.full.pageId)) || pid0;
@@ -5463,7 +5332,6 @@
       // HTTP/WS/Ext lần thứ hai cho cùng một ca.
       const incorrectThreadNoGid = /INCORRECT THREAD/i.test(r.error || '') && !(ctx && ctx.gid && !ctx.gidFromPsid);
       if ((ctx && ctx.gidFromPsid) || (conv.fromPsid && /globalId|thread_id/i.test(r.error || '')) || incorrectThreadNoGid) {
-        if (ctx && ctx.gid && !ctx.gidFromPsid) ctx.badGid = String(ctx.gid);
         ctx.gidForceFind = true;
         ctx.gidResolved = false;
         ctx.gidFromPsid = false;
@@ -5771,7 +5639,7 @@
     const pageId = String(pid || '').trim();
     if (!pageId || pageId.indexOf('[object') > -1) return Promise.resolve(0);
     if (batchGidPromises[pageId]) return batchGidPromises[pageId];
-    if (!force && batchGidFetchedPages[pageId]) return Promise.resolve(0);
+    if (batchGidFetchedPages[pageId]) return Promise.resolve(0);
     const adapter = window.__ExtensionAdapter__;
     if (!adapter || typeof adapter.send !== 'function') return Promise.resolve(0);
     const promise = Promise.resolve().then(() => adapter.send({
@@ -5780,15 +5648,14 @@
       // Khớp payload app (@897543): app luôn kèm timeRangeMin. Gửi 0 = lấy mọi mốc,
       // tránh Extension hiểu thiếu trường là không có mapping nào trong khoảng lọc.
       timeRangeMin: 0,
-    }, { timeout: 5000 })).then((res) => {
+    }, { timeout: 2000 })).then((res) => {
       delete batchGidPromises[pageId];
+      batchGidFetchedPages[pageId] = true;
       const list = res && res.success && res.data && res.data.threadsWithGlobalId;
       if (!Array.isArray(list)) {
-        delete batchGidFetchedPages[pageId];
         gidStats.batchFail++;
         return 0;
       }
-      batchGidFetchedPages[pageId] = true;
       gidStats.batchReturned += list.length;
       let applied = 0;
       list.forEach((it) => {
@@ -5806,7 +5673,7 @@
     }).catch(() => {
       gidStats.batchFail++;
       delete batchGidPromises[pageId];
-      delete batchGidFetchedPages[pageId];
+      batchGidFetchedPages[pageId] = true;
       return 0;
     });
     batchGidPromises[pageId] = promise;
@@ -5820,13 +5687,12 @@
       const adapter = window.__ExtensionAdapter__;
       if (h) patchMqttHelper(h);
       const seen = {};
-      const wantForceBatch = !!(opts && opts.forceBatch);
       (targets || []).forEach((c) => {
         const pid = c.pageId || String(c.id || '').split('_')[0];
         if (!pid || seen[pid]) return;
         seen[pid] = true;
-        // 1) Gọi BATCH_GET_GLOBAL_ID (@897543 trong _app) để nạp hàng loạt { threadId, globalId }
-        if (adapter && typeof adapter.send === 'function') requestBatchGlobalIds(pid, wantForceBatch);
+        // 1) Gọi BATCH_GET_GLOBAL_ID (@897543 trong _app) 1 lần/page trong phiên để nạp hàng loạt { threadId, globalId }
+        if (adapter && typeof adapter.send === 'function') requestBatchGlobalIds(pid, false);
         if (!h || typeof h.initSocket !== 'function') return;
         syncSocketMappingsToCache(h, pid);
         try {
@@ -6212,30 +6078,10 @@
       if (deliveredIds[conv.id]) return; // trong lúc chờ, tin đã đến nơi qua đường khác — thôi
       if (uncertainIds[conv.id] || finalFailedIds[conv.id]) return; // watchdog đã chốt ⚠/❌ trong lúc chờ bù — không bắn lần 2
       const buCtx = { gidForceFind: hadDirectFail, isBuRetry: true, apiRejected551: isApi551 };
-      (async () => {
-        const prepOut = await busEnqueue(async () => {
-          // Kiểm tra LẠI ngay trước khi bắn: trong lúc xếp hàng chờ lane (có thể cả phút ở
-          // lô lớn), ACK của lần đầu có thể đã về hoặc watchdog đã chốt — kiểm tra ở timer
-          // là chưa đủ, cứ bắn là LẶP (đây là nguồn của đoàn "bù thành công" cuối log)
-          if (deliveredIds[conv.id]) {
-            buStats.cancelled++;
-            logLine('✓ ' + name + ' — tin đã đến nơi trong lúc chờ bù — hủy bù (tránh trùng).');
-            return { ch: null, delivered: true };
-          }
-          if (uncertainIds[conv.id] || finalFailedIds[conv.id]) {
-            buStats.cancelled++;
-            logLine('✓ ' + name + ' — đã chốt trạng thái cuối trong lúc chờ bù — hủy bù (tránh trùng).');
-            return { ch: null, delivered: true };
-          }
-          await prepareDirectCtx(conv, photo, buCtx);
-          const pid = (buCtx.full && (buCtx.full.page_id || buCtx.full.pageId)) || conv.pageId || String(conv.id || '').split('_')[0];
-          const ordered = (remaining.length > 1)
-            ? pickBestDirectOrder(conv, pid, buCtx, remaining)
-            : remaining.slice();
-          const ch = ordered.find((c) => triedCh.indexOf(c) < 0 && done.indexOf(c) < 0) || remaining[0];
-          return { ch };
-        });
-        if (!prepOut || prepOut.delivered || !prepOut.ch) return prepOut;
+      busEnqueue(async () => {
+        // Kiểm tra LẠI ngay trước khi bắn: trong lúc xếp hàng chờ lane (có thể cả phút ở
+        // lô lớn), ACK của lần đầu có thể đã về hoặc watchdog đã chốt — kiểm tra ở timer
+        // là chưa đủ, cứ bắn là LẶP (đây là nguồn của đoàn "bù thành công" cuối log)
         if (deliveredIds[conv.id]) {
           buStats.cancelled++;
           logLine('✓ ' + name + ' — tin đã đến nơi trong lúc chờ bù — hủy bù (tránh trùng).');
@@ -6246,13 +6092,18 @@
           logLine('✓ ' + name + ' — đã chốt trạng thái cuối trong lúc chờ bù — hủy bù (tránh trùng).');
           return { ch: null, delivered: true };
         }
-        const ch = prepOut.ch;
+        await prepareDirectCtx(conv, photo, buCtx);
+        const pid = (buCtx.full && (buCtx.full.page_id || buCtx.full.pageId)) || conv.pageId || String(conv.id || '').split('_')[0];
+        const ordered = (remaining.length > 1)
+          ? pickBestDirectOrder(conv, pid, buCtx, remaining)
+          : remaining.slice();
+        const ch = ordered.find((c) => triedCh.indexOf(c) < 0 && done.indexOf(c) < 0) || remaining[0];
         done.push(ch);
         const r = (ch === 'ext')
           ? await sendViaExtension(conv, text, photo, buCtx)
           : await sendViaSocket(conv, text, photo, buCtx);
         return { ch, r };
-      })().then((out) => {
+      }).then((out) => {
         if (out && out.delivered) return; // đã hủy bù vì tin đến nơi / đã chốt cuối — không chốt lỗi
         if (!out || !out.ch) {
           // bước chuẩn bị bù văng lỗi (lane trả {ok:false}) — phải chốt, không im lặng kẹt pending
@@ -6352,13 +6203,9 @@
       const t = Date.parse(/[zZ+]|\+\d{2}:?\d{2}$/.test(rawT) ? rawT : rawT + 'Z');
       if (isNaN(t) || t < minTime) return false;
       const normMsg = normalizeMsgText(m.message);
-      if (want) {
-        if (normMsg === want || normMsg.indexOf(want) > -1 || (normMsg.length >= 10 && want.indexOf(normMsg) > -1)) {
-          return true;
-        }
-        return false;
-      }
-      if (photo && Array.isArray(m.attachments) && m.attachments.length > 0) return true;
+      if (want && (normMsg === want || normMsg.indexOf(want) > -1)) return true;
+      if (!want && photo && Array.isArray(m.attachments) && m.attachments.length > 0) return true;
+      if (t >= sentAt - 2000 && (normMsg || (Array.isArray(m.attachments) && m.attachments.length > 0))) return true;
       return false;
     });
   }
