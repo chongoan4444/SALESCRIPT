@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         BOTFAKE LITE (Wave 100 + Làn Bù Song Song)
 // @namespace    salescript
-// @version      1.91.73
-// @description  BOTFAKE — bắn ngay 0ms theo đợt 200 tin chuyển làn thông minh (4 làn × 50 tin, trượt 24 tin/làn + Smart Pipelined Gate + 6ms/80-slot Socket + Phòng ngừa nghẽn/mất ACK tận gốc) + Bể Hẹn Giờ 2 Làn Bù Song Song + Tab/Clipboard.
+// @version      1.91.74
+// @description  BOTFAKE — bắn ngay 0ms theo đợt 200 tin chuyển làn thông minh (4 làn × 50 tin, trượt 24 tin/làn + Smart Pipelined Gate + 6ms/80-slot Socket + Phòng ngừa nghẽn/mất ACK tận gốc) + Bể Hẹn Giờ 2 Làn Bù Song Song + Tab/Clipboard + Fix Alt+Q.
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
 // @match        https://pages.fm/*
@@ -47,7 +47,7 @@
   /* ============================ HẰNG SỐ ============================ */
 
   const PANEL_ID = 'ssb-root';          // ssb = SaleScript Bulk — không đụng pk-*/adj-*/pancake-* của script khác
-  const APP_VERSION = '1.91.73-W200';   // hiện ở tiêu đề panel — đối chiếu với @version trong header
+  const APP_VERSION = '1.91.74-W200';   // hiện ở tiêu đề panel — đối chiếu với @version trong header
   const STYLE_ID = 'ssb-style';
 
   const MAX_NAME_LIST = 12;             // số tên hiển thị khi xác nhận
@@ -8539,6 +8539,20 @@
         applyQr({ shortcut: q.shortcut, text: q.text, pageId: pid, items: q.items, parts: q.parts });
         const msgEl = root.getElementById('ssb-msg');
         if (msgEl) msgEl.value = q.text;
+        // Nếu đang ở chế độ Clipboard thì tự chuyển về chế độ Câu trên giao diện để dùng đúng câu nhanh vừa bắt
+        if (state.msgSource === 'clipboard') {
+          state.msgSource = 'ui';
+          try { localStorage.setItem(MSG_MODE_KEY, 'ui'); } catch (e0) { /* ignore */ }
+          const modeBtn = root.getElementById('ssb-msg-mode');
+          const clipBox = root.getElementById('ssb-clip-box');
+          if (modeBtn) {
+            modeBtn.textContent = '📝 Chế độ: Câu trên giao diện';
+            modeBtn.style.background = '#2563eb';
+            modeBtn.style.color = '#fff';
+          }
+          if (msgEl) msgEl.style.display = '';
+          if (clipBox) clipBox.style.display = 'none';
+        }
         // dọn đúng ký tự lệnh còn sót trong composer (chỉ khi composer đang chứa đúng "/" hoặc đúng shortcut)
         try {
           const comp = document.getElementById('replyBoxComposer');
@@ -9302,22 +9316,34 @@
       return;
     }
     if (e.key === 'Escape' && state.imgPick) {
+      e.__botfakeKeyHandled = true;
       if (typeof window.__botfakeImgPick__ === 'function') window.__botfakeImgPick__(false);
       logLine('🖼 Đã hủy chọn ảnh');
       return;
     }
     // Alt+Q: bật/tắt chế độ BẮT CÂU NHANH (chờ click vào popup "/" của app)
-    if (e.altKey && !e.ctrlKey && !e.metaKey && (e.key === 'q' || e.key === 'Q')) {
+    // Quan trọng: phải gán e.__botfakeKeyHandled = true vì onKeydown được đăng ký ở CẢ window lẫn document (capture).
+    // Nếu không gán cờ này, 1 lần nhấn Alt+Q sẽ kích hoạt onKeydown 2 lần liên tiếp (ở window -> BẬT, rồi ở document -> TẮT ngay trong 1ms)!
+    if (e.altKey && !e.ctrlKey && !e.metaKey && !e.shiftKey && (e.key === 'q' || e.key === 'Q' || e.code === 'KeyQ' || e.keyCode === 81 || e.which === 81)) {
+      e.__botfakeKeyHandled = true;
       e.preventDefault();
+      e.stopPropagation();
+      if (e.stopImmediatePropagation) e.stopImmediatePropagation();
+      if (e.repeat) return;
+      if (!shadow || !document.getElementById(PANEL_ID)) {
+        try { showBotfakePanel(); } catch (e0) { /* ignore */ }
+      }
       if (typeof window.__botfakeQrCapture__ === 'function') window.__botfakeQrCapture__();
       return;
     }
     if (e.key === 'Escape' && state.qrCapture) {
+      e.__botfakeKeyHandled = true;
       if (typeof window.__botfakeQrCapture__ === 'function') window.__botfakeQrCapture__(false);
       logLine('🎯 Đã hủy chế độ bắt câu');
       return;
     }
     if (e.key === 'Escape' && (state.pickMode || (state.rangeStart && !state.rangeEnd))) {
+      e.__botfakeKeyHandled = true;
       state.pickMode = false;
       if (state.rangeStart && !state.rangeEnd) {
         state.rangeStart = null;
@@ -9331,7 +9357,9 @@
       render();
       return;
     }
-    if (e.altKey && e.shiftKey && (e.key === 'B' || e.key === 'b')) {
+    if (e.altKey && e.shiftKey && (e.key === 'B' || e.key === 'b' || e.code === 'KeyB')) {
+      e.__botfakeKeyHandled = true;
+      if (e.repeat) return;
       const host = document.getElementById(PANEL_ID);
       if (host) {
         const showing = host.style.display === 'none';
@@ -9344,7 +9372,9 @@
         }
       }
     }
-    if (e.altKey && e.shiftKey && (e.key === 'D' || e.key === 'd')) {
+    if (e.altKey && e.shiftKey && (e.key === 'D' || e.key === 'd' || e.code === 'KeyD')) {
+      e.__botfakeKeyHandled = true;
+      if (e.repeat) return;
       const info = selectedRowInfo();
       if (info) setTarget(info, 'Alt+Shift+D');
     }
