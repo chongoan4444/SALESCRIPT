@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         BOTFAKE LITE (Wave 100 + Làn Bù Song Song)
 // @namespace    salescript
-// @version      1.91.72
-// @description  BOTFAKE — bắn ngay 0ms theo đợt 200 tin chuyển làn thông minh (4 làn × 50 tin, trượt 24 tin/làn + Smart Pipelined Gate + 6ms/80-slot Socket + Tự phục hồi Zombie Socket) + Bể Hẹn Giờ 2 Làn Bù Song Song + Tab/Clipboard.
+// @version      1.91.73
+// @description  BOTFAKE — bắn ngay 0ms theo đợt 200 tin chuyển làn thông minh (4 làn × 50 tin, trượt 24 tin/làn + Smart Pipelined Gate + 6ms/80-slot Socket + Phòng ngừa nghẽn/mất ACK tận gốc) + Bể Hẹn Giờ 2 Làn Bù Song Song + Tab/Clipboard.
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
 // @match        https://pages.fm/*
@@ -47,7 +47,7 @@
   /* ============================ HẰNG SỐ ============================ */
 
   const PANEL_ID = 'ssb-root';          // ssb = SaleScript Bulk — không đụng pk-*/adj-*/pancake-* của script khác
-  const APP_VERSION = '1.91.72-W200';   // hiện ở tiêu đề panel — đối chiếu với @version trong header
+  const APP_VERSION = '1.91.73-W200';   // hiện ở tiêu đề panel — đối chiếu với @version trong header
   const STYLE_ID = 'ssb-style';
 
   const MAX_NAME_LIST = 12;             // số tên hiển thị khi xác nhận
@@ -3504,7 +3504,11 @@
   const socketConfirmedDeadStreak = {};
   const socketReconnectPromises = {};
   const socketLastPublishAt = {};
+  const socketInFlightByPage = {};
+  const socketInFlightQueueByPage = {};
   const SOCKET_MIN_PACE_MS = 6; // giãn 6ms (~166 khung/s/page) — ngưỡng vàng chống nuốt ACK trên edge-chat.facebook.com cho Đợt 200 gối đầu + Làn Bù Song Song
+  const MAX_SOCKET_IN_FLIGHT_ACK = 64; // Giới hạn tối đa 64 khung /ls_req đang chờ /ls_resp ACK thật đồng thời trên 1 page (RTT chuẩn ~240ms -> thông lượng ~266 tin/s, không cản nhịp 6ms nhưng chặn đứng dồn 200+ gói gây nghẽn socket)
+  const SOCKET_IN_FLIGHT_SOFT_CAP_MS = 1800; // Van an toàn nhả slot in-flight sau 1.8s nếu 1 gói phản hồi chậm để không bao giờ kẹt dây chuyền
 
   async function paceSocketPublish(pageId) {
     const pid = String(pageId || '');
@@ -3514,6 +3518,45 @@
     socketLastPublishAt[pid] = nextAt;
     const waitMs = nextAt - now;
     if (waitMs > 0) await sleep(waitMs);
+  }
+
+  function acquireSocketInFlightSlot(pageId) {
+    const pid = String(pageId || '');
+    if (!pid) return Promise.resolve(function () {});
+    if (typeof socketInFlightByPage[pid] !== 'number' || socketInFlightByPage[pid] < 0) {
+      socketInFlightByPage[pid] = 0;
+    }
+    if (!Array.isArray(socketInFlightQueueByPage[pid])) {
+      socketInFlightQueueByPage[pid] = [];
+    }
+    return new Promise((resolve) => {
+      const grant = () => {
+        socketInFlightByPage[pid] = (socketInFlightByPage[pid] || 0) + 1;
+        let released = false;
+        let softTimer = null;
+        const release = () => {
+          if (released) return;
+          released = true;
+          if (softTimer) {
+            clearTimeout(softTimer);
+            softTimer = null;
+          }
+          socketInFlightByPage[pid] = Math.max(0, (socketInFlightByPage[pid] || 1) - 1);
+          const q = socketInFlightQueueByPage[pid];
+          while (q && q.length > 0 && (socketInFlightByPage[pid] || 0) < MAX_SOCKET_IN_FLIGHT_ACK) {
+            const nextGrant = q.shift();
+            if (typeof nextGrant === 'function') nextGrant();
+          }
+        };
+        softTimer = setTimeout(release, SOCKET_IN_FLIGHT_SOFT_CAP_MS);
+        resolve(release);
+      };
+      if ((socketInFlightByPage[pid] || 0) < MAX_SOCKET_IN_FLIGHT_ACK) {
+        grant();
+      } else {
+        socketInFlightQueueByPage[pid].push(grant);
+      }
+    });
   }
 
   function isSocketAlive(sock) {
@@ -3530,10 +3573,14 @@
   // (lúc này sock.requestId === -1, sock.connectAt = Date.now()), TRƯỚC KHI WebSocket bắt tay xong,
   // subscribe `/ls_resp` (~400ms) và chạy `sendInitMessages` (ngủ 500ms rồi bắn type: 2 đồng bộ
   // database 205, tăng sock.requestId >= 1 ở ~1.000ms — xem batmesss.har frame 0->16).
-  // Nếu gọi helper.publish('/ls_req', task 46) khi sock.requestId < 1, gói tin sẽ rơi vào khoảng trống
-  // chưa subscribe `/ls_resp` và bị mất ACK (treo 15s). Hàm này kiểm tra socket đã thực sự qua bước init.
+  // Ngoài ra khi MqttChannel tự reconnect ngầm (guikhachcu.har Entry 59), onSubscribe('/ls_resp')
+  // gọi lại sendInitMessages: lúc này sock.__botfakeSyncingInit === true trong ~750ms đầu.
+  // Hàm này chặn không cho gói type: 3 (task 46 / 313) bắn chen vào trước khi gói type: 2 hoàn tất!
   function isSocketSynced(sock) {
     if (!isSocketAlive(sock)) return false;
+    if (sock.__botfakeSyncingInit && (!sock.__botfakeInitDeadline || Date.now() < sock.__botfakeInitDeadline)) {
+      return false;
+    }
     if (typeof sock.requestId === 'number' && sock.requestId < 1) return false;
     if (typeof sock.connectAt === 'number' && Date.now() - sock.connectAt < 1000) return false;
     return true;
@@ -3590,6 +3637,10 @@
   // Hỗ trợ đầy đủ cả ẢNH (task label "46" với attachment_fbids, send_type: 3, source: 0) lẫn TEXT
   // (task label "46" với send_type: 1, source: 4456448) + watermark label "21", khớp 100% với
   // ef.Z.sendMessage (@831250) trong _app-9331d46f21a84eb1.v6.js!
+  // [v1.91.73-W200] Phòng ngừa nghẽn & mất ACK ngay từ đầu:
+  // 1) Điều áp kép: đợi cả paceSocketPublish (6ms) lẫn acquireSocketInFlightSlot (tối đa 64 gói chờ ACK thật).
+  // 2) Cấp ++sock.taskId, epochId() và gọi helper.publish ĐỒNG BỘ trong cùng 1 tick JS ngay sau khi qua van điều áp
+  //    -> thứ tự task_id và request_id khớp tuyệt đối 100%, không bao giờ lệch hoặc xóa nhầm PENDING_MESSAGES!
   async function socketPublishSend(helper, pageId, gid, text, attFbIds, firedCb) {
     let sock = helper.SOCKETS && helper.SOCKETS[pageId];
     const warm = socketWarmPromises[pageId];
@@ -3601,13 +3652,24 @@
     if (!isSocketAlive(sock)) {
       sock = await ensureAliveSocket(helper, pageId, false);
     } else if (!isSocketSynced(sock)) {
-      // Socket vừa mới được initSocket tạo ra (<1s hoặc chưa gửi sendInitMessages):
-      // chờ ~1s cho tới khi onSubscribe('/ls_resp') + sendInitMessages hoàn tất rồi mới publish!
       sock = await waitForSocketSynced(helper, pageId, 2500);
     }
     if (!isSocketAlive(sock)) return { kind: 'dead' };
     if (typeof helper.publish !== 'function' || typeof helper.findAllBlockActions !== 'function') {
       return { kind: 'legacy' }; // helper cũ — quay về sendMessage đầy đủ
+    }
+    const releaseInFlight = await acquireSocketInFlightSlot(pageId);
+    await paceSocketPublish(pageId);
+    // Kiểm tra lại socket ngay sau khi qua van điều áp (phòng khi MqttChannel vừa tự reconnect trong lúc chờ)
+    sock = helper.SOCKETS && helper.SOCKETS[pageId];
+    if (!isSocketAlive(sock)) {
+      sock = await ensureAliveSocket(helper, pageId, false);
+    } else if (!isSocketSynced(sock)) {
+      sock = await waitForSocketSynced(helper, pageId, 2500);
+    }
+    if (!isSocketAlive(sock)) {
+      releaseInFlight();
+      return { kind: 'dead' };
     }
     sock.taskId = sock.taskId || 0;
     const hasPhoto = Array.isArray(attFbIds) && attFbIds.length > 0;
@@ -3662,40 +3724,46 @@
       version_id: '9942677559150662',
       tasks: tasks,
     };
-    await paceSocketPublish(pageId);
     const publishedAt = Date.now();
-    const nextReqId = (typeof sock.requestId === 'number') ? (sock.requestId + 1) : null;
     const ackWaitMs = (batchStats && batchStats.total > 0 && batchStats.total <= 30) ? 8000 : 15000;
     const publishPromise = new Promise((resolve) => {
       let done = false;
-      const timer = setTimeout(() => {
+      let assignedReqId = null;
+      const finish = (val) => {
         if (done) return;
         done = true;
+        releaseInFlight();
+        resolve(val);
+      };
+      const timer = setTimeout(() => {
+        if (done) return;
         try {
-          if (nextReqId !== null && helper.PENDING_MESSAGES) {
-            const k = pageId + '_' + nextReqId;
+          if (assignedReqId !== null && helper.PENDING_MESSAGES) {
+            const k = pageId + '_' + assignedReqId;
             if (helper.PENDING_MESSAGES[k]) {
               clearTimeout(helper.PENDING_MESSAGES[k].clearTimeout);
               delete helper.PENDING_MESSAGES[k];
             }
           }
         } catch (e0) { /* ignore */ }
-        resolve({ success: false, data: null, timedOut: true });
+        finish({ success: false, data: null, timedOut: true });
       }, ackWaitMs);
-      Promise.resolve()
-        .then(() => helper.publish(pageId, '/ls_req', frame, 3))
-        .then((res) => {
-          if (done) return;
-          done = true;
-          clearTimeout(timer);
-          resolve(res);
-        })
-        .catch(() => {
-          if (done) return;
-          done = true;
-          clearTimeout(timer);
-          resolve(null);
-        });
+      try {
+        const pubOut = helper.publish(pageId, '/ls_req', frame, 3);
+        assignedReqId = (typeof sock.requestId === 'number') ? sock.requestId : null;
+        Promise.resolve(pubOut)
+          .then((res) => {
+            clearTimeout(timer);
+            finish(res);
+          })
+          .catch(() => {
+            clearTimeout(timer);
+            finish(null);
+          });
+      } catch (ePub) {
+        clearTimeout(timer);
+        finish(null);
+      }
     });
     // Phân loại kết quả từ gói /ls_resp của FB (dùng chung cho cả đường chờ ACK lẫn đường bắn-nhả)
     const classify = (g) => {
@@ -5711,15 +5779,34 @@
       const ip = sk && sk.context && sk.context.initPageData;
       if (!ip) return;
       // Khởi tạo sẵn cả threadMapping & threadMappingStoreV2 là {} để chặn đứng lỗi TypeError
-      // tại o.context.initPageData.threadMapping[c] trong resolveSearchGlobalIdTask (@823506 của _app)!
+      // tại o.context.initPageData.threadMapping[c] trong resolveSearchGlobalIdTask (@823506)
+      // và Object.entries(r) trong sendInitMessages (@818850 của _app)!
       if (!ip.threadMapping || typeof ip.threadMapping !== 'object') ip.threadMapping = {};
       if (!ip.threadMappingStoreV2 || typeof ip.threadMappingStoreV2 !== 'object') ip.threadMappingStoreV2 = {};
       [ip.threadMapping, ip.threadMappingStoreV2].forEach((mp) => {
         if (!mp || typeof mp !== 'object') return;
         Object.keys(mp).forEach((tid) => {
-          if (tid && mp[tid]) putGidToMemCaches(String(pageId) + '_' + String(tid), String(mp[tid]));
+          if (tid && mp[tid]) {
+            ip.threadMappingStoreV2[tid] = String(mp[tid]);
+            putGidToMemCaches(String(pageId) + '_' + String(tid), String(mp[tid]));
+          }
         });
       });
+      // [v1.91.73-W200] Chặn đứng "Quả bom 537KB sendInitMessages (cpq_v2)" (guikhachcu.har Entry 59 MSG[6]):
+      // processResolveSearchGlobalId (@825728) liên tục nhồi hàng nghìn thread vào ip.threadMapping.
+      // Nếu MqttChannel tự reconnect ngầm, onSubscribe('/ls_resp') sẽ gọi sendInitMessages(t) và đóng gói
+      // toàn bộ Object.entries(ip.threadMapping) thành 1 gói MQTT 537KB–950KB làm nghẹt cứng edge-chat.facebook.com!
+      // Giữ tối đa 15 contact trong ip.threadMapping (~2KB, chuẩn batmesss.har MSG[8]), còn toàn bộ hàng nghìn
+      // mapping vẫn nằm nguyên trong ip.threadMappingStoreV2 + persistentGidMap để findGlobalId đọc ở 0ms!
+      const tmKeys = Object.keys(ip.threadMapping);
+      if (tmKeys.length > 15) {
+        const trimmed = {};
+        for (let i = 0; i < 15; i++) {
+          const k = tmKeys[i];
+          trimmed[k] = ip.threadMapping[k];
+        }
+        ip.threadMapping = trimmed;
+      }
       // Đánh thức NGAY LẬP TỨC (0ms) mọi PENDING_MESSAGES['find_global_id_|{pageId}_|{tid}'] đang chờ,
       // không bao giờ để bị treo 4.5s chờ wsTimer nổ khi origResolve của _app gặp lỗi!
       if (helper.PENDING_MESSAGES && typeof helper.PENDING_MESSAGES === 'object') {
@@ -5870,6 +5957,106 @@
           } catch (e) { /* ignore */ }
           return r;
         };
+      }
+      // 5) [v1.91.73-W200] Bọc sendInitMessages (@818850):
+      //    - Chặn đứng lỗi TypeError khi initPageData.threadMapping === undefined (làm đứt loopSendBlockTrans db 205).
+      //    - Chặn đứng "Quả bom 537KB cpq_v2" (guikhachcu.har Entry 59 MSG[6]: gửi 3.631+ task label 207 trong 1 gói MQTT
+      //      khiến edge-chat.facebook.com nghẹt cứng và biến socket thành Zombie 100% noack): giới hạn threadMapping <= 15 mục!
+      //    - Đặt cờ sock.__botfakeSyncingInit = true trong lúc đang chạy sendInitMessages + loopSendBlockTrans đầu tiên
+      //      để các worker gửi tin (type: 3) đợi ~700ms cho tới khi gói khởi tạo type: 2 hoàn tất.
+      if (typeof helper.sendInitMessages === 'function') {
+        const origSendInit = helper.sendInitMessages;
+        helper.sendInitMessages = async function (wsCtx) {
+          const pageId = wsCtx && wsCtx.pageId;
+          let sock = null;
+          try {
+            if (wsCtx) {
+              if (!wsCtx.context || typeof wsCtx.context !== 'object') wsCtx.context = {};
+              if (!Array.isArray(wsCtx.context.blocksTrans)) wsCtx.context.blocksTrans = [];
+              if (!wsCtx.initPageData || typeof wsCtx.initPageData !== 'object') wsCtx.initPageData = {};
+              const ip = wsCtx.initPageData;
+              if (!ip.threadMapping || typeof ip.threadMapping !== 'object') ip.threadMapping = {};
+              if (!ip.threadMappingStoreV2 || typeof ip.threadMappingStoreV2 !== 'object') ip.threadMappingStoreV2 = {};
+              [ip.threadMapping, ip.threadMappingStoreV2].forEach((mp) => {
+                if (!mp || typeof mp !== 'object') return;
+                Object.keys(mp).forEach((tid) => {
+                  if (tid && mp[tid]) {
+                    ip.threadMappingStoreV2[tid] = String(mp[tid]);
+                    if (pageId) putGidToMemCaches(String(pageId) + '_' + String(tid), String(mp[tid]));
+                  }
+                });
+              });
+              const keys = Object.keys(ip.threadMapping);
+              if (keys.length > 15) {
+                const capped = {};
+                for (let i = 0; i < 15; i++) {
+                  const k = keys[i];
+                  capped[k] = ip.threadMapping[k];
+                }
+                ip.threadMapping = capped;
+              }
+            }
+            if (pageId) syncSocketMappingsToCache(this, pageId);
+            sock = pageId && this.SOCKETS && this.SOCKETS[pageId];
+            if (sock) {
+              sock.__botfakeSyncingInit = true;
+              sock.__botfakeInitDeadline = Date.now() + 1800;
+            }
+          } catch (e0) { /* ignore */ }
+          try {
+            const res = await origSendInit.call(this, wsCtx);
+            await sleep(220);
+            return res;
+          } finally {
+            try {
+              const sNow = (pageId && this.SOCKETS && this.SOCKETS[pageId]) || sock;
+              if (sNow) {
+                sNow.__botfakeSyncingInit = false;
+                sNow.__botfakeInitReady = true;
+              }
+            } catch (e1) { /* ignore */ }
+          }
+        };
+      }
+      // 6) [v1.91.73-W200] Bọc storeIfHasNewThread (@822800):
+      //    Trong batmesss.har (MSG[28]->[29]->[33], [37]->[38]->[45], [52]->[53]->[58]), mỗi khi bắn tin vào khách cũ,
+      //    FB trả về verifyThreadExists và _app tự động gọi storeIfHasNewThread bắn gói /ls_req label "209"
+      //    (metadata_only: 0, preview_only: 0) không qua van điều tiết, ép FB đẩy ngược về 36.7KB lịch sử chat/khách!
+      //    Với lô 6.339 khách, hàng nghìn gói label "209" + ~100MB dữ liệu /ls_resp làm nghẽn cứng đường truyền WebSocket.
+      //    Khi đang chạy lô (state.sending || batchStats.active), chặn đứng hoàn toàn việc tự bắn label "209" này!
+      if (typeof helper.storeIfHasNewThread === 'function') {
+        const origStoreNewThread = helper.storeIfHasNewThread;
+        helper.storeIfHasNewThread = function (pageId, parsed) {
+          if (state.sending || batchStats.active) return;
+          return origStoreNewThread.apply(this, arguments);
+        };
+      }
+      // 7) [v1.91.73-W200] Bọc scheduleReconnect (@818200):
+      //    Trong _app, mỗi socket có hẹn giờ refreshConnectTimeout = 60 phút (x = 36e5). Khi nổ đúng giữa lúc đang bắn lô
+      //    (như mốc 19:55:45 đúng 60 phút sau 18:55:43), scheduleReconnect tự động gọi instance.shutdown() + delete SOCKETS[pageId],
+      //    chặt đứt toàn bộ các khung đang bay trên đường truyền!
+      //    Nếu đang gửi lô hoặc còn khung chờ ACK, hoãn scheduleReconnect sang 15s sau khi lô đã hoàn tất!
+      if (typeof helper.scheduleReconnect === 'function') {
+        const origScheduleReconnect = helper.scheduleReconnect;
+        helper.scheduleReconnect = async function (pageId) {
+          const pid = String(pageId || '');
+          const inFlight = (pid && socketInFlightByPage[pid]) || 0;
+          if (state.sending || batchStats.active || inFlight > 0) {
+            const self = this;
+            const sk = this.SOCKETS && this.SOCKETS[pageId];
+            if (sk) {
+              if (sk.refreshConnectTimeout) clearTimeout(sk.refreshConnectTimeout);
+              sk.refreshConnectTimeout = setTimeout(() => {
+                try { self.scheduleReconnect(pageId); } catch (e0) { /* ignore */ }
+              }, 15000);
+            }
+            return;
+          }
+          return origScheduleReconnect.apply(this, arguments);
+        };
+      }
+      if (helper.SOCKETS && typeof helper.SOCKETS === 'object') {
+        Object.keys(helper.SOCKETS).forEach((pid) => syncSocketMappingsToCache(helper, pid));
       }
     } catch (e) { /* ignore */ }
   }
