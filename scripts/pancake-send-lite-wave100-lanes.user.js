@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         BOTFAKE LITE (Wave 100 + Làn Bù Song Song)
 // @namespace    salescript
-// @version      1.91.71
-// @description  BOTFAKE — bắn ngay 0ms theo đợt 200 tin chuyển làn thông minh (4 làn × 50 tin, trượt 24 tin/làn + Smart Pipelined Gate + 6ms/80-slot Socket chống mất ACK) + Bể Hẹn Giờ 2 Làn Bù Song Song + Tab/Clipboard.
+// @version      1.91.72
+// @description  BOTFAKE — bắn ngay 0ms theo đợt 200 tin chuyển làn thông minh (4 làn × 50 tin, trượt 24 tin/làn + Smart Pipelined Gate + 6ms/80-slot Socket + Tự phục hồi Zombie Socket) + Bể Hẹn Giờ 2 Làn Bù Song Song + Tab/Clipboard.
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
 // @match        https://pages.fm/*
@@ -47,7 +47,7 @@
   /* ============================ HẰNG SỐ ============================ */
 
   const PANEL_ID = 'ssb-root';          // ssb = SaleScript Bulk — không đụng pk-*/adj-*/pancake-* của script khác
-  const APP_VERSION = '1.91.71-W200';   // hiện ở tiêu đề panel — đối chiếu với @version trong header
+  const APP_VERSION = '1.91.72-W200';   // hiện ở tiêu đề panel — đối chiếu với @version trong header
   const STYLE_ID = 'ssb-style';
 
   const MAX_NAME_LIST = 12;             // số tên hiển thị khi xác nhận
@@ -3569,8 +3569,11 @@
     if (typeof helper.initSocket === 'function') {
       socketReconnectPromises[pageId] = (async () => {
         try {
-          if (sock && !isSocketAlive(sock) && sock.instance && typeof sock.instance.shutdown === 'function') {
-            try { sock.instance.shutdown(); } catch (e0) { /* ignore */ }
+          if (sock && (forceReconnect || !isSocketAlive(sock))) {
+            if (sock.instance && typeof sock.instance.shutdown === 'function') {
+              try { sock.instance.shutdown(); } catch (e0) { /* ignore */ }
+            }
+            if (helper.SOCKETS) delete helper.SOCKETS[pageId];
           }
           await Promise.race([Promise.resolve().then(() => helper.initSocket(pageId)), sleep(12000)]);
           await waitForSocketSynced(helper, pageId, 2500);
@@ -3832,6 +3835,13 @@
     const full = await ctxFull(conv, ctx);
     if (!full) return { ok: false, sent: false, error: 'Không lấy được thông tin đoạn chat' };
     const pageId = full.page_id || conv.pageId || String(conv.id).split('_')[0];
+    if ((socketNoAckStreak[pageId] || 0) >= 6) {
+      const pLane0 = getPageSocketLane(pageId);
+      if (pLane0 && typeof pLane0.activeCount === 'function' && pLane0.activeCount() === 0 && !socketReconnectPromises[pageId]) {
+        ensureAliveSocket(helper, pageId, true).catch(() => {});
+      }
+      return { ok: false, sent: false, error: 'Socket không kết nối (mất ACK liên tiếp)' };
+    }
 
     // 1) Giải quyết threadId & globalId TRƯỚC KHI upload ảnh (đúng thứ tự executeBySocketFB @976000 trong _app):
     //    Nếu chat không tìm được globalId thì dừng ngay, không lãng phí 1 lần upload ảnh reusable=false!
@@ -5058,6 +5068,7 @@
 
   function isPageSocketReady(pageId) {
     try {
+      if ((socketNoAckStreak[pageId] || 0) >= 4) return false;
       const h = window.__MqttHelper__;
       const sk = h && h.SOCKETS && h.SOCKETS[pageId];
       return isSocketSynced(sk);
@@ -5192,7 +5203,8 @@
     // Ở lô nhỏ (<=20 tin): chỉ ưu tiên Socket khi Socket của page ĐÃ ẤM SẴN (isPageSocketReady);
     // nếu Socket đang phải khởi tạo từ đầu (socketWarmPromises), bắn ngay qua Extension (~0.8s)
     // để không phải đứng đợi getBusinessWSContext + sendInitMessages (~3s).
-    const sockReady = isPageSocketReady(pageId) || (!isSmallBatch && !!(pageId && socketWarmPromises[pageId]));
+    const noAckDead = (socketNoAckStreak[pageId] || 0) >= 4;
+    const sockReady = !noAckDead && (isPageSocketReady(pageId) || (!isSmallBatch && !!(pageId && socketWarmPromises[pageId])));
     const hasRealGid = !!(ctx && ctx.gid && !ctx.gidFromPsid);
     // Khớp 100% với __sendBySocketCacheFB__ trong _app (@927067 & @937200):
     // Ưu tiên bắn qua Socket trước khi WebSocket đang kết nối (hoặc đang khởi động ở đầu lượt lô lớn) VÀ ĐÃ CÓ global_id THẬT (hasRealGid)!
@@ -5951,7 +5963,20 @@
           }
         } catch (e0) { /* ignore */ }
         // KHÔNG dựa vào sock.instance để bỏ qua: socket chết mà instance vẫn còn thì bắn là thua.
-        // initSocket của app TỰ trả về ngay khi kết nối còn đang chạy (guard isRunning()) — gọi là đủ.
+        // Đặc biệt: nếu ở lượt trước WebSocket của page bị rơi vào trạng thái "zombie" (mất ACK liên tiếp
+        // socketNoAckStreak >= 3 nhưng $10.isRunning() vẫn báo true khiến initSocket của _app bỏ qua),
+        // chủ động ngắt phiên zombie ngay đầu lượt mới để initSocket tạo lại kết nối WebSocket tươi mới!
+        if (opts && opts.forceBatchGid && (socketNoAckStreak[pid] || 0) >= 3) {
+          try {
+            const zSock = h.SOCKETS && h.SOCKETS[pid];
+            if (zSock && zSock.instance && typeof zSock.instance.shutdown === 'function') {
+              zSock.instance.shutdown();
+            }
+            if (h.SOCKETS) delete h.SOCKETS[pid];
+          } catch (eZ) { /* ignore */ }
+          socketNoAckStreak[pid] = 0;
+          delete socketWarmPromises[pid];
+        }
         if (socketWarmPromises[pid]) return; // đang kết nối dở — khỏi làm trùng
         socketWarmPromises[pid] = Promise.resolve()
           .then(() => h.initSocket(pid))
