@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         BOTFAKE LITE (Wave 100 + Làn Bù Song Song)
 // @namespace    salescript
-// @version      1.91.69
-// @description  BOTFAKE — bắn ngay 0ms theo đợt 100 tin chuyển làn thông minh (4 làn × 25 tin + Smart Wave Gate) + Bể Hẹn Giờ 2 Làn Bù Song Song (Socket & Extension) + Tab/Clipboard.
+// @version      1.91.70
+// @description  BOTFAKE — bắn ngay 0ms theo đợt 200 tin chuyển làn thông minh (4 làn × 50 tin, trượt 28 tin/làn + Smart Pipelined Gate) + Bể Hẹn Giờ 2 Làn Bù Song Song (Socket & Extension) + Tab/Clipboard.
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
 // @match        https://pages.fm/*
@@ -47,7 +47,7 @@
   /* ============================ HẰNG SỐ ============================ */
 
   const PANEL_ID = 'ssb-root';          // ssb = SaleScript Bulk — không đụng pk-*/adj-*/pancake-* của script khác
-  const APP_VERSION = '1.91.69-W100';   // hiện ở tiêu đề panel — đối chiếu với @version trong header
+  const APP_VERSION = '1.91.70-W200';   // hiện ở tiêu đề panel — đối chiếu với @version trong header
   const STYLE_ID = 'ssb-style';
 
   const MAX_NAME_LIST = 12;             // số tên hiển thị khi xác nhận
@@ -3504,7 +3504,7 @@
   const socketConfirmedDeadStreak = {};
   const socketReconnectPromises = {};
   const socketLastPublishAt = {};
-  const SOCKET_MIN_PACE_MS = 6; // giãn 6ms (~166 khung/s/page) cho kiến trúc Đợt 100 thông minh + Làn Bù Song Song — nhanh và không dồn burst trên 1 WebSocket
+  const SOCKET_MIN_PACE_MS = 5; // giãn 5ms (~200 khung/s/page) cho kiến trúc Đợt 200 gối đầu thông minh + Làn Bù Song Song — nhanh và không dồn burst trên 1 WebSocket
 
   async function paceSocketPublish(pageId) {
     const pid = String(pageId || '');
@@ -3746,6 +3746,7 @@
 
   const updatedGidConvSet = new Set();
   const spareFbIdPool = {};
+  const preUploadedPhotoByConv = {};
   // 🔒 KHÓA CHỐNG TRÙNG (v1.72.0): các chat đã BẮN Socket ở chế độ bắn-nhả mà ACK chưa chốt.
   // Khi chat còn trong tập này: không kênh nào được bắn thêm cho chat đó (kể cả bù Extension) —
   // chỉ khi FB XÁC NHẬN TỪ CHỐI (rejected) thì mới được bù. Chặn đứng mọi đường bắn chồng gây lặp câu.
@@ -3761,9 +3762,23 @@
   // Mỗi cuộc hội thoại gửi kèm ảnh qua Socket hoặc Extension BẮT BUỘC phải có 1 fbId (is_reusable=false)
   // riêng biệt của cuộc hội thoại đó (đúng executeBySocketFB @976000 & executeByExtOnce @964800 trong _app).
   // Tuyệt đối KHÔNG dùng lại fbId (is_reusable=false) ĐÃ BẮN của cuộc hội thoại A cho cuộc hội thoại B.
-  // Nhưng nếu fbId vừa tạo ra mà CHƯA TỪNG BẮN (nằm trong spareFbIdPool[pageId]), lấy dùng ngay ở 0ms!
+  // Nhưng nếu fbId vừa được nạp trước (prefetch) cho ĐÚNG convId này ở đợt kế tiếp, lấy dùng ngay ở 0ms!
   function uploadOneTimePhoto(pageId, photo, convId, ctx, forceFresh) {
     if (!photo) return Promise.resolve(null);
+    if (!forceFresh && convId && preUploadedPhotoByConv[convId]) {
+      const preProm = preUploadedPhotoByConv[convId];
+      delete preUploadedPhotoByConv[convId];
+      return Promise.resolve(preProm).then((up) => {
+        if (up && up.ok && up.fbId) {
+          if (ctx) {
+            ctx.nonReusableFbId = up.fbId;
+            if (Array.isArray(up.fbIds) && up.fbIds.length > 1) ctx.nonReusableFbIds = up.fbIds.slice();
+          }
+          return up;
+        }
+        return uploadOneTimePhoto(pageId, photo, convId, ctx, true);
+      }).catch(() => uploadOneTimePhoto(pageId, photo, convId, ctx, true));
+    }
     // NHIỀU ẢNH (câu nhanh Alt+Q có ≥2 ảnh): bind cả mảng fbIds trong 1 lượt /contents/facebook
     // (đúng guianh1.har: 2 content_ids → 2 fb_ids trong ~30ms). fbIds của chat này giữ ở
     // ctx.nonReusableFbIds — tách hẳn fbId đơn của đường 1 ảnh bên dưới.
@@ -4723,7 +4738,7 @@
   const CTX_FETCH_INITIAL = 32;
   const CTX_FETCH_MIN = 8;
   const CTX_FETCH_MAX = 64;
-  const PHOTO_UPLOAD_PARALLEL = 96;
+  const PHOTO_UPLOAD_PARALLEL = 120;
   const GID_EXT_INITIAL = 20;
   const GID_EXT_MIN = 6;
   const GID_EXT_MAX = 32;
@@ -4731,7 +4746,7 @@
   const BUS_PARALLEL_EXT = 10;    // số lệnh adapter.send (REPLY_INBOX_PHOTO) chạy song song — điểm bắt đầu của làn thích ứng Ext
   const EXT_SEND_MIN = 6;         // sàn làn Ext gửi: không thấp hơn mức đã kiểm chứng ổn định
   const EXT_SEND_MAX = 24;        // trần làn Ext gửi: mở tới 24 khi Extension trả lời nhanh/rõ ở lô lớn
-  const BUS_PARALLEL_SOCKET = 80; // số frame Socket (/ls_req) in-flight trên mỗi kết nối WebSocket (kèm giãn nhịp 6ms chống burst)
+  const BUS_PARALLEL_SOCKET = 96; // số frame Socket (/ls_req) in-flight trên mỗi kết nối WebSocket (kèm giãn nhịp 5ms chống burst)
   const SIDE_EFFECT_PARALLEL = 8; // số request nền (fill_admin_name / update_global_id) chạy song song
   function makeLane(parallel) {
     let active = 0;
@@ -6747,6 +6762,7 @@
     Object.keys(uncertainIds).forEach((k) => { delete uncertainIds[k]; });
     Object.keys(skippedLateIds).forEach((k) => { delete skippedLateIds[k]; });
     Object.keys(spareFbIdPool).forEach((k) => { delete spareFbIdPool[k]; });
+    Object.keys(preUploadedPhotoByConv).forEach((k) => { delete preUploadedPhotoByConv[k]; });
     Object.keys(socketRejectStreak).forEach((k) => { delete socketRejectStreak[k]; });
     Object.keys(socketConfirmedDeadStreak).forEach((k) => { delete socketConfirmedDeadStreak[k]; });
     gidHttpCtl.good = 0;
@@ -6880,14 +6896,14 @@
         }
       }
     }
-    // 🔥 KIẾN TRÚC MỚI (v1.91.68-W100): BẮN NGAY 0MS THEO ĐỢT 100 TIN (4 LÀN × 25 TIN) + 2 LÀN BÙ SONG SONG
+    // 🔥 KIẾN TRÚC MỚI (v1.91.70-W200): BẮN NGAY 0MS THEO ĐỢT 200 TIN (4 LÀN × 50 TIN, TRƯỢT 28 TIN/LÀN) + 2 LÀN BÙ SONG SONG
     const waveEl = shadow && shadow.getElementById('ssb-wave');
     const gapEl = shadow && shadow.getElementById('ssb-gap');
-    const WAVE_SIZE = Math.max(1, Math.min(100000, parseInt((waveEl && waveEl.value) || '100', 10) || 100));
+    const WAVE_SIZE = Math.max(1, Math.min(100000, parseInt((waveEl && waveEl.value) || '200', 10) || 200));
     const gapRaw = parseInt((gapEl && gapEl.value) || '250', 10);
     const WAVE_GAP = isNaN(gapRaw) ? 250 : Math.max(0, Math.min(60000, gapRaw));
-    const MAIN_WAVE_LANES = 4; // 4 làn cố định trong mỗi đợt (100 tin = 4 làn × 25 tin/làn)
-    const PER_LANE_CONCURRENCY = 25; // khởi chạy trọn 25 tin/làn (4 làn × 25 = 100 tin cùng vào làn, không chia nhỏ 12+12+1)
+    const MAIN_WAVE_LANES = 4; // 4 làn cố định trong mỗi đợt (200 tin = 4 làn × 50 tin/làn)
+    const PER_LANE_CONCURRENCY = 28; // trượt 28 tin/làn (4 × 28 = 112 tin chạy đồng thời: lấp kín 96 luồng Socket + 16 tin chuẩn bị kế tiếp, không dội spike 200 tin cùng 1ms)
     // gửi theo từng nhóm nội dung (câu khác câu → chữ khác chữ)
     sendGroups = buildSendGroups(targets, state.savedLists, typedText);
     // v1.82.5 — cùng 1 chat chỉ nằm 1 nhóm: nếu 2 câu cùng chứa 1 chat thì giữ lần đầu, không bắn 2 lần.
@@ -7113,19 +7129,18 @@
       return r;
     };
 
-    // 🚀 KIẾN TRÚC ĐỢT 100 TIN CHUYỂN LÀN THÔNG MINH (4 LÀN × 25 TIN) + 2 LÀN BÙ SONG SONG KHÔNG DỒN ĐUÔI:
-    //   • KHỐI 1 — 4 LÀN BẮN CHÍNH + CỔNG CHUYỂN ĐỢT THÔNG MINH (Smart Wave Gate):
-    //     Cả 4 làn × 25 tin = 100 tin cùng khởi chạy ngay ở 0ms. Ngay khi ≥85% số tin của đợt đã check xong Lần 1
-    //     (hoặc qua 1.400ms mà ≥65% tin đã xong và số tin đang bay thấp), cổng chuyển đợt mở ngay lập tức kèm nhịp nghỉ
-    //     thích ứng (35ms..250ms tùy tải thực tế) để bắn đợt tiếp theo, tuyệt đối không để 1–2 con ACK trễ giữ chân cả đợt!
-    //   • KHỐI 2 — BỂ HẸN GIỜ KHÔNG CHẶN + LÀN BÙ SOCKET (36 worker):
-    //     Tin bị rejected Lần 1 được làm nguội bằng setTimeout song song ở nền (400–600ms khi đi qua cụm khách khóa nick,
-    //     750–1050ms khi là ca lẻ). Đúng lúc hết giờ làm nguội mới chảy vào hàng đợi sẵn sàng để 36 worker bốc ra bắn Lần 2
-    //     ngay lập tức ở 0ms -> triệt tiêu 100% hiện tượng tích tụ hàng nghìn ca về cuối lô!
+    // 🚀 KIẾN TRÚC ĐỢT 200 TIN CHUYỂN LÀN GỐI ĐẦU THÔNG MINH (4 LÀN × 50 TIN, TRƯỢT 28 TIN/LÀN) + 2 LÀN BÙ SONG SONG:
+    //   • KHỐI 1 — 4 LÀN BẮN CHÍNH + CỔNG CHUYỂN ĐỢT GỐI ĐẦU (Smart Pipelined Gate):
+    //     Mỗi đợt 200 tin chia vào 4 làn (50 tin/làn), mỗi làn trượt 28 tin song song (4 × 28 = 112 tin đang chạy).
+    //     Ngay khi ≥78% số tin của đợt (156/200 tin) đã check xong Lần 1 và số tin đang bay hạ xuống ≤ 48,
+    //     cổng chuyển đợt mở ngay lập tức để đợt kế tiếp gối đầu vào bù tải (không để WebSocket vơi tải cuối đợt!).
+    //   • KHỐI 2 — BỂ HẸN GIỜ KHÔNG CHẶN + LÀN BÙ SOCKET (44 worker):
+    //     Tin bị rejected Lần 1 được làm nguội bằng setTimeout có trải nhịp (260–450ms khi đi qua cụm khách khóa nick,
+    //     620–900ms khi là ca lẻ). Hết giờ làm nguội chảy vào hàng đợi để 44 worker bắn Lần 2 ngay ở 0ms!
     //   • KHỐI 3 — LÀN BÙ ĐỘC LẬP QUA EXTENSION (32 worker):
     //     Dò globalId / gửi qua Extension song song từ giây 0; nếu vừa dò ra globalId từ Ext mà bắn Socket Lần 1 bị rejected,
     //     chuyển giao ngay ở 0ms sang Bể Hẹn Giờ của Làn Bù Socket để giải phóng luồng Ext đi dò chat kế tiếp!
-    const SOCKET_RETRY_WORKERS = 36;
+    const SOCKET_RETRY_WORKERS = 44;
     const EXT_BACKLOG_WORKERS = 32;
     const settleInternalError = (c, e) => {
       if (c && c.id) {
@@ -7207,11 +7222,12 @@
         const pid = item.c.pageId || String(item.c.id || '').split('_')[0];
         const deadStreak = socketConfirmedDeadStreak[pid] || 0;
         const firstAt = (item.deferredCtx && item.deferredCtx.firstRejectedAt) || Date.now();
-        // Làm nguội thông minh: khi đang đi qua cụm khách khóa nick liên tiếp (deadStreak >= 3) chỉ cần 380–580ms;
-        // khi là ca lẻ giữa các khách sống thì nghỉ 750–1050ms để thoát hẳn cửa sổ burst-reject của FB MQTT.
+        // Làm nguội thông minh có trải nhịp (jittered): khi đang đi qua cụm khách khóa nick liên tiếp (deadStreak >= 3)
+        // chỉ cần 260–450ms để 70 ca lỗi trong đợt 200 tin được bắn lại Lần 2 rải đều và xả sạch ngay trong lòng đợt đó;
+        // khi là ca lẻ giữa các khách sống thì nghỉ 620–900ms để thoát hẳn cửa sổ burst-reject của FB MQTT.
         const coolTargetMs = deadStreak >= 3
-          ? (380 + Math.floor(Math.random() * 200))
-          : (750 + Math.floor(Math.random() * 300));
+          ? (260 + Math.floor(Math.random() * 190))
+          : (620 + Math.floor(Math.random() * 280));
         const waitMs = Math.max(0, coolTargetMs - (Date.now() - firstAt));
         if (waitMs <= 15) {
           enqueueReadySocketRetry(item);
@@ -7377,24 +7393,24 @@
         if (WAVE_GAP <= 0) return 0;
         const retryLoad = socketRetryQueue.length + activeSocketRetryWorkers;
         const extLoad = extBacklogQueue.length;
-        // 1) Đường truyền rất thoáng: đợt vừa chạy nhanh, ít tin đang bay, hàng đợi bù nông -> chỉ nghỉ 35..50ms
-        if (inFlightMainCount <= 14 && retryLoad <= 20 && extLoad <= 40) {
-          return Math.min(WAVE_GAP, 40);
+        // 1) Đường truyền thoáng: ít tin đang bay, hàng đợi bù nông -> chỉ nghỉ 20ms để gối đầu mượt
+        if (inFlightMainCount <= 22 && retryLoad <= 28 && extLoad <= 45) {
+          return Math.min(WAVE_GAP, 20);
         }
-        // 2) Tải trung bình: nghỉ 75..110ms
-        if (inFlightMainCount <= 30 && retryLoad <= 45) {
-          return Math.min(WAVE_GAP, 85);
+        // 2) Tải trung bình: nghỉ 55ms
+        if (inFlightMainCount <= 40 && retryLoad <= 55) {
+          return Math.min(WAVE_GAP, 55);
         }
-        // 3) Tải khá cao: nghỉ 130..180ms
-        if (inFlightMainCount <= 44 && retryLoad <= 75) {
-          return Math.min(Math.max(WAVE_GAP, 130), 180);
+        // 3) Tải khá cao: nghỉ 110ms
+        if (inFlightMainCount <= 56 && retryLoad <= 85) {
+          return Math.min(Math.max(WAVE_GAP, 110), 140);
         }
-        // 4) Tải nặng / cần xả bớt hàng đợi bù: nghỉ đủ WAVE_GAP (hoặc tối thiểu 220ms)
-        return Math.max(WAVE_GAP, 220);
+        // 4) Tải nặng / cần xả bớt hàng đợi bù: nghỉ 180..220ms
+        return Math.min(Math.max(WAVE_GAP, 180), 220);
       };
 
-      // KHỐI 1: Chạy lần lượt từng Đợt (100 tin/đợt), mỗi đợt chia đều vào 4 Làn Bắn Chính (25 tin/làn)
-      // kèm Cổng Chuyển Đợt Thông Minh (Smart Wave Gate) không để vài con ACK trễ giữ chân cả đợt!
+      // KHỐI 1: Chạy lần lượt từng Đợt (mặc định 200 tin/đợt), mỗi đợt chia đều vào 4 Làn Bắn Chính (50 tin/làn, trượt 28 tin/làn)
+      // kèm Cổng Chuyển Đợt Gối Đầu Thông Minh (Smart Pipelined Gate) không để WebSocket bị hụt tải cuối đợt!
       const totalWaves = Math.max(1, Math.ceil(fullList.length / WAVE_SIZE));
       try {
         for (let wIdx = 0; wIdx < fullList.length && !state.stopRequested; wIdx += WAVE_SIZE) {
@@ -7409,8 +7425,8 @@
           }
 
           let waveDoneCount = 0;
-          const targetFastPass = Math.max(1, Math.ceil(waveSlice.length * 0.85)); // 85% số tin của đợt (85/100 tin)
-          const targetSoftPass = Math.max(1, Math.ceil(waveSlice.length * 0.65)); // 65% số tin khi đã qua 1.4s
+          const targetFastPass = Math.max(1, Math.ceil(waveSlice.length * 0.78)); // 78% số tin của đợt (156/200 tin)
+          const targetSoftPass = Math.max(1, Math.ceil(waveSlice.length * 0.62)); // 62% số tin khi đã qua 1.6s
 
           let resolveWaveGate = null;
           let waveGateOpened = false;
@@ -7431,15 +7447,15 @@
               return;
             }
             const retryBacklog = socketRetryQueue.length;
-            // Chống ngập: nếu tổng tin đang bay trên Làn Chính > 56 hoặc hàng đợi sẵn sàng bắn lại > 75 thì chờ vơi bớt
-            if (inFlightMainCount > 56 || retryBacklog > 75) return;
-            // Điều kiện 1: Đã check xong ≥85% số tin trong đợt (ví dụ 85/100 tin) và tổng tin đang bay ≤ 36 -> chuyển đợt ngay!
-            if (waveDoneCount >= targetFastPass && inFlightMainCount <= 36) {
+            // Chống ngập: nếu tổng tin đang bay trên Làn Chính > 68 hoặc hàng đợi sẵn sàng bắn lại > 85 thì chờ vơi bớt
+            if (inFlightMainCount > 68 || retryBacklog > 85) return;
+            // Điều kiện 1: Đã check xong ≥78% số tin trong đợt (156/200 tin) và tổng tin đang bay ≤ 48 -> gối đầu đợt tiếp ngay!
+            if (waveDoneCount >= targetFastPass && inFlightMainCount <= 48) {
               openWaveGate();
               return;
             }
-            // Điều kiện 2: Đã qua 1.400ms từ đầu đợt, xong ≥65% tin và tổng tin đang bay ≤ 44 -> mở cổng chuyển đợt!
-            if (Date.now() - waveStartAt >= 1400 && waveDoneCount >= targetSoftPass && inFlightMainCount <= 44) {
+            // Điều kiện 2: Đã qua 1.600ms từ đầu đợt, xong ≥62% tin và tổng tin đang bay ≤ 58 -> mở cổng chuyển đợt!
+            if (Date.now() - waveStartAt >= 1600 && waveDoneCount >= targetSoftPass && inFlightMainCount <= 58) {
               openWaveGate();
             }
           };
@@ -7488,6 +7504,32 @@
           // Khởi chạy đồng thời 4 Làn Bắn Chính của Đợt hiện tại (lưu promise vào allMainPromises để các con ACK trễ chạy nốt ở nền)
           const wavePromise = Promise.all(laneChunks.map((chunk) => runPool(chunk, runMainLaneItem, Math.min(PER_LANE_CONCURRENCY, chunk.length))));
           allMainPromises.push(wavePromise);
+
+          // Nạp trước (prefetch) fbId ảnh ở nền cho Đợt kế tiếp (wIdx + WAVE_SIZE) trong lúc Đợt hiện tại đang chờ ACK trên WebSocket,
+          // giúp Đợt kế tiếp khi mở cổng sẽ có sẵn fbId ở 0ms và bắn thẳng vào WebSocket mà không mất 400–600ms khởi động đầu đợt!
+          if (photo && wIdx + WAVE_SIZE < fullList.length) {
+            const nextWaveSlice = fullList.slice(wIdx + WAVE_SIZE, wIdx + 2 * WAVE_SIZE);
+            setTimeout(() => {
+              if (state.stopRequested || mainWavesLoopDone) return;
+              runPool(nextWaveSlice, async (nc) => {
+                if (state.stopRequested || mainWavesLoopDone || !nc || !nc.id || nc.type === 'comment') return;
+                if (preUploadedPhotoByConv[nc.id] || claimedSendIds[nc.id] || deliveredIds[nc.id]) return;
+                if (photoUploadLane.waitingCount() > 12) return;
+                const np = nc.pageId || String(nc.id).split('_')[0];
+                const nqr = photo.qr ? qrPhotoByPage[np] : null;
+                if (photo.qr && (!nqr || (Array.isArray(nqr.parts) && nqr.parts.length > 1))) return;
+                const fullN = peekConv(nc) || nc;
+                const idleN = getConvIdleMs(nc, fullN);
+                if (isNaN(idleN) || idleN <= 86400000 || !peekFastGlobalId(nc, fullN, '')) return;
+                const pArgN = photo.qr
+                  ? { items: nqr.items, url: nqr.url, id: nqr.id, fbId: fbIdByPage[np] || '', fbIds: apiFbIdsByPage[np] || [], w: nqr.w || 0, h: nqr.h || 0 }
+                  : { url: photo.url, id: photo.id || contentIdByPage[np] || '', fbId: fbIdByPage[np] || '', w: photo.w, h: photo.h };
+                const prom = photoUploadLane(() => uploadPhotoForPage(np, pArgN, { reusable: false, convId: nc.id })).catch(() => null);
+                preUploadedPhotoByConv[nc.id] = prom;
+                await prom;
+              }, 24).catch(() => {});
+            }, 220);
+          }
 
           try {
             await waveGatePromise;
@@ -7916,11 +7958,11 @@
             <div id="ssb-qr-photos" style="display:none;margin:2px 0 4px;gap:6px;flex-wrap:wrap;align-items:center" title="Ảnh của câu nhanh đang chọn — bấm vào ảnh để mở lớn"></div>
             <div class="row" style="align-items:center">
               <span class="hint">Mỗi đợt:</span>
-              <input type="number" id="ssb-wave" value="100" min="1" max="100000" step="25" style="width:72px" title="Số tin mỗi đợt bắn (mặc định 100 tin = 4 làn × 25 tin)">
+              <input type="number" id="ssb-wave" value="200" min="1" max="100000" step="25" style="width:72px" title="Số tin mỗi đợt bắn (mặc định 200 tin = 4 làn × 50 tin, trượt 28 tin/làn)">
               <span class="hint">tin — nghỉ</span>
-              <input type="number" id="ssb-gap" value="250" min="0" step="50" style="width:72px" title="Số ms nghỉ giữa các đợt bắn (mặc định 250ms)">
+              <input type="number" id="ssb-gap" value="250" min="0" step="50" style="width:72px" title="Số ms nghỉ tối đa giữa các đợt bắn (tự co giãn thông minh 20..220ms)">
               <span class="hint">ms giữa các đợt</span>
-              <label class="hint" style="display:flex;align-items:center;gap:4px;cursor:pointer" title="Bắn nhanh 0ms theo đợt 100 tin + 2 Làn Bù Song Song (Socket & Extension)">
+              <label class="hint" style="display:flex;align-items:center;gap:4px;cursor:pointer" title="Bắn nhanh 0ms theo đợt 200 tin gối đầu + 2 Làn Bù Song Song (Socket & Extension)">
                 <input type="checkbox" id="ssb-quick" checked style="accent-color:#22c55e;margin:0"> ⚡ Gửi nhanh
               </label>
             </div>
@@ -8486,13 +8528,13 @@
         });
       }
     }
-    // thiết lập gửi: nạp giá trị đã lưu (dùng key riêng cho bản Wave 100 để không ghi đè bản cũ v1.91.67)
+    // thiết lập gửi: nạp giá trị đã lưu (dùng key riêng cho bản Wave 200 để tự lên mặc định 200 tin/đợt và không ghi đè bản cũ v1.91.67)
     {
       const waveEl = root.getElementById('ssb-wave');
       const gapEl = root.getElementById('ssb-gap');
       const quickEl = root.getElementById('ssb-quick');
       try {
-        const w = localStorage.getItem('ssb_wave_size_w100_v1');
+        const w = localStorage.getItem('ssb_wave_size_w200_v1');
         if (w && waveEl) waveEl.value = w;
         const g = localStorage.getItem('ssb_wave_gap_w100_v1');
         if (g !== null && g !== '' && gapEl) gapEl.value = g;
@@ -8500,7 +8542,7 @@
         if (q !== null && q !== '' && quickEl) quickEl.checked = q !== '0';
       } catch (e) { /* ignore */ }
       if (waveEl) waveEl.addEventListener('change', () => {
-        try { localStorage.setItem('ssb_wave_size_w100_v1', String(waveEl.value)); } catch (e) { /* ignore */ }
+        try { localStorage.setItem('ssb_wave_size_w200_v1', String(waveEl.value)); } catch (e) { /* ignore */ }
       });
       if (gapEl) gapEl.addEventListener('change', () => {
         try { localStorage.setItem('ssb_wave_gap_w100_v1', String(gapEl.value)); } catch (e) { /* ignore */ }
