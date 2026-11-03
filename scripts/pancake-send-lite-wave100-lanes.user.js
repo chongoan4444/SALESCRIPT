@@ -3507,7 +3507,7 @@
   const socketInFlightByPage = {};
   const socketInFlightQueueByPage = {};
   const SOCKET_MIN_PACE_MS = 6; // giãn 6ms (~166 khung/s/page) — ngưỡng vàng chống nuốt ACK trên edge-chat.facebook.com cho Đợt 200 gối đầu + Làn Bù Song Song
-  const MAX_SOCKET_IN_FLIGHT_ACK = 64; // Giới hạn tối đa 64 khung /ls_req đang chờ /ls_resp ACK thật đồng thời trên 1 page (RTT chuẩn ~240ms -> thông lượng ~266 tin/s, không cản nhịp 6ms nhưng chặn đứng dồn 200+ gói gây nghẽn socket)
+  const MAX_SOCKET_IN_FLIGHT_ACK = 110; // Giới hạn tối đa 110 khung /ls_req thực sự đang bay trên đường truyền chờ /ls_resp ACK (chỉ tính sau khi đã qua paceSocketPublish 6ms, không giam slot lúc chờ xếp hàng)
   const SOCKET_IN_FLIGHT_SOFT_CAP_MS = 1800; // Van an toàn nhả slot in-flight sau 1.8s nếu 1 gói phản hồi chậm để không bao giờ kẹt dây chuyền
 
   async function paceSocketPublish(pageId) {
@@ -3658,8 +3658,12 @@
     if (typeof helper.publish !== 'function' || typeof helper.findAllBlockActions !== 'function') {
       return { kind: 'legacy' }; // helper cũ — quay về sendMessage đầy đủ
     }
-    const releaseInFlight = await acquireSocketInFlightSlot(pageId);
     await paceSocketPublish(pageId);
+    const waitInFlightStart = Date.now();
+    const releaseInFlight = await acquireSocketInFlightSlot(pageId);
+    if (Date.now() - waitInFlightStart >= SOCKET_MIN_PACE_MS) {
+      await paceSocketPublish(pageId);
+    }
     // Kiểm tra lại socket ngay sau khi qua van điều áp (phòng khi MqttChannel vừa tự reconnect trong lúc chờ)
     sock = helper.SOCKETS && helper.SOCKETS[pageId];
     if (!isSocketAlive(sock)) {
