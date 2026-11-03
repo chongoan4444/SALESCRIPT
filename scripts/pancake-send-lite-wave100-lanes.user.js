@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         BOTFAKE LITE (Wave 100 + Làn Bù Song Song)
 // @namespace    salescript
-// @version      1.91.68
-// @description  BOTFAKE — bắn ngay 0ms theo từng đợt 100 tin (chia 4 làn cố định × 25 tin + check ACK) + 2 Làn Bù Song Song (Socket & Extension) + Tab/Clipboard.
+// @version      1.91.69
+// @description  BOTFAKE — bắn ngay 0ms theo đợt 100 tin chuyển làn thông minh (4 làn × 25 tin + Smart Wave Gate) + Bể Hẹn Giờ 2 Làn Bù Song Song (Socket & Extension) + Tab/Clipboard.
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
 // @match        https://pages.fm/*
@@ -47,7 +47,7 @@
   /* ============================ HẰNG SỐ ============================ */
 
   const PANEL_ID = 'ssb-root';          // ssb = SaleScript Bulk — không đụng pk-*/adj-*/pancake-* của script khác
-  const APP_VERSION = '1.91.68-W100';   // hiện ở tiêu đề panel — đối chiếu với @version trong header
+  const APP_VERSION = '1.91.69-W100';   // hiện ở tiêu đề panel — đối chiếu với @version trong header
   const STYLE_ID = 'ssb-style';
 
   const MAX_NAME_LIST = 12;             // số tên hiển thị khi xác nhận
@@ -3020,7 +3020,11 @@
     // 1B) Nạp global_id từ Server Pancake HTTP GET /messages (khớp @298730 trong _app: n.customers[].global_id):
     //     Chỉ đánh dấu httpCtxTried = true khi request thực sự thành công (cc.fetched === true), để nếu lần 1
     //     mạng bận thì khi xuống Làn 2 vẫn thử lại lấy được global_id!
-    if (!ctx || !ctx.httpCtxTried) {
+    //     ĐẶC BIỆT (Smart Skip): Nếu hội thoại ĐÃ CÓ threadId và trong lượt này Server Pancake đã chứng minh
+    //     không trả global_id qua GET /messages (gidStats.httpNoGid >= 12 && gidStats.httpHit === 0),
+    //     bỏ qua ngay bước gọi GET /messages vô ích để chuyển thẳng sang dò Extension ở 0ms!
+    const serverHasNoGidPattern = !!(threadId && gidStats.httpNoGid >= 12 && gidStats.httpHit === 0);
+    if ((!ctx || !ctx.httpCtxTried) && !serverHasNoGidPattern) {
       try {
         const cc = await ensureConvCtx(full || { id: key, pageId: pageId, threadId: threadId }, { force: true });
         if (ctx && cc) {
@@ -3422,6 +3426,7 @@
       if (foundSource === 'ws') gidStats.wsHit++;
       saveCache(gid);
       if (ctx) {
+        ctx.fastHitCounted = true;
         ctx.gidFromPsid = false;
         ctx.extFinderReturnedNull = false;
         ctx.noGidConfirmedByExt = false;
@@ -3499,7 +3504,7 @@
   const socketConfirmedDeadStreak = {};
   const socketReconnectPromises = {};
   const socketLastPublishAt = {};
-  const SOCKET_MIN_PACE_MS = 10; // giãn 10ms (~100 khung/s/page) cho kiến trúc Đợt 100 (4 làn × 25 tin) + Làn Bù Song Song — mượt, không dồn burst trên 1 WebSocket
+  const SOCKET_MIN_PACE_MS = 6; // giãn 6ms (~166 khung/s/page) cho kiến trúc Đợt 100 thông minh + Làn Bù Song Song — nhanh và không dồn burst trên 1 WebSocket
 
   async function paceSocketPublish(pageId) {
     const pid = String(pageId || '');
@@ -4719,14 +4724,14 @@
   const CTX_FETCH_MIN = 8;
   const CTX_FETCH_MAX = 64;
   const PHOTO_UPLOAD_PARALLEL = 96;
-  const GID_EXT_INITIAL = 12;
-  const GID_EXT_MIN = 4;
-  const GID_EXT_MAX = 24;
+  const GID_EXT_INITIAL = 20;
+  const GID_EXT_MIN = 6;
+  const GID_EXT_MAX = 32;
   const PREP_PARALLEL_EXT = 160;  // số chat chưa có global_id chuẩn bị HTTP/WS song song (không bị chặn bởi gidExtLane)
   const BUS_PARALLEL_EXT = 10;    // số lệnh adapter.send (REPLY_INBOX_PHOTO) chạy song song — điểm bắt đầu của làn thích ứng Ext
   const EXT_SEND_MIN = 6;         // sàn làn Ext gửi: không thấp hơn mức đã kiểm chứng ổn định
   const EXT_SEND_MAX = 24;        // trần làn Ext gửi: mở tới 24 khi Extension trả lời nhanh/rõ ở lô lớn
-  const BUS_PARALLEL_SOCKET = 64; // số frame Socket (/ls_req) in-flight trên mỗi kết nối WebSocket (kèm giãn nhịp 6ms chống burst; giữ retry + socketConfirmedDeadStreak bảo vệ)
+  const BUS_PARALLEL_SOCKET = 80; // số frame Socket (/ls_req) in-flight trên mỗi kết nối WebSocket (kèm giãn nhịp 6ms chống burst)
   const SIDE_EFFECT_PARALLEL = 8; // số request nền (fill_admin_name / update_global_id) chạy song song
   function makeLane(parallel) {
     let active = 0;
@@ -5437,6 +5442,17 @@
         ctx.gidResolved = true;
         ctx.gidFromPsid = false;
         ctx.gidFromServerOrCache = !!(srvGid0 && String(srvGid0) === String(fastGid0));
+      } else if (ctx.fastOnly && ctx.wave100Mode && tid0 && ((gidStats.httpNoGid >= 12 && gidStats.httpHit === 0) || ctxFetchLane.waitingCount() > 6)) {
+        // Smart Fast-Handoff: Ở 4 Làn Bắn Chính, nếu chat chưa có globalId trong cache mà Server Pancake
+        // đang không trả global_id qua GET /messages (hoặc hàng đợi HTTP đang bận), đẩy thẳng 0ms sang
+        // Làn Bù Extension để không làm khựng nhịp của đợt 100 tin!
+        ctx.full = peeked0;
+        ctx.fullLoaded = true;
+        ctx.threadId = String(tid0);
+        ctx.threadResolved = true;
+        ctx.deferredToExt = true;
+        ctx.gidUnknown = true;
+        return { ok: false, sent: false, deferredToExt: true, deferredCtx: ctx };
       } else {
         await extPrepLane(() => prepareDirectCtx(conv, photo, ctx));
         if (ctx.deferredToExt) {
@@ -5489,9 +5505,9 @@
     for (let i = 0; i < seq.length; i++) {
       const ch = seq[i];
       if (state.stopRequested) break;
-      // Trong Làn Nhanh (ctx.fastOnly === true): không giữ chân worker để đứng chờ Extension (extSendLane),
-      // mà đẩy sang hồ nền extBacklogQueue xử lý nốt!
-      if (ctx.fastOnly && ch === 'ext') {
+      // Trong Làn Nhanh (ctx.fastOnly === true) hoặc Làn Bù Socket (ctx.isSocketRetryPass === true):
+      // không giữ chân worker để đứng chờ Extension (extSendLane), mà đẩy sang Làn Bù Ext xử lý nốt!
+      if ((ctx.fastOnly || ctx.isSocketRetryPass) && ch === 'ext') {
         ctx.triedErrors = tried.slice();
         ctx.triedChannels = triedCh.slice();
         return { ok: false, sent: false, deferredToExt: true, deferredCtx: ctx };
@@ -6871,7 +6887,7 @@
     const gapRaw = parseInt((gapEl && gapEl.value) || '250', 10);
     const WAVE_GAP = isNaN(gapRaw) ? 250 : Math.max(0, Math.min(60000, gapRaw));
     const MAIN_WAVE_LANES = 4; // 4 làn cố định trong mỗi đợt (100 tin = 4 làn × 25 tin/làn)
-    const PER_LANE_CONCURRENCY = 12; // tối đa 12 tin đang bay/làn × 4 làn = 48 tin song song
+    const PER_LANE_CONCURRENCY = 25; // khởi chạy trọn 25 tin/làn (4 làn × 25 = 100 tin cùng vào làn, không chia nhỏ 12+12+1)
     // gửi theo từng nhóm nội dung (câu khác câu → chữ khác chữ)
     sendGroups = buildSendGroups(targets, state.savedLists, typedText);
     // v1.82.5 — cùng 1 chat chỉ nằm 1 nhóm: nếu 2 câu cùng chứa 1 chat thì giữ lần đầu, không bắn 2 lần.
@@ -6975,7 +6991,7 @@
         return { ok: true, skippedDup: true, sent: true };
       }
       if (c && c.id) claimedSendIds[c.id] = 1;
-      let skipPreCtx = isDeferredPass;
+      let skipPreCtx = isDeferredPass || !!(itemOpts && itemOpts.wave100Mode);
       if (!skipPreCtx && quickOn && c.type !== 'comment') {
         const full0 = peekConv(c) || c;
         const pid0 = (full0 && (full0.page_id || full0.pageId)) || c.pageId || String(c.id || '').split('_')[0];
@@ -7097,18 +7113,20 @@
       return r;
     };
 
-    // 🚀 KIẾN TRÚC ĐỢT 100 TIN (4 LÀN CỐ ĐỊNH × 25 TIN) + 2 LÀN BÙ SONG SONG:
-    //   • KHỐI 1 — 4 LÀN BẮN CHÍNH (4 làn × 25 tin = 100 tin/đợt, nghỉ WAVE_GAP ms giữa các đợt):
-    //     Bắn ngay lập tức ở 0ms khi ấn Chạy, mỗi làn bắn và đợi check kết quả ACK Lần 1 trực tiếp.
-    //     Tin thành công chốt ✅ ngay; tin bị từ chối/thiếu gid được đẩy 0ms sang 2 Làn Bù Song Song!
-    //   • KHỐI 2 — LÀN BÙ NHANH TRÊN SOCKET (12 worker chạy song song xuyên suốt các đợt):
-    //     Nhận các ca bị rejected Lần 1 ở Làn Chính, nghỉ nguội 1.200–1.550ms, xin fbId ảnh mới,
-    //     bắn lại Lần 2 qua runPrioritySocket và check ACK. Nếu ok -> ✅; nếu rejected lần 2 -> ❌;
-    //     nếu Socket đứt kết nối -> chuyển sang Làn Bù Extension.
-    //   • KHỐI 3 — LÀN BÙ ĐỘC LẬP QUA EXTENSION (16 worker chạy song song ngay từ Đợt 1):
-    //     Xử lý các ca thiếu globalId, ca API (#10) ngoài 24h, hoặc ca Socket đứt kết nối trên kênh Extension riêng.
-    const SOCKET_RETRY_WORKERS = 12;
-    const EXT_BACKLOG_WORKERS = 16;
+    // 🚀 KIẾN TRÚC ĐỢT 100 TIN CHUYỂN LÀN THÔNG MINH (4 LÀN × 25 TIN) + 2 LÀN BÙ SONG SONG KHÔNG DỒN ĐUÔI:
+    //   • KHỐI 1 — 4 LÀN BẮN CHÍNH + CỔNG CHUYỂN ĐỢT THÔNG MINH (Smart Wave Gate):
+    //     Cả 4 làn × 25 tin = 100 tin cùng khởi chạy ngay ở 0ms. Ngay khi ≥85% số tin của đợt đã check xong Lần 1
+    //     (hoặc qua 1.400ms mà ≥65% tin đã xong và số tin đang bay thấp), cổng chuyển đợt mở ngay lập tức kèm nhịp nghỉ
+    //     thích ứng (35ms..250ms tùy tải thực tế) để bắn đợt tiếp theo, tuyệt đối không để 1–2 con ACK trễ giữ chân cả đợt!
+    //   • KHỐI 2 — BỂ HẸN GIỜ KHÔNG CHẶN + LÀN BÙ SOCKET (36 worker):
+    //     Tin bị rejected Lần 1 được làm nguội bằng setTimeout song song ở nền (400–600ms khi đi qua cụm khách khóa nick,
+    //     750–1050ms khi là ca lẻ). Đúng lúc hết giờ làm nguội mới chảy vào hàng đợi sẵn sàng để 36 worker bốc ra bắn Lần 2
+    //     ngay lập tức ở 0ms -> triệt tiêu 100% hiện tượng tích tụ hàng nghìn ca về cuối lô!
+    //   • KHỐI 3 — LÀN BÙ ĐỘC LẬP QUA EXTENSION (32 worker):
+    //     Dò globalId / gửi qua Extension song song từ giây 0; nếu vừa dò ra globalId từ Ext mà bắn Socket Lần 1 bị rejected,
+    //     chuyển giao ngay ở 0ms sang Bể Hẹn Giờ của Làn Bù Socket để giải phóng luồng Ext đi dò chat kế tiếp!
+    const SOCKET_RETRY_WORKERS = 36;
+    const EXT_BACKLOG_WORKERS = 32;
     const settleInternalError = (c, e) => {
       if (c && c.id) {
         clearBgPending(c.id);
@@ -7124,26 +7142,95 @@
     const runGroupWaves100 = async (gtext, fullList) => {
       const socketRetryQueue = [];
       const socketRetryWaiters = [];
+      const socketCoolTimers = new Set();
       const extBacklogQueue = [];
       const extWaiters = [];
-      let mainWavesFinished = false;
-      let allSocketRetriesFinished = false;
+      const allMainPromises = [];
+      let mainWavesLoopDone = false;
+      let inFlightMainCount = 0;
+      let pendingSocketCoolCount = 0;
+      let activeSocketRetryWorkers = 0;
+      let activeExtBacklogWorkers = 0;
+      let waveGateCheckFn = null;
 
-      const pushToSocketRetry = (item) => {
-        if (item && item.c && item.c.id) noteBgPending(item.c, 'socket-retry');
+      const isAllGroupWorkDone = () => (
+        mainWavesLoopDone
+        && inFlightMainCount <= 0
+        && pendingSocketCoolCount <= 0
+        && socketRetryQueue.length === 0
+        && activeSocketRetryWorkers <= 0
+        && extBacklogQueue.length === 0
+        && activeExtBacklogWorkers <= 0
+      );
+
+      const checkWakeAllWaiters = () => {
+        if (waveGateCheckFn) {
+          try { waveGateCheckFn(); } catch (e0) { /* ignore */ }
+        }
+        if (isAllGroupWorkDone() || state.stopRequested) {
+          while (socketRetryWaiters.length > 0) {
+            const w = socketRetryWaiters.shift();
+            w(null);
+          }
+          while (extWaiters.length > 0) {
+            const w = extWaiters.shift();
+            w(null);
+          }
+        }
+      };
+
+      const enqueueReadySocketRetry = (item) => {
+        if (state.stopRequested || !item || !item.c || deliveredIds[item.c.id]) {
+          if (item && item.c && item.c.id) {
+            clearBgPending(item.c.id);
+            releaseOutbound(item.c.id);
+          }
+          checkWakeAllWaiters();
+          return;
+        }
         if (socketRetryWaiters.length > 0) {
           const w = socketRetryWaiters.shift();
           w(item);
         } else {
           socketRetryQueue.push(item);
         }
+        if (waveGateCheckFn) {
+          try { waveGateCheckFn(); } catch (e0) { /* ignore */ }
+        }
+      };
+
+      // Bể hẹn giờ không chặn: tất cả các ca rejected Lần 1 cùng được làm nguội song song bằng setTimeout,
+      // tuyệt đối không giữ chân worker đứng sleep!
+      const pushToSocketRetry = (item) => {
+        if (!item || !item.c || !item.c.id) return;
+        noteBgPending(item.c, 'socket-retry');
+        const pid = item.c.pageId || String(item.c.id || '').split('_')[0];
+        const deadStreak = socketConfirmedDeadStreak[pid] || 0;
+        const firstAt = (item.deferredCtx && item.deferredCtx.firstRejectedAt) || Date.now();
+        // Làm nguội thông minh: khi đang đi qua cụm khách khóa nick liên tiếp (deadStreak >= 3) chỉ cần 380–580ms;
+        // khi là ca lẻ giữa các khách sống thì nghỉ 750–1050ms để thoát hẳn cửa sổ burst-reject của FB MQTT.
+        const coolTargetMs = deadStreak >= 3
+          ? (380 + Math.floor(Math.random() * 200))
+          : (750 + Math.floor(Math.random() * 300));
+        const waitMs = Math.max(0, coolTargetMs - (Date.now() - firstAt));
+        if (waitMs <= 15) {
+          enqueueReadySocketRetry(item);
+          return;
+        }
+        pendingSocketCoolCount++;
+        const timerId = setTimeout(() => {
+          socketCoolTimers.delete(timerId);
+          pendingSocketCoolCount = Math.max(0, pendingSocketCoolCount - 1);
+          enqueueReadySocketRetry(item);
+        }, waitMs);
+        socketCoolTimers.add(timerId);
       };
 
       const popFromSocketRetry = () => {
         if (socketRetryQueue.length > 0) {
           return Promise.resolve(socketRetryQueue.shift());
         }
-        if (mainWavesFinished || state.stopRequested) {
+        if (isAllGroupWorkDone() || state.stopRequested) {
           return Promise.resolve(null);
         }
         return new Promise((resolve) => {
@@ -7152,7 +7239,8 @@
       };
 
       const pushToExtBacklog = (item) => {
-        if (item && item.c && item.c.id) noteBgPending(item.c, 'ext-comp');
+        if (!item || !item.c || !item.c.id) return;
+        noteBgPending(item.c, 'ext-comp');
         if (extWaiters.length > 0) {
           const w = extWaiters.shift();
           w(item);
@@ -7165,7 +7253,7 @@
         if (extBacklogQueue.length > 0) {
           return Promise.resolve(extBacklogQueue.shift());
         }
-        if ((mainWavesFinished && allSocketRetriesFinished) || state.stopRequested) {
+        if (isAllGroupWorkDone() || state.stopRequested) {
           return Promise.resolve(null);
         }
         return new Promise((resolve) => {
@@ -7173,83 +7261,87 @@
         });
       };
 
-      // KHỐI 2: Worker Làn Bù Nhanh trên Socket (nghỉ nguội 1.2–1.55s ngoài làn rồi bắn lại Lần 2)
+      // KHỐI 2: Worker Làn Bù Nhanh trên Socket (nhận tin đã làm nguội sẵn -> bắn Lần 2 ngay lập tức ở 0ms!)
       const runSocketRetryWorker = async () => {
         while (!state.stopRequested) {
           const item = await popFromSocketRetry();
           if (!item) break;
-          if (state.stopRequested || (item.c && deliveredIds[item.c.id])) {
-            if (item.c && item.c.id) {
-              clearBgPending(item.c.id);
-              releaseOutbound(item.c.id);
-            }
-            continue;
-          }
-          const firstAt = (item.deferredCtx && item.deferredCtx.firstRejectedAt) || Date.now();
-          const coolTargetMs = 1200 + Math.floor(Math.random() * 350);
-          const waitMs = coolTargetMs - (Date.now() - firstAt);
-          if (waitMs > 0 && !state.stopRequested) {
-            await sleep(waitMs);
-          }
-          if (state.stopRequested || (item.c && deliveredIds[item.c.id])) {
-            if (item.c && item.c.id) {
-              clearBgPending(item.c.id);
-              releaseOutbound(item.c.id);
-            }
-            continue;
-          }
-          // Nhả khóa outbound của Lần 1 ngay trước khi vào sendOneAndLog Lần 2 để sendViaSocket khóa lại sạch sẽ
-          if (item.c && item.c.id) releaseOutbound(item.c.id);
-          sendDiag.sockRetry++;
-          let r;
+          activeSocketRetryWorkers++;
           try {
-            r = await sendOneAndLog(item.c, gtext, {
-              fastOnly: false,
-              wave100Mode: false,
-              isSocketRetryPass: true,
-              deferredCtx: item.deferredCtx || null,
-            });
-          } catch (e) {
-            settleInternalError(item.c, e);
-            continue;
-          }
-          if (r && r.deferredToExt) {
-            pushToExtBacklog({ c: item.c, deferredCtx: r.deferredCtx || item.deferredCtx || null });
-            continue;
-          }
-          if (r && !r.ok && r.error && r.error.indexOf('Token') === 0) {
-            logLine('⛔ Dừng sớm vì token không còn hợp lệ.');
-            state.stopRequested = true;
-            break;
+            if (state.stopRequested || (item.c && deliveredIds[item.c.id])) {
+              if (item.c && item.c.id) {
+                clearBgPending(item.c.id);
+                releaseOutbound(item.c.id);
+              }
+              continue;
+            }
+            // Nhả khóa outbound của Lần 1 ngay trước khi vào sendOneAndLog Lần 2 để sendViaSocket khóa lại sạch sẽ
+            if (item.c && item.c.id) releaseOutbound(item.c.id);
+            sendDiag.sockRetry++;
+            let r;
+            try {
+              r = await sendOneAndLog(item.c, gtext, {
+                fastOnly: false,
+                wave100Mode: false,
+                isSocketRetryPass: true,
+                deferredCtx: item.deferredCtx || null,
+              });
+            } catch (e) {
+              settleInternalError(item.c, e);
+              continue;
+            }
+            if (r && r.deferredToExt) {
+              pushToExtBacklog({ c: item.c, deferredCtx: r.deferredCtx || item.deferredCtx || null });
+              continue;
+            }
+            if (r && !r.ok && r.error && r.error.indexOf('Token') === 0) {
+              logLine('⛔ Dừng sớm vì token không còn hợp lệ.');
+              state.stopRequested = true;
+              break;
+            }
+          } finally {
+            activeSocketRetryWorkers = Math.max(0, activeSocketRetryWorkers - 1);
+            checkWakeAllWaiters();
           }
         }
       };
 
-      // KHỐI 3: Worker Làn Bù Độc Lập qua Extension
+      // KHỐI 3: Worker Làn Bù Độc Lập qua Extension (dò globalId / gửi Ext; nếu bắn Socket Lần 1 bị rejected thì
+      // bàn giao ngay 0ms sang Bể Hẹn Giờ của Làn Bù Socket để không bao giờ kẹt đuôi Làn Bù Ext!)
       const runExtBacklogWorker = async () => {
         while (!state.stopRequested) {
           const item = await popFromExtBacklog();
           if (!item) break;
-          if (state.stopRequested || (item.c && deliveredIds[item.c.id])) {
-            if (item.c && item.c.id) clearBgPending(item.c.id);
-            continue;
-          }
-          let r;
+          activeExtBacklogWorkers++;
           try {
-            r = await sendOneAndLog(item.c, gtext, {
-              fastOnly: false,
-              wave100Mode: false,
-              isExtBacklogPass: true,
-              deferredCtx: item.deferredCtx || null,
-            });
-          } catch (e) {
-            settleInternalError(item.c, e);
-            continue;
-          }
-          if (r && !r.ok && r.error && r.error.indexOf('Token') === 0) {
-            logLine('⛔ Dừng sớm vì token không còn hợp lệ.');
-            state.stopRequested = true;
-            break;
+            if (state.stopRequested || (item.c && deliveredIds[item.c.id])) {
+              if (item.c && item.c.id) clearBgPending(item.c.id);
+              continue;
+            }
+            let r;
+            try {
+              r = await sendOneAndLog(item.c, gtext, {
+                fastOnly: false,
+                wave100Mode: true,
+                isExtBacklogPass: true,
+                deferredCtx: item.deferredCtx || null,
+              });
+            } catch (e) {
+              settleInternalError(item.c, e);
+              continue;
+            }
+            if (r && r.deferredToSocketRetry) {
+              pushToSocketRetry({ c: item.c, deferredCtx: r.deferredCtx || item.deferredCtx || null });
+              continue;
+            }
+            if (r && !r.ok && r.error && r.error.indexOf('Token') === 0) {
+              logLine('⛔ Dừng sớm vì token không còn hợp lệ.');
+              state.stopRequested = true;
+              break;
+            }
+          } finally {
+            activeExtBacklogWorkers = Math.max(0, activeExtBacklogWorkers - 1);
+            checkWakeAllWaiters();
           }
         }
       };
@@ -7266,11 +7358,12 @@
         extWorkers.push(runExtBacklogWorker());
       }
 
-      // Nạp trước (prefetch) globalId nhẹ nhàng ở nền cho các đợt sau (chỉ những chat chưa có sẵn globalId trong RAM)
+      // Nạp trước (prefetch) globalId ở nền cho các đợt sau (tự dừng ngay nếu phát hiện Server Pancake không trả global_id qua GET /messages)
       if (fullList.length > WAVE_SIZE) {
         const tailList = fullList.slice(WAVE_SIZE);
         runPool(tailList, async (c) => {
-          if (state.stopRequested || mainWavesFinished || !c || c.type === 'comment') return;
+          if (state.stopRequested || mainWavesLoopDone || !c || c.type === 'comment') return;
+          if (gidStats.httpNoGid >= 12 && gidStats.httpHit === 0) return;
           const full0 = peekConv(c) || c;
           const idleDiff0 = getConvIdleMs(c, full0);
           const isIdleLong0 = !isNaN(idleDiff0) && idleDiff0 > 86400000;
@@ -7279,12 +7372,35 @@
         }, 16).catch(() => {});
       }
 
+      // Hàm tính thời gian nghỉ thông minh giữa 2 đợt dựa trên tải thực tế của đường truyền
+      const computeSmartWaveGap = (waveElapsedMs) => {
+        if (WAVE_GAP <= 0) return 0;
+        const retryLoad = socketRetryQueue.length + activeSocketRetryWorkers;
+        const extLoad = extBacklogQueue.length;
+        // 1) Đường truyền rất thoáng: đợt vừa chạy nhanh, ít tin đang bay, hàng đợi bù nông -> chỉ nghỉ 35..50ms
+        if (inFlightMainCount <= 14 && retryLoad <= 20 && extLoad <= 40) {
+          return Math.min(WAVE_GAP, 40);
+        }
+        // 2) Tải trung bình: nghỉ 75..110ms
+        if (inFlightMainCount <= 30 && retryLoad <= 45) {
+          return Math.min(WAVE_GAP, 85);
+        }
+        // 3) Tải khá cao: nghỉ 130..180ms
+        if (inFlightMainCount <= 44 && retryLoad <= 75) {
+          return Math.min(Math.max(WAVE_GAP, 130), 180);
+        }
+        // 4) Tải nặng / cần xả bớt hàng đợi bù: nghỉ đủ WAVE_GAP (hoặc tối thiểu 220ms)
+        return Math.max(WAVE_GAP, 220);
+      };
+
       // KHỐI 1: Chạy lần lượt từng Đợt (100 tin/đợt), mỗi đợt chia đều vào 4 Làn Bắn Chính (25 tin/làn)
+      // kèm Cổng Chuyển Đợt Thông Minh (Smart Wave Gate) không để vài con ACK trễ giữ chân cả đợt!
       const totalWaves = Math.max(1, Math.ceil(fullList.length / WAVE_SIZE));
       try {
         for (let wIdx = 0; wIdx < fullList.length && !state.stopRequested; wIdx += WAVE_SIZE) {
           const waveSlice = fullList.slice(wIdx, wIdx + WAVE_SIZE);
           const waveNo = Math.floor(wIdx / WAVE_SIZE) + 1;
+          const waveStartAt = Date.now();
           const laneSize = Math.max(1, Math.ceil(waveSlice.length / MAIN_WAVE_LANES));
           const laneChunks = [];
           for (let l = 0; l < MAIN_WAVE_LANES; l++) {
@@ -7292,56 +7408,129 @@
             if (chunk.length > 0) laneChunks.push(chunk);
           }
 
-          const runMainLaneItem = async (c) => {
-            if (state.stopRequested) return null;
-            let r;
-            try {
-              r = await sendOneAndLog(c, gtext, {
-                fastOnly: true,
-                wave100Mode: true,
-              });
-            } catch (e) {
-              return settleInternalError(c, e);
+          let waveDoneCount = 0;
+          const targetFastPass = Math.max(1, Math.ceil(waveSlice.length * 0.85)); // 85% số tin của đợt (85/100 tin)
+          const targetSoftPass = Math.max(1, Math.ceil(waveSlice.length * 0.65)); // 65% số tin khi đã qua 1.4s
+
+          let resolveWaveGate = null;
+          let waveGateOpened = false;
+          const openWaveGate = () => {
+            if (waveGateOpened) return;
+            waveGateOpened = true;
+            if (resolveWaveGate) {
+              const fn = resolveWaveGate;
+              resolveWaveGate = null;
+              fn();
             }
-            if (r && r.deferredToSocketRetry) {
-              pushToSocketRetry({ c, deferredCtx: r.deferredCtx || null });
-              return r;
-            }
-            if (r && r.deferredToExt) {
-              pushToExtBacklog({ c, deferredCtx: r.deferredCtx || null });
-              return r;
-            }
-            if (r && !r.ok && r.error && r.error.indexOf('Token') === 0) {
-              logLine('⛔ Dừng sớm vì token không còn hợp lệ.');
-              state.stopRequested = true;
-            }
-            return r;
           };
 
-          // 4 Làn Bắn Chính chạy song song, mỗi làn bắn đủ ~25 tin của mình và đợi check kết quả Lần 1
-          await Promise.all(laneChunks.map((chunk) => runPool(chunk, runMainLaneItem, Math.min(PER_LANE_CONCURRENCY, chunk.length))));
+          const evaluateWaveGate = () => {
+            if (waveGateOpened) return;
+            if (state.stopRequested || waveDoneCount >= waveSlice.length) {
+              openWaveGate();
+              return;
+            }
+            const retryBacklog = socketRetryQueue.length;
+            // Chống ngập: nếu tổng tin đang bay trên Làn Chính > 56 hoặc hàng đợi sẵn sàng bắn lại > 75 thì chờ vơi bớt
+            if (inFlightMainCount > 56 || retryBacklog > 75) return;
+            // Điều kiện 1: Đã check xong ≥85% số tin trong đợt (ví dụ 85/100 tin) và tổng tin đang bay ≤ 36 -> chuyển đợt ngay!
+            if (waveDoneCount >= targetFastPass && inFlightMainCount <= 36) {
+              openWaveGate();
+              return;
+            }
+            // Điều kiện 2: Đã qua 1.400ms từ đầu đợt, xong ≥65% tin và tổng tin đang bay ≤ 44 -> mở cổng chuyển đợt!
+            if (Date.now() - waveStartAt >= 1400 && waveDoneCount >= targetSoftPass && inFlightMainCount <= 44) {
+              openWaveGate();
+            }
+          };
+
+          waveGateCheckFn = evaluateWaveGate;
+          const waveGateTimer = setInterval(evaluateWaveGate, 60);
+          const waveGatePromise = new Promise((resolve) => {
+            resolveWaveGate = resolve;
+            evaluateWaveGate();
+          });
+
+          const runMainLaneItem = async (c) => {
+            if (state.stopRequested) return null;
+            inFlightMainCount++;
+            try {
+              let r;
+              try {
+                r = await sendOneAndLog(c, gtext, {
+                  fastOnly: true,
+                  wave100Mode: true,
+                });
+              } catch (e) {
+                return settleInternalError(c, e);
+              }
+              if (r && r.deferredToSocketRetry) {
+                pushToSocketRetry({ c, deferredCtx: r.deferredCtx || null });
+                return r;
+              }
+              if (r && r.deferredToExt) {
+                pushToExtBacklog({ c, deferredCtx: r.deferredCtx || null });
+                return r;
+              }
+              if (r && !r.ok && r.error && r.error.indexOf('Token') === 0) {
+                logLine('⛔ Dừng sớm vì token không còn hợp lệ.');
+                state.stopRequested = true;
+              }
+              return r;
+            } finally {
+              waveDoneCount++;
+              inFlightMainCount = Math.max(0, inFlightMainCount - 1);
+              evaluateWaveGate();
+              checkWakeAllWaiters();
+            }
+          };
+
+          // Khởi chạy đồng thời 4 Làn Bắn Chính của Đợt hiện tại (lưu promise vào allMainPromises để các con ACK trễ chạy nốt ở nền)
+          const wavePromise = Promise.all(laneChunks.map((chunk) => runPool(chunk, runMainLaneItem, Math.min(PER_LANE_CONCURRENCY, chunk.length))));
+          allMainPromises.push(wavePromise);
+
+          try {
+            await waveGatePromise;
+          } finally {
+            clearInterval(waveGateTimer);
+            if (waveGateCheckFn === evaluateWaveGate) waveGateCheckFn = null;
+          }
 
           if (wIdx + WAVE_SIZE < fullList.length && !state.stopRequested) {
-            const inRetryQ = socketRetryQueue.length;
-            const inExtQ = extBacklogQueue.length;
-            logLine('🌊 Đợt ' + waveNo + '/' + totalWaves + ' (' + waveSlice.length + ' tin · ' + laneChunks.length + ' làn) đã check xong — đã chốt ' + done + '/' + totalAll
-              + ((inRetryQ || inExtQ) ? ' (đang bù song song: Làn Socket ' + inRetryQ + ' · Làn Ext ' + inExtQ + ')' : '')
-              + ' — nghỉ ' + WAVE_GAP + 'ms rồi bắn đợt tiếp…');
-            if (WAVE_GAP > 0) await sleep(WAVE_GAP);
+            const waveElapsed = Date.now() - waveStartAt;
+            const smartGap = computeSmartWaveGap(waveElapsed);
+            const inRetryTotal = pendingSocketCoolCount + socketRetryQueue.length + activeSocketRetryWorkers;
+            const inExtTotal = extBacklogQueue.length + activeExtBacklogWorkers;
+            if (waveNo % 5 === 0 || waveNo === 1 || waveNo === totalWaves) {
+              logLine('🌊 Đợt ' + waveNo + '/' + totalWaves + ' (' + waveDoneCount + '/' + waveSlice.length + ' tin đã qua cổng · ' + waveElapsed + 'ms) — đã chốt ' + done + '/' + totalAll
+                + ((inRetryTotal || inExtTotal) ? ' · đang bù song song [Socket: ' + inRetryTotal + ' · Ext: ' + inExtTotal + ']' : '')
+                + ' — chuyển đợt thông minh sau ' + smartGap + 'ms…');
+            }
+            if (smartGap > 0) await sleep(smartGap);
           }
         }
+        // Đợi các tin chờ ACK trễ của đợt cuối hoàn tất
+        await Promise.all(allMainPromises);
       } finally {
-        mainWavesFinished = true;
-        while (socketRetryWaiters.length > 0) {
-          const w = socketRetryWaiters.shift();
-          w(null);
+        mainWavesLoopDone = true;
+        if (state.stopRequested) {
+          socketCoolTimers.forEach((tid) => { try { clearTimeout(tid); } catch (e0) { /* ignore */ } });
+          socketCoolTimers.clear();
+          pendingSocketCoolCount = 0;
         }
+        checkWakeAllWaiters();
       }
 
-      // Chờ Làn Bù Socket hoàn tất trước (để nếu có ca đứt Socket khi retry thì vẫn kịp chuyển sang Làn Bù Extension)
+      // Chờ cả 2 Làn Bù Song Song (Socket & Extension) hoàn tất toàn bộ các ca còn lại
       try {
-        await Promise.all(socketRetryWorkers);
+        await Promise.all([
+          Promise.all(socketRetryWorkers),
+          Promise.all(extWorkers),
+        ]);
       } finally {
+        socketCoolTimers.forEach((tid) => { try { clearTimeout(tid); } catch (e0) { /* ignore */ } });
+        socketCoolTimers.clear();
+        pendingSocketCoolCount = 0;
         while (socketRetryQueue.length > 0) {
           const rem = socketRetryQueue.shift();
           if (rem && rem.c && rem.c.id) {
@@ -7349,17 +7538,6 @@
             releaseOutbound(rem.c.id);
           }
         }
-        allSocketRetriesFinished = true;
-        while (extWaiters.length > 0) {
-          const w = extWaiters.shift();
-          w(null);
-        }
-      }
-
-      // Chờ Làn Bù Extension hoàn tất toàn bộ các ca còn lại
-      try {
-        await Promise.all(extWorkers);
-      } finally {
         while (extBacklogQueue.length > 0) {
           const rem2 = extBacklogQueue.shift();
           if (rem2 && rem2.c && rem2.c.id) clearBgPending(rem2.c.id);
