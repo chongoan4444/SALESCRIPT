@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         BOTFAKE LITE (Wave 100 + Làn Bù Song Song)
 // @namespace    salescript
-// @version      1.91.70
-// @description  BOTFAKE — bắn ngay 0ms theo đợt 200 tin chuyển làn thông minh (4 làn × 50 tin, trượt 28 tin/làn + Smart Pipelined Gate) + Bể Hẹn Giờ 2 Làn Bù Song Song (Socket & Extension) + Tab/Clipboard.
+// @version      1.91.71
+// @description  BOTFAKE — bắn ngay 0ms theo đợt 200 tin chuyển làn thông minh (4 làn × 50 tin, trượt 24 tin/làn + Smart Pipelined Gate + 6ms/80-slot Socket chống mất ACK) + Bể Hẹn Giờ 2 Làn Bù Song Song + Tab/Clipboard.
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
 // @match        https://pages.fm/*
@@ -47,7 +47,7 @@
   /* ============================ HẰNG SỐ ============================ */
 
   const PANEL_ID = 'ssb-root';          // ssb = SaleScript Bulk — không đụng pk-*/adj-*/pancake-* của script khác
-  const APP_VERSION = '1.91.70-W200';   // hiện ở tiêu đề panel — đối chiếu với @version trong header
+  const APP_VERSION = '1.91.71-W200';   // hiện ở tiêu đề panel — đối chiếu với @version trong header
   const STYLE_ID = 'ssb-style';
 
   const MAX_NAME_LIST = 12;             // số tên hiển thị khi xác nhận
@@ -3504,7 +3504,7 @@
   const socketConfirmedDeadStreak = {};
   const socketReconnectPromises = {};
   const socketLastPublishAt = {};
-  const SOCKET_MIN_PACE_MS = 5; // giãn 5ms (~200 khung/s/page) cho kiến trúc Đợt 200 gối đầu thông minh + Làn Bù Song Song — nhanh và không dồn burst trên 1 WebSocket
+  const SOCKET_MIN_PACE_MS = 6; // giãn 6ms (~166 khung/s/page) — ngưỡng vàng chống nuốt ACK trên edge-chat.facebook.com cho Đợt 200 gối đầu + Làn Bù Song Song
 
   async function paceSocketPublish(pageId) {
     const pid = String(pageId || '');
@@ -4746,7 +4746,7 @@
   const BUS_PARALLEL_EXT = 10;    // số lệnh adapter.send (REPLY_INBOX_PHOTO) chạy song song — điểm bắt đầu của làn thích ứng Ext
   const EXT_SEND_MIN = 6;         // sàn làn Ext gửi: không thấp hơn mức đã kiểm chứng ổn định
   const EXT_SEND_MAX = 24;        // trần làn Ext gửi: mở tới 24 khi Extension trả lời nhanh/rõ ở lô lớn
-  const BUS_PARALLEL_SOCKET = 96; // số frame Socket (/ls_req) in-flight trên mỗi kết nối WebSocket (kèm giãn nhịp 5ms chống burst)
+  const BUS_PARALLEL_SOCKET = 80; // số frame Socket (/ls_req) in-flight trên mỗi kết nối WebSocket (kèm giãn nhịp 6ms chống mất ACK)
   const SIDE_EFFECT_PARALLEL = 8; // số request nền (fill_admin_name / update_global_id) chạy song song
   function makeLane(parallel) {
     let active = 0;
@@ -6903,7 +6903,7 @@
     const gapRaw = parseInt((gapEl && gapEl.value) || '250', 10);
     const WAVE_GAP = isNaN(gapRaw) ? 250 : Math.max(0, Math.min(60000, gapRaw));
     const MAIN_WAVE_LANES = 4; // 4 làn cố định trong mỗi đợt (200 tin = 4 làn × 50 tin/làn)
-    const PER_LANE_CONCURRENCY = 28; // trượt 28 tin/làn (4 × 28 = 112 tin chạy đồng thời: lấp kín 96 luồng Socket + 16 tin chuẩn bị kế tiếp, không dội spike 200 tin cùng 1ms)
+    const PER_LANE_CONCURRENCY = 24; // trượt 24 tin/làn (4 × 24 = 96 tin chạy đồng thời: lấp kín 80 luồng Socket + 16 tin chuẩn bị kế tiếp, không bao giờ gây mất ACK)
     // gửi theo từng nhóm nội dung (câu khác câu → chữ khác chữ)
     sendGroups = buildSendGroups(targets, state.savedLists, typedText);
     // v1.82.5 — cùng 1 chat chỉ nằm 1 nhóm: nếu 2 câu cùng chứa 1 chat thì giữ lần đầu, không bắn 2 lần.
@@ -7447,15 +7447,15 @@
               return;
             }
             const retryBacklog = socketRetryQueue.length;
-            // Chống ngập: nếu tổng tin đang bay trên Làn Chính > 68 hoặc hàng đợi sẵn sàng bắn lại > 85 thì chờ vơi bớt
-            if (inFlightMainCount > 68 || retryBacklog > 85) return;
-            // Điều kiện 1: Đã check xong ≥78% số tin trong đợt (156/200 tin) và tổng tin đang bay ≤ 48 -> gối đầu đợt tiếp ngay!
-            if (waveDoneCount >= targetFastPass && inFlightMainCount <= 48) {
+            // Chống ngập: nếu tổng tin đang bay trên Làn Chính > 62 hoặc hàng đợi sẵn sàng bắn lại > 80 thì chờ vơi bớt
+            if (inFlightMainCount > 62 || retryBacklog > 80) return;
+            // Điều kiện 1: Đã check xong ≥78% số tin trong đợt (156/200 tin) và tổng tin đang bay ≤ 42 -> gối đầu đợt tiếp ngay!
+            if (waveDoneCount >= targetFastPass && inFlightMainCount <= 42) {
               openWaveGate();
               return;
             }
-            // Điều kiện 2: Đã qua 1.600ms từ đầu đợt, xong ≥62% tin và tổng tin đang bay ≤ 58 -> mở cổng chuyển đợt!
-            if (Date.now() - waveStartAt >= 1600 && waveDoneCount >= targetSoftPass && inFlightMainCount <= 58) {
+            // Điều kiện 2: Đã qua 1.600ms từ đầu đợt, xong ≥62% tin và tổng tin đang bay ≤ 52 -> mở cổng chuyển đợt!
+            if (Date.now() - waveStartAt >= 1600 && waveDoneCount >= targetSoftPass && inFlightMainCount <= 52) {
               openWaveGate();
             }
           };
