@@ -13,11 +13,11 @@ script sẽ:
 
 Phù hợp khi nhiều khách nhắn cùng 1 câu hỏi / cùng 1 tin tự động và bạn cần trả lời 1 lần cho tất cả.
 
-## Bản LITE (`pancake-send-lite.user.js`, v1.90.0)
+## Bản LITE (`extension/pancake-send-lite.user.js`, v1.91.43)
 
-Bản **copy riêng**, không đụng file gốc v1.82.10. Gửi **hết** chat đã chọn — **không** lọc tag chốt/chặn, **không** lọc icon điện thoại, **không** xác minh tag lần 2. **Không** có tạo câu / chọn chuỗi / snippet. Panel thu nhỏ. Vẫn: ⚡ tải danh sách, ☑ Chọn tất cả, gửi chữ/ảnh/câu nhanh.
+Bản LITE **chỉ còn 1 file duy nhất**: `extension/pancake-send-lite.user.js` (bản copy trong `scripts/` đã bỏ để khỏi sửa 1 bên quên bên kia). Bản **copy riêng**, không đụng file gốc v1.82.10. Gửi **hết** chat đã chọn — **không** lọc tag chốt/chặn, **không** lọc icon điện thoại, **không** xác minh tag lần 2. **Không** có tạo câu / chọn chuỗi / snippet. Panel thu nhỏ. Vẫn: ⚡ tải danh sách, ☑ Chọn tất cả, gửi chữ/ảnh/câu nhanh.
 
-**Chrome extension (v1.91.0):** load unpacked thư mục repo (`manifest.json`). ▶ Chạy → gửi **API trong background** (đổi tab không bóp). Overlay `%` Pancake #1/#2. Chi tiết `extension/README.md`.
+**Chrome extension (v1.91.0):** load unpacked thư mục **`extension`** (manifest duy nhất của repo: `extension/manifest.json`). ▶ Chạy → gửi **API trong background** (đổi tab không bóp). Overlay `%` Pancake #1/#2. Chi tiết `extension/README.md`.
 
 ## Cài đặt
 

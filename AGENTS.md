@@ -23,10 +23,20 @@ script hoạt động phù hợp với website thực tế.
 - Không sửa hoặc xóa source reference hiện có trừ khi người dùng yêu cầu.
 - Khi trả về script, giải thích ngắn gọn script đang dựa vào phần nào của source.
 
+## Bản extension (BOTFAKE LITE)
+
+- Chỉ có **1 manifest duy nhất**: `extension/manifest.json` (manifest gốc repo đã bỏ).
+- Code panel + logic gửi: `extension/pancake-send-lite.user.js` (world MAIN), cầu nối
+  `extension/bridge.js`, service worker `extension/background.js`, overlay `extension/overlay.js`.
+- Khi sửa bản extension: phải khớp version ở 3 nơi (`manifest.json` → `version`,
+  `// @version` và `const APP_VERSION`). Chrome chỉ nhận version dạng 1–4 cụm số.
+- Chi tiết cài đặt/phát hành: `extension/README.md`.
+
 ## Source hiện có
 
 - `html.txt`: HTML được lưu từ website.
 - `dashboard-fa168c408c705d9e.v6.js`: JavaScript được tải bởi website.
-- `_app-62a04783e7706d46.v6.js`: JavaScript được tải bởi website.
+- `_app-9331d46f21a84eb1.v6.js`: JavaScript được tải bởi website.
+- `dashboard-fa168c408c705d9e.v6.js`: JavaScript của trang dashboard.
 
 Các file trên là nguồn tham khảo chính để phân tích website.
