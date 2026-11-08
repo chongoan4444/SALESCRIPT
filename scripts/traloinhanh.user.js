@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Hỗ trợ trả lời Sale (Draggable Bubble - v5.5)
 // @namespace    http://tampermonkey.net/
-// @version      6.0.0
+// @version      6.1.0
 // @description  Trợ lý trả lời nhanh cho Sale: gõ câu tắt dạng /cn trong ô soạn tin Pancake → câu trả lời tự nhảy vào ô, Enter là gửi. Bong bóng nổi kéo thả, quản lý danh mục & câu tắt ngay trên trang.
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -54,12 +54,14 @@
 
   /* ============================ HẰNG SỐ ============================ */
 
-  const APP_VERSION = '6.0.0';
+  const APP_VERSION = '6.1.0';
   const KEY_DATA = 'tln_data_v1';
   const KEY_POS = 'tln_pos_v1';
   const KEY_LEGACY = 'sqr_data_v5';      // dữ liệu của bản v5.5 (để di trú)
   const KEY_LEGACY_POS = 'sqr_btn_pos';
   const KEY_SETTINGS = 'tln_settings_v1';
+  const KEY_SUGGEST_POS = 'tln_suggest_pos_v1';
+  const KEY_NATIVE_HIDE = 'tln_native_popup_hide_v1';
 
   const PANCAKE_COMPOSER_ID = 'replyBoxComposer'; // html2.txt / html3.txt / _app forcusReplyCompose()
   const MAX_SUGGEST = 8;
@@ -598,6 +600,10 @@
     .tln-footer b { color: #1d4ed8; }
     .tln-auto { display: flex; align-items: center; gap: 5px; cursor: pointer; margin-top: 4px; font-size: 10.5px; }
     .tln-auto input { width: 12px; height: 12px; cursor: pointer; margin: 0; }
+    .tln-select {
+      font-size: 10.5px; color: #334155; border: 1px solid #cbd5e1; border-radius: 5px;
+      padding: 1px 4px; background: #fff; cursor: pointer; outline: none; max-width: 148px;
+    }
 
     /* --- Gợi ý câu tắt nổi trên ô soạn tin --- */
     #tln-suggest {
@@ -608,9 +614,18 @@
     }
     #tln-suggest.show { display: block; }
     .tln-sg-head {
-      padding: 6px 10px; background: #f1f5f9; border-bottom: 1px solid #e2e8f0;
-      font-size: 10.5px; font-weight: 700; color: #475569; display: flex; justify-content: space-between; gap: 8px;
+      padding: 6px 8px 6px 10px; background: #f1f5f9; border-bottom: 1px solid #e2e8f0;
+      font-size: 10.5px; font-weight: 700; color: #475569; display: flex;
+      justify-content: space-between; align-items: center; gap: 8px;
+      cursor: grab; user-select: none; touch-action: none;
     }
+    .tln-sg-head:active { cursor: grabbing; }
+    .tln-sg-head-right { display: flex; align-items: center; gap: 6px; flex-shrink: 0; color: #94a3b8; }
+    .tln-sg-reset {
+      width: 18px; height: 18px; border-radius: 4px; border: 1px solid #cbd5e1; background: #fff;
+      color: #475569; font-size: 11px; line-height: 1; cursor: pointer; padding: 0;
+    }
+    .tln-sg-reset:hover { background: #e2e8f0; color: #1d4ed8; }
     .tln-sg-list { max-height: 246px; overflow-y: auto; }
     .tln-sg {
       display: flex; align-items: flex-start; gap: 7px; padding: 7px 10px; cursor: pointer;
@@ -677,8 +692,15 @@
   /* ============================ CÀI ĐẶT ============================ */
 
   function loadSettings() {
-    const s = gmGet(KEY_SETTINGS, null);
-    return { autoExpand: !(s && s.autoExpand === false) }; // mặc định: gõ đúng câu tắt + dấu cách là chèn luôn
+    const s = gmGet(KEY_SETTINGS, null) || {};
+    return {
+      // mặc định: gõ đúng câu tắt + dấu cách là chèn luôn
+      autoExpand: s.autoExpand !== false,
+      // nơi đặt bảng gợi ý: 'above' (trên ô soạn tin) | 'below' | 'free' (kéo tay)
+      place: ['above', 'below', 'free'].indexOf(s.place) > -1 ? s.place : 'above',
+      // ẩn bảng câu nhanh "/" gốc của Pancake khi bảng của script đang mở (đỡ bị che)
+      hideNative: s.hideNative !== false,
+    };
   }
   function saveSettings() {
     gmSet(KEY_SETTINGS, settings);
@@ -697,6 +719,9 @@
   let draggedItem = null;         // { catIdx, itemIdx }
 
   const picker = { open: false, list: [], index: -1, token: null, info: null };
+
+  // Vị trí bảng gợi ý: tự động (trên/dưới ô soạn tin) hoặc do người dùng kéo (lưu lại)
+  const suggestPos = { custom: gmGet(KEY_SUGGEST_POS, null) };
 
   /* ============================ TOAST ============================ */
 
@@ -910,12 +935,52 @@
 
   /* ============================ BẢNG GỢI Ý ============================ */
 
+  /** Kéo bảng gợi ý ra chỗ khác (lưu lại) — bấm đúp vào tiêu đề để về vị trí tự động. */
+  function clearSuggestCustomPos() {
+    suggest.style.transform = '';
+    suggest.style.removeProperty('--tln-dx');
+    suggestPos.custom = null;
+    gmSet(KEY_SUGGEST_POS, null);
+  }
+
+  /**
+   * Ẩn/hiện bảng câu nhanh "/" GỐC của Pancake (bảng có dòng "Nhấn Enter hoặc Click chuột…").
+   * Script không biết chắc class của bảng đó (html*.txt chưa bắt được trạng thái mở) nên dùng
+   * :has() theo đúng CÂU CHỮ của bảng — an toàn, không đụng thành phần khác; nếu trình duyệt
+   * không hỗ trợ :has() thì bỏ qua, chỉ còn tính năng kéo bảng của script.
+   */
+  function buildNativeHideCss(show) {
+    const who = ':is(.suggestion-wrap, .suggestion-container, .quick-reply-list, '
+      + '.quick-reply-container, .quick-reply-popover, .qr-list, .composer-popover)';
+    const text = ':is(:has(.suggestion-element), :has(.shortcut-tag), :has(#qr_autocomplete), '
+      + ':has([class*="suggestion"]))';
+    if (!show) return ''; // chỉ cần ẩn khi bảng CỦA SCRIPT mở (bảng gốc vẫn dùng bình thường khi gõ "/")
+    return '/* ẩn bảng câu nhanh gốc của Pancake khi bảng gợi ý của script đang mở */\n'
+      + who + text + ', .suggestion-element, .suggestion-wrap, .suggestion-container {'
+      + ' display: none !important; visibility: hidden !important; }';
+  }
+
+  function hideNativePopup(on) {
+    let el = document.getElementById('tln-native-hide');
+    if (!on) {
+      if (el) el.remove();
+      return;
+    }
+    if (!el) {
+      el = document.createElement('style');
+      el.id = 'tln-native-hide';
+      document.head.appendChild(el);
+    }
+    el.textContent = buildNativeHideCss(true);
+  }
+
   function hideSuggest() {
     picker.open = false;
     picker.index = -1;
     picker.token = null;
     picker.list = [];
     suggest.classList.remove('show');
+    if (settings.hideNative) hideNativePopup(false);
   }
 
   function renderSuggest() {
@@ -924,10 +989,26 @@
       suggest.classList.remove('show');
       return;
     }
-    const head = h('div', { class: 'tln-sg-head' });
-    head.appendChild(h('span', { text: 'Câu tắt khớp “/' + (picker.token || '') + '”' }));
-    head.appendChild(h('span', { text: picker.list.length + ' kết quả' }));
+    const head = h('div', { class: 'tln-sg-head', title: 'Kéo để dời bảng · bấm đúp để về vị trí tự động' });
+    head.appendChild(h('span', { text: '⠿ Câu tắt khớp “/' + (picker.token || '') + '”' }));
+    const headRight = h('span', { class: 'tln-sg-head-right' });
+    headRight.appendChild(h('span', { text: picker.list.length }));
+    const resetBtn = h('button', {
+      class: 'tln-sg-reset',
+      text: '⤢',
+      title: 'Về vị trí tự động (trên/dưới ô soạn tin)',
+      onmousedown: (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        clearSuggestCustomPos();
+        positionSuggest();
+        showToast('Bảng gợi ý về vị trí tự động');
+      },
+    });
+    headRight.appendChild(resetBtn);
+    head.appendChild(headRight);
     suggest.appendChild(head);
+    makeSuggestDraggable(head);
 
     const list = h('div', { class: 'tln-sg-list' });
     picker.list.forEach((rec, i) => {
@@ -955,14 +1036,85 @@
       suggest.classList.remove('show');
       return;
     }
-    const r = info.el.getBoundingClientRect();
     const w = suggest.offsetWidth || 330;
     const hgt = suggest.offsetHeight || 200;
-    let left = clamp(r.left, 6, Math.max(6, window.innerWidth - w - 6));
-    let top = r.top - hgt - 6;
-    if (top < 6) top = clamp(r.bottom + 6, 6, Math.max(6, window.innerHeight - hgt - 6));
+    const maxLeft = Math.max(6, window.innerWidth - w - 6);
+    const maxTop = Math.max(6, window.innerHeight - hgt - 6);
+
+    // Người dùng đã kéo bảng đi chỗ khác → giữ nguyên chỗ đó
+    if (settings.place === 'free' && suggestPos.custom) {
+      suggest.style.left = clamp(suggestPos.custom.left, 6, maxLeft) + 'px';
+      suggest.style.top = clamp(suggestPos.custom.top, 6, maxTop) + 'px';
+      return;
+    }
+
+    const r = info.el.getBoundingClientRect();
+    const left = clamp(r.left, 6, maxLeft);
+    let top = (settings.place === 'below') ? r.bottom + 6 : r.top - hgt - 6;
+    if (top < 6 || top + hgt > window.innerHeight - 6) {
+      // không đủ chỗ phía trên → xuống dưới, và ngược lại
+      const below = r.bottom + 6;
+      const above = r.top - hgt - 6;
+      top = (settings.place === 'below')
+        ? (below + hgt <= window.innerHeight - 6 ? below : above)
+        : (above >= 6 ? above : below);
+    }
     suggest.style.left = left + 'px';
-    suggest.style.top = top + 'px';
+    suggest.style.top = clamp(top, 6, maxTop) + 'px';
+  }
+
+  /** Kéo bảng gợi ý bằng tiêu đề (chuột hoặc cảm ứng). */
+  function makeSuggestDraggable(handle) {
+    let dragging2 = false;
+    let sx = 0, sy = 0, bl = 0, bt = 0, moved2 = false;
+
+    const start = (e) => {
+      if (e.button != null && e.button !== 0) return;
+      const p = point(e);
+      const rect = suggest.getBoundingClientRect();
+      dragging2 = true;
+      moved2 = false;
+      sx = p.x; sy = p.y; bl = rect.left; bt = rect.top;
+    };
+
+    const move = (e) => {
+      if (!dragging2) return;
+      const p = point(e);
+      const dx = p.x - sx;
+      const dy = p.y - sy;
+      if (!moved2 && Math.hypot(dx, dy) < 4) return;
+      moved2 = true;
+      settings.place = 'free';
+      suggestPos.custom = {
+        left: clamp(bl + dx, 6, Math.max(6, window.innerWidth - suggest.offsetWidth - 6)),
+        top: clamp(bt + dy, 6, Math.max(6, window.innerHeight - suggest.offsetHeight - 6)),
+      };
+      suggest.style.left = suggestPos.custom.left + 'px';
+      suggest.style.top = suggestPos.custom.top + 'px';
+      if (e.cancelable && e.type === 'touchmove') e.preventDefault();
+    };
+
+    const end = () => {
+      if (!dragging2) return;
+      dragging2 = false;
+      if (moved2) {
+        gmSet(KEY_SUGGEST_POS, suggestPos.custom);
+        saveSettings();
+        if (isOpenPanel) render(); // cập nhật ô chọn vị trí trong panel
+        showToast('Đã ghim vị trí bảng gợi ý (⤢ để về tự động)');
+      }
+    };
+
+    handle.addEventListener('mousedown', start);
+    handle.addEventListener('touchstart', start, { passive: true });
+    handle.addEventListener('dblclick', () => {
+      clearSuggestCustomPos();
+      positionSuggest();
+    });
+    document.addEventListener('mousemove', move, true);
+    document.addEventListener('touchmove', move, { passive: false, capture: true });
+    document.addEventListener('mouseup', end, true);
+    document.addEventListener('touchend', end, true);
   }
 
   function refreshSuggest(el) {
@@ -980,6 +1132,7 @@
     const exactIdx = list.findIndex((r) => r.key === normShortcut(info.token));
     picker.index = info.token ? (exactIdx >= 0 ? exactIdx : 0) : -1;
 
+    if (settings.hideNative) hideNativePopup(true);
     renderSuggest();
   }
 
@@ -1416,6 +1569,46 @@
     footer.appendChild(h('b', { text: '/câu_tắt' }));
     footer.appendChild(h('span', { text: ' trong ô soạn tin rồi Enter/Tab (hoặc cách ra) để chèn — Enter lần nữa để gửi.' }));
     footer.appendChild(h('br'));
+
+    // Vị trí bảng gợi ý
+    const posWrap = h('label', { class: 'tln-auto' });
+    posWrap.appendChild(h('span', { text: 'Bảng gợi ý:' }));
+    const posSel = h('select', { class: 'tln-select' });
+    const posOptions = [
+      { v: 'above', t: 'Trên ô soạn tin' },
+      { v: 'below', t: 'Dưới ô soạn tin' },
+      { v: 'free', t: 'Chỗ đã kéo (tự do)' },
+    ];
+    posOptions.forEach((o) => {
+      const opt = h('option', { value: o.v, text: o.t });
+      if (settings.place === o.v) opt.selected = true;
+      posSel.appendChild(opt);
+    });
+    posSel.addEventListener('change', () => {
+      settings.place = posSel.value;
+      if (settings.place !== 'free') clearSuggestCustomPos();
+      saveSettings();
+      if (picker.open) positionSuggest();
+      showToast('Vị trí bảng gợi ý: ' + posSel.options[posSel.selectedIndex].text.toLowerCase());
+    });
+    posWrap.appendChild(posSel);
+    footer.appendChild(posWrap);
+
+    // Ẩn bảng câu nhanh "/" gốc của Pancake khi bảng của script mở
+    const nativeWrap = h('label', { class: 'tln-auto' });
+    const nativeChk = h('input', { type: 'checkbox' });
+    nativeChk.checked = !!settings.hideNative;
+    nativeChk.addEventListener('change', () => {
+      settings.hideNative = nativeChk.checked;
+      saveSettings();
+      if (!settings.hideNative) hideNativePopup(false);
+      else if (picker.open) hideNativePopup(true);
+      showToast(settings.hideNative ? 'Đã ẩn bảng "/" gốc khi đang mở bảng gợi ý' : 'Không ẩn bảng "/" gốc nữa');
+    });
+    nativeWrap.appendChild(nativeChk);
+    nativeWrap.appendChild(h('span', { text: 'Ẩn bảng "/" gốc của Pancake khi bảng gợi ý mở' }));
+    footer.appendChild(nativeWrap);
+
     const autoWrap = h('label', { class: 'tln-auto' });
     const autoChk = h('input', { type: 'checkbox' });
     autoChk.checked = !!settings.autoExpand;
