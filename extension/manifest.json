@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
-  "name": "BOTFAKE LITE — Wave 200 coordinator test",
+  "name": "BOTFAKE LITE — Wave 200 local tab test",
   "version": "200.13.0",
-  "description": "Bản test clone Wave 200.13: service worker điều phối, Pancake tab thực thi Socket/ACK",
+  "description": "Bản test clone Wave 200.13: tab Pancake điều phối và thực thi pipeline gửi",
   "permissions": [
     "tabs",
     "storage",

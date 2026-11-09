@@ -2,7 +2,7 @@
 // @name         BOTFAKE LITE (Wave 200 · Tab + Clipboard)
 // @namespace    salescript
 // @version      1.91.72-w200.13
-// @description  BOTFAKE — nền v1.91.72 Tab + Clipboard, dùng luồng gửi Wave 200 (4 làn chính + 2 làn bù song song).
+// @description  BOTFAKE — nền v1.91.72 Tab + Clipboard, điều phối Wave 200 cục bộ trong tab Pancake (4 làn chính + 2 làn bù song song).
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
 // @match        https://pages.fm/*
@@ -7353,154 +7353,7 @@
       return r;
     };
 
-    // Extension-only clone: scheduler ở MV3 SW; mọi lần gửi thực tế vẫn chạy MAIN Pancake/Socket.
-    const waveTaskContexts = new Map();
-    const executeExtensionWaveTask = async (task) => {
-      if (!task || !task.id || !task.requestId) return { disposition: 'fatal', error: 'Task Wave không hợp lệ' };
-      if (state.stopRequested) return { disposition: 'stop' };
-      const id = String(task.id);
-      const pass = String(task.pass || 'main');
-      const contextKey = String(task.contextKey || '');
-      const deferredCtx = contextKey ? waveTaskContexts.get(contextKey) : null;
-      if (pass !== 'main' && !deferredCtx) {
-        return { disposition: 'fatal', error: 'Thiếu ngữ cảnh retry Wave — dừng để tránh gửi sai/trùng' };
-      }
-      const c = {
-        id,
-        pageId: task.pageId || id.split('_')[0],
-        name: task.name || id,
-        type: task.type || '',
-      };
-      if (pass === 'socketRetry' && deliveredIds[id]) {
-        if (contextKey) waveTaskContexts.delete(contextKey);
-        clearBgPending(id);
-        releaseOutbound(id);
-        return { disposition: 'done', outcome: 'alreadyDelivered' };
-      }
-      if (pass === 'socketRetry') {
-        releaseOutbound(id);
-        sendDiag.sockRetry++;
-      }
-      try {
-        const r = await sendOneAndLog(c, task.text != null ? String(task.text) : gtext, {
-          fastOnly: pass === 'main',
-          wave200Mode: true,
-          isSocketRetryPass: pass === 'socketRetry',
-          isExtBacklogPass: pass === 'extBacklog',
-          deferredCtx: deferredCtx || undefined,
-        });
-        if (r && r.deferredToSocketRetry) {
-          const ctx = r.deferredCtx || deferredCtx;
-          if (!ctx) return { disposition: 'fatal', error: 'Socket retry thiếu ngữ cảnh — dừng để tránh gửi trùng' };
-          waveTaskContexts.set(contextKey, ctx);
-          noteBgPending(c, 'wave200-socket-retry');
-          if (pass === 'socketRetry') sendDiag.sockRetryOther++;
-          const pid = c.pageId || id.split('_')[0];
-          const deadStreak = socketConfirmedDeadStreak[pid] || 0;
-          const firstAt = ctx.firstRejectedAt || Date.now();
-          const coolTargetMs = deadStreak >= 3
-            ? 260 + Math.floor(Math.random() * 190)
-            : 620 + Math.floor(Math.random() * 280);
-          const cooldownMs = Math.max(0, coolTargetMs - (Date.now() - firstAt));
-          return { disposition: 'deferredSocket', contextKey, cooldownMs };
-        }
-        if (r && r.deferredToExt) {
-          const ctx = r.deferredCtx || deferredCtx;
-          if (!ctx) return { disposition: 'fatal', error: 'Extension backlog thiếu ngữ cảnh — dừng để tránh gửi sai/trùng' };
-          waveTaskContexts.set(contextKey, ctx);
-          noteBgPending(c, 'wave200-extension');
-          if (pass === 'socketRetry') {
-            if (r && r.recipientUnavailable) sendDiag.sockRetryRejected++;
-            else sendDiag.sockRetryOther++;
-          }
-          return { disposition: 'deferredExt', contextKey };
-        }
-        if (pass === 'socketRetry') {
-          if (r && r.ok && !r.skippedDup) sendDiag.sockRetryRecovered++;
-          else if (r && r.recipientUnavailable) sendDiag.sockRetryRejected++;
-          else sendDiag.sockRetryOther++;
-        }
-        if (contextKey) waveTaskContexts.delete(contextKey);
-        return { disposition: 'done', outcome: r && r.uncertain ? 'uncertain' : ((r && r.ok) ? 'success' : 'failure') };
-      } catch (e) {
-        if (contextKey) waveTaskContexts.delete(contextKey);
-        settleInternalError(c, e);
-        return { disposition: 'done', outcome: 'uncertain' };
-      }
-    };
-
-    const runExtensionWaveCoordinator = async (gtext, fullList) => {
-      const jobId = 'w200-' + Date.now() + '-' + Math.random().toString(36).slice(2, 9);
-      const targets = (fullList || []).map((c, targetIndex) => ({
-        id: String(c.id), pageId: c.pageId || String(c.id).split('_')[0],
-        name: c.name || '', type: c.type || '', text: gtext, targetIndex,
-        contextKey: jobId + ':target:' + targetIndex,
-      }));
-      let resolveDone;
-      let rejectDone;
-      const donePromise = new Promise((resolve, reject) => { resolveDone = resolve; rejectDone = reject; });
-      let doneSeen = false;
-      const onTask = (ev) => {
-        if (ev.source !== window || !ev.data || ev.data.__botfake !== 1 || ev.data.dir !== 'wave_task'
-            || String(ev.data.jobId || '') !== jobId || !ev.data.requestId) return;
-        const requestId = String(ev.data.requestId);
-        Promise.resolve().then(() => executeExtensionWaveTask(ev.data.task || {})).catch((e) => ({
-          disposition: 'fatal', error: String(e && e.message || e),
-        })).then((response) => {
-          try {
-            response.apiBacklog = apiSendLane.waitingCount();
-            window.postMessage({ __botfake: 1, dir: 'wave_task_result', requestId, response }, '*');
-          } catch (e) { /* if the MAIN bridge vanished, background timeout stops the job without fallback */ }
-        });
-      };
-      const onMessage = (msg) => {
-        if (!msg || msg.jobId !== jobId) return;
-        if (msg.type === 'BOTFAKE_WAVE_PROGRESS') {
-          waveDiag.maxMainInFlight = Math.max(waveDiag.maxMainInFlight || 0, msg.mainPeak || 0);
-          waveDiag.maxSocketRetryActive = Math.max(waveDiag.maxSocketRetryActive || 0, msg.socketPeak || 0);
-          waveDiag.maxExtActive = Math.max(waveDiag.maxExtActive || 0, msg.extPeak || 0);
-          waveDiag.maxSocketRetryQueue = Math.max(waveDiag.maxSocketRetryQueue || 0, msg.socketQueuePeak || 0);
-          waveDiag.maxExtQueue = Math.max(waveDiag.maxExtQueue || 0, msg.extQueuePeak || 0);
-          setProgress(done, totalAll, ok);
-          try { updateBatchSummaryUI(); } catch (e) { /* ignore */ }
-        }
-        if (msg.type === 'BOTFAKE_WAVE_DONE' && !doneSeen) {
-          doneSeen = true;
-          if (msg.error) rejectDone(new Error(msg.error));
-          else resolveDone(msg);
-        }
-      };
-      window.addEventListener('message', onTask);
-      const unsubscribe = extListen(onMessage);
-      try {
-        const start = await extCall({ type: 'BOTFAKE_WAVE_START', job: { jobId, targets, waveSize: WAVE_SIZE } }, 10000);
-        if (!start || start.err || !start.res || !start.res.ok) {
-          throw new Error((start && start.res && start.res.error) || (start && start.err) || 'Service worker không nhận Wave job');
-        }
-        const result = await donePromise;
-        waveDiag.mainCapFinal = 96;
-        if (result.stopped) state.stopRequested = true;
-        if (result.error) throw new Error(result.error);
-        logLine('🌊 Extension Wave hoàn tất — ' + result.done + '/' + result.total
-          + ' task · peak main ' + result.mainPeak + '/96 · Socket retry ' + result.socketPeak
-          + ' · Ext ' + result.extPeak + ' · queue Socket/Ext '
-          + result.socketQueuePeak + '/' + result.extQueuePeak + (result.stopped ? ' · đã dừng' : ''));
-        return result;
-      } catch (e) {
-        // Không chuyển sang sender tại tab sau khi SW đã nhận job: kết quả gửi có thể chưa rõ.
-        state.stopRequested = true;
-        throw e;
-      } finally {
-        window.removeEventListener('message', onTask);
-        unsubscribe();
-        waveTaskContexts.clear();
-        for (let i = 0; i < targets.length; i++) {
-          const id = targets[i].id;
-          if (!deliveredIds[id]) { clearBgPending(id); releaseOutbound(id); }
-        }
-      }
-    };
-
+    // Gửi được điều phối ngay trong tab Pancake hiện tại (không dispatch từng target qua service worker).
     // Wave 200: worker chính có semaphore tổng; ACK/socket retry và Extension chạy ở hàng đợi riêng.
     const settleInternalError = (c, e) => {
       done++; unsure++;
@@ -7518,8 +7371,7 @@
     const WAVE_API_BACKLOG_HIGH_WATER = 96;
 
     const runGroupWaves200 = async (gtext, fullList) => {
-      // Extension test clone: dispatch the entire group once; failures/timeouts never fall back locally.
-      if (extBgAvailable()) return runExtensionWaveCoordinator(gtext, fullList);
+      // Điều phối worker, retry và wave ngay trong tab Pancake; không chuyển job sang service worker.
       const socketRetryQueue = [];
       const socketRetryWaiters = [];
       const socketCoolTimers = new Map();
@@ -8936,10 +8788,7 @@
       if (!state.sending) return;
       state.stopRequested = true;
       try {
-        if (extBgAvailable()) {
-          extCall({ type: 'BOTFAKE_WAVE_STOP' });
-          extCall({ type: 'BOTFAKE_BG_STOP' });
-        }
+        if (extBgAvailable()) extCall({ type: 'BOTFAKE_BG_STOP' });
       } catch (e0) { /* ignore */ }
       logLine('⏸ Đã bấm Dừng — ngắt lượt gửi, không bắn thêm.');
       applyRunStopButtons();

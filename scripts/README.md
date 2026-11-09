@@ -390,8 +390,8 @@ qua kênh chưa thử**, không bao giờ "báo gửi" rồi im lặng.
 - Script đặt id prefix `ssb-` nên **không đụng** các script khác đang chạy trên trang của bạn
   (`pk-*`, `adj-*`, `pancake-*`).
 
-## Extension Wave 200 coordinator — test clone
+## Extension Wave 200 — local tab test
 
-Manifest trong `extension/` hiện chọn `pancake-send-lite-wave200.user.js`, test clone W200.13 được khôi phục từ backup trước khi thêm cơ chế tab Sender riêng. Service worker điều phối Wave; việc gửi và Socket/ACK vẫn chạy trong MAIN world của chính tab Pancake hiện tại. Không thay đổi cap/concurrency của pipeline. Clone chưa live-test, không dùng để gửi thật cho tới khi kiểm thử extension trên Pancake.
+Manifest trong `extension/` hiện chọn `pancake-send-lite-wave200.user.js`, test clone W200.13 được khôi phục từ backup trước khi thêm cơ chế tab Sender riêng. Cơ chế gửi được điều phối ngay trong tab Pancake hiện tại bằng worker/retry queues cục bộ; service worker không nhận job Wave/từng target. Pipeline gửi và Socket/ACK vẫn chạy trong MAIN world của chính tab đó. Không thay đổi cap/concurrency của pipeline. Clone chưa live-test, không dùng để gửi thật cho tới khi kiểm thử extension trên Pancake.
 
-Sender W200 hiện tại `pancake-send-lite-wave100-lanes.user.js` trên nhánh có phiên bản mới hơn; clone extension W200.13 là bản test độc lập cho thay đổi coordinator, không thay thế hay ghi đè sender đó.
+Sender W200 hiện tại `pancake-send-lite-wave100-lanes.user.js` trên nhánh có phiên bản mới hơn; clone extension W200.13 là bản test độc lập cho thay đổi điều phối cục bộ trong tab, không thay thế hay ghi đè sender đó.
