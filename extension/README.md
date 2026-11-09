@@ -11,7 +11,7 @@ Không dùng `manifest.json` ở gốc repo nếu bạn chỉ copy 4 file ra fol
 3. Tắt Tampermonkey LITE trên Pancake.
 4. Reload extension mỗi lần cập nhật.
 
-**Lưu ý trạng thái:** `pancake-send-lite.user.js` là bản nền Tab + Clipboard v1.91.72 được giữ riêng. Manifest trong thư mục này hiện trỏ tới đúng **một test clone**: `pancake-send-lite-wave200.user.js` (W200.14). Bấm biểu tượng extension sẽ mở hoặc focus một tab Pancake Sender duy nhất; tab này được tái sử dụng sau mỗi lượt, không tự đóng khi gửi xong. Nút Gửi ở tab Pancake giao diện chuyển snapshot đã xác nhận sang sender tab; service worker chuyển tiến độ/dừng, còn pipeline Wave, Socket và ACK chạy trong MAIN world của sender tab. Đây là bản thử nghiệm, **chưa live-test và chưa xác nhận dùng gửi thật**; nếu cần dùng bản nền đã khôi phục, hãy đổi manifest về `pancake-send-lite.user.js` trước khi load.
+**Lưu ý trạng thái:** `pancake-send-lite.user.js` là bản nền Tab + Clipboard v1.91.72 được giữ riêng. Manifest trong thư mục này trỏ tới test clone `pancake-send-lite-wave200.user.js` (W200.13), được khôi phục từ backup trước khi thêm cơ chế tab Sender riêng. Service worker điều phối Wave; pipeline gửi và Socket/ACK vẫn chạy trong MAIN world của tab Pancake hiện tại. Đây là bản thử nghiệm, **chưa live-test và chưa xác nhận dùng gửi thật**; nếu cần dùng bản nền, hãy đổi manifest về `pancake-send-lite.user.js` trước khi load.
 
 Không bật đồng thời clone này với Tampermonkey/bản gửi khác trên Pancake. Backup trước tái cấu trúc nằm ở `../backups/pre-extension-restructure-w200.13/`.
 

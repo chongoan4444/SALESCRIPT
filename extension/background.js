@@ -15,118 +15,6 @@ const CONCURRENCY = 24;
 const jobs = {};
 /** @type {Record<number, { stop: boolean, running: boolean }>} */
 const bgCtl = {};
-const dedicatedBySenderTab = Object.create(null);
-const dedicatedByUiTab = Object.create(null);
-const DEDICATED_SENDER_BOOT_TIMEOUT_MS = 120000;
-const PERSISTENT_SENDER_TAB_KEY = 'ssbPersistentSenderTabId';
-let persistentSenderTabId = null;
-let persistentSenderReady = false;
-let persistentSenderCreating = null;
-let persistentSenderRestore = Promise.resolve();
-try {
-  if (chrome.storage && chrome.storage.local) {
-    persistentSenderRestore = new Promise((resolve) => {
-      chrome.storage.local.get(PERSISTENT_SENDER_TAB_KEY, (data) => {
-        persistentSenderTabId = (data && Number(data[PERSISTENT_SENDER_TAB_KEY])) || null;
-        resolve();
-      });
-    });
-  }
-} catch (e) { /* local storage is optional; in-memory reuse still works */ }
-
-function isPancakeUrl(url) {
-  try {
-    const host = new URL(url || '').hostname.toLowerCase();
-    return /(^|\.)pancake\.(vn|ph|id|in|biz)$/.test(host)
-      || host === 'pages.fm' || host.endsWith('.pages.fm') || host === 'socialos.vip';
-  } catch (e) { return false; }
-}
-
-function getTab(tabId) {
-  return new Promise((resolve) => {
-    try {
-      chrome.tabs.get(tabId, (tab) => {
-        const err = chrome.runtime.lastError;
-        resolve(err ? null : (tab || null));
-      });
-    } catch (e) { resolve(null); }
-  });
-}
-
-async function getPersistentSenderTab() {
-  await persistentSenderRestore;
-  if (persistentSenderCreating) return persistentSenderCreating;
-  if (!persistentSenderTabId) return null;
-  const tab = await getTab(persistentSenderTabId);
-  if (tab) return tab;
-  persistentSenderTabId = null;
-  persistentSenderReady = false;
-  try { chrome.storage.local.remove(PERSISTENT_SENDER_TAB_KEY, () => void chrome.runtime.lastError); } catch (e) { /* ignore */ }
-  return null;
-}
-
-function setPersistentSenderTabId(tabId) {
-  persistentSenderTabId = Number(tabId) || null;
-  persistentSenderReady = false;
-  try {
-    if (persistentSenderTabId && chrome.storage && chrome.storage.local) {
-      chrome.storage.local.set({ [PERSISTENT_SENDER_TAB_KEY]: persistentSenderTabId }, () => void chrome.runtime.lastError);
-    }
-  } catch (e) { /* in-memory fallback */ }
-}
-
-function choosePancakeUrl(preferredUrl) {
-  if (isPancakeUrl(preferredUrl)) return Promise.resolve(String(preferredUrl));
-  return new Promise((resolve) => {
-    try {
-      chrome.tabs.query({ url: PANCAKE_URL }, (tabs) => {
-        const sorted = (tabs || []).filter((tab) => isPancakeUrl(tab.url))
-          .sort((a, b) => (Number(b.lastAccessed) || 0) - (Number(a.lastAccessed) || 0));
-        resolve(sorted.length ? sorted[0].url : 'https://pancake.vn/');
-      });
-    } catch (e) { resolve('https://pancake.vn/'); }
-  });
-}
-
-async function ensurePersistentSenderTab(url, active) {
-  await persistentSenderRestore;
-  const existing = await getPersistentSenderTab();
-  if (existing) {
-    if (active) {
-      try {
-        await new Promise((resolve) => chrome.tabs.update(existing.id, { active: true }, () => resolve()));
-        if (existing.windowId) chrome.windows.update(existing.windowId, { focused: true }, () => void chrome.runtime.lastError);
-      } catch (e) { /* ignore focus failure */ }
-    }
-    if (!persistentSenderReady) tell(existing.id, { type: 'BOTFAKE_WAVE_SENDER_PING' });
-    return existing;
-  }
-  if (persistentSenderCreating) {
-    const created = await persistentSenderCreating;
-    if (active && created && created.id) {
-      try { chrome.tabs.update(created.id, { active: true }, () => void chrome.runtime.lastError); } catch (e) { /* ignore */ }
-    }
-    return created;
-  }
-  persistentSenderCreating = new Promise((resolve, reject) => {
-    try {
-      chrome.tabs.create({ url: String(url || 'https://pancake.vn/'), active: !!active }, (created) => {
-        const err = chrome.runtime.lastError;
-        if (err || !created || !created.id) { reject(new Error((err && err.message) || 'Không mở được tab Sender')); return; }
-        setPersistentSenderTabId(created.id);
-        resolve(created);
-      });
-    } catch (e) { reject(e); }
-  });
-  try { return await persistentSenderCreating; }
-  finally { persistentSenderCreating = null; }
-}
-
-async function openPersistentSenderFromAction(sourceTab) {
-  const preferredUrl = sourceTab && isPancakeUrl(sourceTab.url) ? sourceTab.url : '';
-  const url = await choosePancakeUrl(preferredUrl);
-  await ensurePersistentSenderTab(url, true);
-}
 
 async function pancakeNumber(tabId) {
   try {
@@ -187,54 +75,6 @@ async function broadcast() {
 function tell(tabId, msg) {
   if (!tabId) return;
   try { chrome.tabs.sendMessage(tabId, msg, () => void chrome.runtime.lastError); } catch (e) { /* ignore */ }
-  const dedicated = dedicatedBySenderTab[tabId];
-  if (dedicated && dedicated.uiTabId && msg && (msg.type === 'BOTFAKE_WAVE_PROGRESS' || msg.type === 'BOTFAKE_WAVE_DONE')) {
-    try { chrome.tabs.sendMessage(dedicated.uiTabId, Object.assign({}, msg, { dedicated: true }), () => void chrome.runtime.lastError); } catch (e) { /* ignore */ }
-  }
-}
-
-function finishDedicatedSender(item, result, error) {
-  if (!item || item.done) return;
-  item.done = true;
-  if (item.bootTimer) clearTimeout(item.bootTimer);
-  const message = Object.assign({ type: 'BOTFAKE_DEDICATED_DONE', jobId: item.jobId }, result || {});
-  if (error) { message.ok = false; message.error = String(error); }
-  tell(item.uiTabId, message);
-  if (item.senderTabId && dedicatedBySenderTab[item.senderTabId] === item) delete dedicatedBySenderTab[item.senderTabId];
-  if (dedicatedByUiTab[item.uiTabId] === item) delete dedicatedByUiTab[item.uiTabId];
-}
-
-function failDedicatedSender(senderTabId, error) {
-  finishDedicatedSender(dedicatedBySenderTab[senderTabId], null, error || 'Sender tab không sẵn sàng');
-}
-
-function dispatchDedicatedJob(item) {
-  if (!item || item.done || item.jobSent || !item.senderTabId || !persistentSenderReady) return;
-  if (item.stopRequested || item.uiClosed) {
-    finishDedicatedSender(item, { ok: false, stopped: true }, null);
-    return;
-  }
-  item.jobSent = true;
-  if (item.bootTimer) { clearTimeout(item.bootTimer); item.bootTimer = null; }
-  try {
-    chrome.tabs.sendMessage(item.senderTabId, { type: 'BOTFAKE_WAVE_EXTERNAL_JOB', job: item.job }, () => {
-      const err = chrome.runtime.lastError;
-      if (err) failDedicatedSender(item.senderTabId, err.message || 'Không chuyển được job tới tab Sender');
-    });
-  } catch (e) { failDedicatedSender(item.senderTabId, String(e && e.message || e)); }
-}
-
-function stopWaveForTab(tabId) {
-  const ctl = waveCtl[tabId];
-  if (!ctl) return;
-  ctl.stop = true;
-  ['socket', 'ext'].forEach((name) => {
-    while (ctl.waiters[name].length) ctl.waiters[name].shift()(null);
-  });
-  while (ctl.mainWaiters.length) ctl.mainWaiters.shift()();
-  ctl.timers.forEach((timer) => { try { clearTimeout(timer); } catch (e) { /* ignore */ } });
-  ctl.timers.clear();
-  ctl.socketCool = 0;
 }
 
 function resolvePhoto(item, photo) {
@@ -799,69 +639,8 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
   if (msg.type === 'BOTFAKE_JOB') {
     if (!tabId) { sendResponse && sendResponse({ ok: false }); return; }
-    upsert(tabId, msg).then(() => {
-      const dedicated = dedicatedBySenderTab[tabId];
-      if (dedicated) tell(dedicated.uiTabId, {
-        type: 'BOTFAKE_DEDICATED_PROGRESS', jobId: dedicated.jobId,
-        pct: msg.pct, ok: msg.ok, total: msg.total, done: msg.done,
-        phase: msg.phase, sending: msg.sending,
-      });
-      sendResponse && sendResponse({ ok: true });
-    });
+    upsert(tabId, msg).then(() => sendResponse && sendResponse({ ok: true }));
     return true;
-  }
-
-  if (msg.type === 'BOTFAKE_DEDICATED_START') {
-    if (!tabId || !msg.job || !msg.job.jobId || !msg.job.url) {
-      sendResponse({ ok: false, error: 'Thiếu tab/job/url cho sender tab riêng' });
-      return;
-    }
-    if (Object.keys(dedicatedByUiTab).length || (persistentSenderTabId && dedicatedBySenderTab[persistentSenderTabId])) {
-      sendResponse({ ok: false, error: 'Tab Sender đang xử lý một job khác' });
-      return;
-    }
-    const item = {
-      uiTabId: tabId,
-      senderTabId: null,
-      jobId: String(msg.job.jobId),
-      job: msg.job,
-      stopRequested: false,
-      uiClosed: false,
-      jobSent: false,
-      bootTimer: null,
-      done: false,
-    };
-    dedicatedByUiTab[tabId] = item;
-    // Acknowledge synchronously; the persistent sender tab is created/reused asynchronously.
-    sendResponse({ ok: true, jobId: item.jobId, pending: true });
-    ensurePersistentSenderTab(String(msg.job.url), false).then((senderTab) => {
-      if (item.done || !senderTab || !senderTab.id) return;
-      item.senderTabId = senderTab.id;
-      dedicatedBySenderTab[senderTab.id] = item;
-      item.bootTimer = setTimeout(() => failDedicatedSender(senderTab.id, 'Sender tab khởi động quá hạn'), DEDICATED_SENDER_BOOT_TIMEOUT_MS);
-      if (persistentSenderReady) dispatchDedicatedJob(item);
-      else tell(senderTab.id, { type: 'BOTFAKE_WAVE_SENDER_PING' });
-      if (item.stopRequested || item.uiClosed) tell(senderTab.id, { type: 'BOTFAKE_WAVE_STOP' });
-    }).catch((e) => finishDedicatedSender(item, null, String(e && e.message || e)));
-    return;
-  }
-
-  if (msg.type === 'BOTFAKE_WAVE_SENDER_READY') {
-    if (!tabId || tabId !== persistentSenderTabId) { sendResponse({ ok: false }); return; }
-    persistentSenderReady = true;
-    tell(tabId, { type: 'BOTFAKE_WAVE_SENDER_ROLE' });
-    const item = dedicatedBySenderTab[tabId];
-    if (item) dispatchDedicatedJob(item);
-    sendResponse({ ok: true, jobId: item && item.jobId, persistent: true });
-    return;
-  }
-
-  if (msg.type === 'BOTFAKE_DEDICATED_SEND_DONE') {
-    const item = tabId && dedicatedBySenderTab[tabId];
-    if (!item || item.jobId !== msg.jobId) { sendResponse({ ok: false, error: 'Dedicated job không còn hoạt động' }); return; }
-    sendResponse({ ok: true });
-    finishDedicatedSender(item, msg.result || {}, null);
-    return;
   }
 
   if (msg.type === 'BOTFAKE_WAVE_START') {
@@ -878,15 +657,15 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   }
 
   if (msg.type === 'BOTFAKE_WAVE_STOP') {
-    if (tabId) {
-      const item = dedicatedByUiTab[tabId];
-      if (item) {
-        item.stopRequested = true;
-        if (item.senderTabId) {
-          stopWaveForTab(item.senderTabId);
-          tell(item.senderTabId, { type: 'BOTFAKE_WAVE_STOP' });
-        }
-      } else stopWaveForTab(tabId);
+    if (tabId && waveCtl[tabId]) {
+      waveCtl[tabId].stop = true;
+      ['socket', 'ext'].forEach((name) => {
+        while (waveCtl[tabId].waiters[name].length) waveCtl[tabId].waiters[name].shift()(null);
+      });
+      while (waveCtl[tabId].mainWaiters.length) waveCtl[tabId].mainWaiters.shift()();
+      waveCtl[tabId].timers.forEach((timer) => { try { clearTimeout(timer); } catch (e) { /* ignore */ } });
+      waveCtl[tabId].timers.clear();
+      waveCtl[tabId].socketCool = 0;
     }
     sendResponse({ ok: true });
     return;
@@ -914,34 +693,23 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
 chrome.tabs.onRemoved.addListener((tabId) => {
   if (bgCtl[tabId]) bgCtl[tabId].stop = true;
-  stopWaveForTab(tabId);
-  const ownedSender = dedicatedByUiTab[tabId];
-  if (ownedSender) {
-    ownedSender.uiClosed = true;
-    ownedSender.stopRequested = true;
-    if (ownedSender.senderTabId) {
-      stopWaveForTab(ownedSender.senderTabId);
-      tell(ownedSender.senderTabId, { type: 'BOTFAKE_WAVE_STOP' });
-    }
-  }
-  const dedicated = dedicatedBySenderTab[tabId];
-  if (dedicated) finishDedicatedSender(dedicated, null, 'Sender tab đã đóng khi job chưa hoàn tất');
-  if (tabId === persistentSenderTabId) {
-    persistentSenderTabId = null;
-    persistentSenderReady = false;
-    try { chrome.storage.local.remove(PERSISTENT_SENDER_TAB_KEY, () => void chrome.runtime.lastError); } catch (e) { /* ignore */ }
+  const wave = waveCtl[tabId];
+  if (wave) {
+    wave.stop = true;
+    ['socket', 'ext'].forEach((name) => {
+      while (wave.waiters[name].length) wave.waiters[name].shift()(null);
+    });
+    while (wave.mainWaiters.length) wave.mainWaiters.shift()();
+    wave.timers.forEach((timer) => { try { clearTimeout(timer); } catch (e) { /* ignore */ } });
+    wave.timers.clear();
+    wave.socketCool = 0;
   }
   if (jobs[tabId]) { delete jobs[tabId]; persistJobs(); broadcast(); }
 });
 
 chrome.tabs.onMoved.addListener(() => broadcast());
 chrome.tabs.onUpdated.addListener((tabId, info) => {
-  if (tabId === persistentSenderTabId && info.status === 'loading') persistentSenderReady = false;
   if (info.status === 'complete' || info.url) broadcast();
-});
-
-chrome.action.onClicked.addListener((tab) => {
-  openPersistentSenderFromAction(tab).catch((e) => console.warn('[BOTFAKE] Không mở được tab Sender:', e));
 });
 
 chrome.runtime.onInstalled.addListener(async () => {
