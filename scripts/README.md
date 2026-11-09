@@ -392,6 +392,6 @@ qua kênh chưa thử**, không bao giờ "báo gửi" rồi im lặng.
 
 ## Extension Wave 200 coordinator — test clone
 
-Manifest trong `extension/` hiện chọn duy nhất `pancake-send-lite-wave200.user.js`, bản clone thử nghiệm W200.13 được dựng từ sender đã backup trước tái cấu trúc. Tab giao diện chuyển lượt đã xác nhận sang tab Pancake sender riêng; service worker mở/quản lý tab và chuyển tiến độ/dừng, còn pipeline gửi, Socket và ACK vẫn chạy trong MAIN world của sender tab. Không thay đổi cap/concurrency của pipeline. Clone chưa live-test, không dùng để gửi thật cho tới khi kiểm thử extension trên Pancake.
+Manifest trong `extension/` hiện chọn duy nhất `pancake-send-lite-wave200.user.js`, bản clone thử nghiệm W200.14 được dựng từ sender đã backup trước tái cấu trúc. Bấm biểu tượng extension sẽ mở hoặc focus một tab Pancake Sender duy nhất; tab này được tái sử dụng sau mỗi lượt, không tự đóng khi gửi xong. Nút Gửi ở tab Pancake giao diện chuyển snapshot đã xác nhận sang sender tab; service worker chuyển tiến độ/dừng, còn pipeline Wave, Socket và ACK chạy trong MAIN world của sender tab. Không thay đổi cap/concurrency của pipeline. Clone chưa live-test, không dùng để gửi thật cho tới khi kiểm thử extension trên Pancake.
 
 Sender W200 hiện tại `pancake-send-lite-wave100-lanes.user.js` trên nhánh có phiên bản mới hơn; clone extension W200.13 là bản test độc lập cho thay đổi coordinator, không thay thế hay ghi đè sender đó.

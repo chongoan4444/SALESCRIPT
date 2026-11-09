@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE LITE (Wave 200 · Tab + Clipboard)
 // @namespace    salescript
-// @version      1.91.72-w200.13
+// @version      1.91.72-w200.14
 // @description  BOTFAKE — nền v1.91.72 Tab + Clipboard, dùng luồng gửi Wave 200 (4 làn chính + 2 làn bù song song).
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -47,7 +47,7 @@
   /* ============================ HẰNG SỐ ============================ */
 
   const PANEL_ID = 'ssb-root';          // ssb = SaleScript Bulk — không đụng pk-*/adj-*/pancake-* của script khác
-  const APP_VERSION = '1.91.72-W200.13'; // hiện ở tiêu đề panel — đối chiếu với @version trong header
+  const APP_VERSION = '1.91.72-W200.14'; // hiện ở tiêu đề panel — đối chiếu với @version trong header
   const STYLE_ID = 'ssb-style';
 
   const MAX_NAME_LIST = 12;             // số tên hiển thị khi xác nhận
@@ -112,6 +112,7 @@
                             // để nút "↺ Chọn lại list vừa gửi" chọn lại y nguyên mà KHÔNG phải tải danh sách
     externalSendJob: null,  // job đã được xác nhận ở tab UI, thực thi trong sender tab riêng
     isDedicatedSender: false,
+    isPersistentSender: false,
   };
 
   // Chỉ nhớ conversation ID có Socket xác nhận rejected qua lần retry; không nhớ no-ACK,
@@ -6933,7 +6934,7 @@
     summaryCounters.okApi = summaryCounters.okExt = summaryCounters.okSocket = 0;
     summaryCounters.fail = summaryCounters.unsure = summaryCounters.skipLate = 0;
     setProgress(0, total, 0);
-    logLine('🛡️ Tách lượt gửi sang tab Pancake sender riêng; tab đang dùng chỉ theo dõi tiến độ. Giữ nguyên cap/retry/fallback W200.');
+    logLine('🛡️ Chuyển lượt gửi sang tab Sender Pancake thường trực; tab hiện tại chỉ theo dõi tiến độ. Giữ nguyên cap/retry/fallback W200.');
 
     let resolveDone;
     let rejectDone;
@@ -7222,7 +7223,7 @@
     reportExtJob({ phase: 'send', pct: 0, ok: 0, total: 0 }); // sau reset — không bị lượt cũ đổi thành idle
     render();
     // Tách toàn bộ sender sang tab Pancake nền; tab UI chỉ theo dõi tiến độ, không trực tiếp xử lý Socket/ACK.
-    if (extBgAvailable() && !state.isDedicatedSender) {
+    if (extBgAvailable() && !state.isDedicatedSender && !state.isPersistentSender) {
       const waveChoice = shadow && shadow.getElementById('ssb-wave');
       const waveSize = parseInt((waveChoice && waveChoice.value) || '200', 10) || 200;
       try { await runDedicatedSenderBatch(targets, sendGroups, typedText, imgState, state.quickReply, waveSize); }
@@ -7732,7 +7733,7 @@
     const runGroupWaves200 = async (gtext, fullList) => {
       // In dedicated mode the sender tab owns the Wave pipeline; only the control plane stays in the SW.
       // Avoid bouncing every Wave task through tabs.sendMessage back into this same tab.
-      if (extBgAvailable() && !state.isDedicatedSender) return runExtensionWaveCoordinator(gtext, fullList);
+      if (extBgAvailable() && !state.isDedicatedSender && !state.isPersistentSender) return runExtensionWaveCoordinator(gtext, fullList);
       const socketRetryQueue = [];
       const socketRetryWaiters = [];
       const socketCoolTimers = new Map();
@@ -9959,12 +9960,17 @@
   };
 
   extListen((m) => {
-    if (m && m.type === 'BOTFAKE_WAVE_EXTERNAL_JOB' && m.job) {
+    if (m && m.type === 'BOTFAKE_WAVE_SENDER_ROLE') {
+      state.isPersistentSender = true;
+    } else if (m && m.type === 'BOTFAKE_WAVE_SENDER_PING') {
+      state.isPersistentSender = true;
+      extCall({ type: 'BOTFAKE_WAVE_SENDER_READY' }, 5000);
+    } else if (m && m.type === 'BOTFAKE_WAVE_EXTERNAL_JOB' && m.job) {
       startExternalWaveJob(m.job).catch((e) => {
         extCall({ type: 'BOTFAKE_DEDICATED_SEND_DONE', jobId: m.job.jobId,
           result: { ok: false, error: String(e && e.message || e) } }, 15000);
       });
-    } else if (m && m.type === 'BOTFAKE_WAVE_STOP' && state.isDedicatedSender) {
+    } else if (m && m.type === 'BOTFAKE_WAVE_STOP' && (state.isDedicatedSender || state.isPersistentSender)) {
       state.stopRequested = true;
       applyRunStopButtons();
     }

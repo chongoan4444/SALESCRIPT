@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
-  "name": "BOTFAKE LITE — Wave 200 coordinator test",
-  "version": "200.13.0",
-  "description": "Bản test clone Wave 200.13: service worker điều phối, Pancake tab thực thi Socket/ACK",
+  "name": "BOTFAKE LITE — Persistent Sender test",
+  "version": "200.14.0",
+  "description": "Bản thử nghiệm tab Pancake Sender riêng được tái sử dụng; Socket/ACK chạy trong tab Sender",
   "permissions": [
     "tabs",
     "storage",
@@ -29,8 +29,7 @@
     "128": "icons/icon128.png"
   },
   "action": {
-    "default_title": "BOTFAKE LITE",
-    "default_popup": "popup.html",
+    "default_title": "BOTFAKE LITE — Mở tab Sender",
     "default_icon": {
       "16": "icons/icon16.png",
       "32": "icons/icon32.png",
