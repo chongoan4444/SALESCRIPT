@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         BOTFAKE LITE
+// @name         BOTFAKE LITE (Tab + Clipboard)
 // @namespace    salescript
-// @version      1.91.67
-// @description  BOTFAKE — panel hiện mọi website; gửi/tải list qua extension background.
+// @version      1.91.72
+// @description  BOTFAKE — bản hỗ trợ phím Tab kích hoạt Chạy (có xác nhận) + nút chuyển chế độ gửi bằng Câu trên giao diện / Dữ liệu đang copy trên Clipboard.
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
 // @match        https://pages.fm/*
@@ -41,10 +41,13 @@
 (function () {
   'use strict';
 
+  if (window.__BOTFAKE_TAB_CLIPBOARD_ACTIVE__) return;
+  window.__BOTFAKE_TAB_CLIPBOARD_ACTIVE__ = true;
+
   /* ============================ HẰNG SỐ ============================ */
 
   const PANEL_ID = 'ssb-root';          // ssb = SaleScript Bulk — không đụng pk-*/adj-*/pancake-* của script khác
-  const APP_VERSION = '1.91.67';        // hiện ở tiêu đề panel — đối chiếu với @version trong header
+  const APP_VERSION = '1.91.72';        // hiện ở tiêu đề panel — đối chiếu với @version trong header
   const STYLE_ID = 'ssb-style';
 
   const MAX_NAME_LIST = 12;             // số tên hiển thị khi xác nhận
@@ -71,6 +74,7 @@
   const LOG_KEY = 'ssb_log';           // nhật ký gửi — giữ qua F5
   const UI_KEY = 'ssb_ui_state';       // tick câu + ô nội dung đang gõ — giữ qua F5
   const LAST_SENT_KEY = 'ssb_last_sent_v1'; // ảnh chụp lượt gửi gần nhất — "↺ Chọn lại list vừa gửi"
+  const MSG_MODE_KEY = 'ssb_msg_source_mode'; // 'ui' (câu trên giao diện) | 'clipboard' (dữ liệu đang copy trên clipboard)
 
   /* ============================ TRẠNG THÁI ============================ */
 
@@ -87,6 +91,10 @@
     listKey: '',            // key dựng panel list — tránh build lại HTML khi không đổi
     sending: false,
     stopRequested: false,
+    confirmingSend: false,  // đang mở hộp xác nhận gửi / đọc clipboard — chặn bấm đúp Tab/Chạy
+    sendListFrozen: false,  // snapshot người nhận; bỏ checkbox UI trong suốt lượt chạy
+    msgSource: 'ui',        // 'ui' (gửi bằng câu trên giao diện) | 'clipboard' (gửi bằng dữ liệu đang copy trên clipboard)
+    lastCopiedText: '',     // bản sao lưu text vừa copy trên trang (dự phòng khi trình duyệt chặn clipboard API)
     lastAltClickId: null,      // id đoạn vừa Alt+click lần 1 (để phát hiện click cùng đoạn 2 lần)
     lastAltClickTime: 0,         // thời gian Alt+click lần 1
     sentIds: new Set(),          // id chat đã gửi thành công — giữ qua lượt để "▶ Charging tiếp" không gửi lại
@@ -103,6 +111,10 @@
     lastSent: null,         // ẢNH CHỤP lượt gửi gần nhất { at, typedText, items:[chat…], lists:[{id,name,text}] }
                             // để nút "↺ Chọn lại list vừa gửi" chọn lại y nguyên mà KHÔNG phải tải danh sách
   };
+  try {
+    const savedMode = localStorage.getItem(MSG_MODE_KEY);
+    if (savedMode === 'clipboard' || savedMode === 'ui') state.msgSource = savedMode;
+  } catch (e) { /* ignore */ }
   // Danh sách câu nạp BẤT ĐỒNG BỘ từ IndexedDB (xem loadListsFromStore) — lúc khởi động là rỗng,
   // nạp xong sẽ vẽ lại panel. Xem chú thích "KHO CÂU GỬI (IndexedDB)" để biết vì sao không
   // dùng localStorage nữa (1 câu 5.000 chat ≈ 3,8 MB > quota ~5 MB).
@@ -814,6 +826,12 @@
     if (typeof schedulePreloadSelectedChats === 'function') schedulePreloadSelectedChats(true);
   }
 
+  function getBotChecklistElement() {
+    try { return (shadow && shadow.getElementById('ssb-list')) || document.getElementById('ssb-list') || null; }
+    catch (e) { return null; }
+  }
+
+
   function clearSelection() {
     state.mode = null;
     state.target = null;
@@ -826,6 +844,34 @@
     highlightRows();
   }
 
+
+  function freezeSendChecklist() {
+    state.sendListFrozen = true;
+    state.matches.forEach((m) => { if (m) m.checked = false; });
+    const list = getBotChecklistElement();
+    if (!list) { applyScanButtons(); applyRunStopButtons(); return; }
+    list.classList.add('ssb-send-list-frozen');
+    list.setAttribute('aria-busy', 'true');
+    list.querySelectorAll('input[type=checkbox]').forEach((cb) => cb.remove());
+    applyScanButtons();
+    applyRunStopButtons();
+  }
+
+  function unfreezeSendChecklist(restoreIds) {
+    if (!state.sendListFrozen) return;
+    const restore = restoreIds ? new Set(Array.from(restoreIds, String)) : null;
+    state.matches.forEach((m) => {
+      if (m) m.checked = !!(restore && restore.has(String(m.id)));
+    });
+    state.sendListFrozen = false;
+    state.listKey = ''; // force one clean rebuild after unfreezing
+    const list = getBotChecklistElement();
+    if (list) {
+      list.classList.remove('ssb-send-list-frozen');
+      list.removeAttribute('aria-busy');
+    }
+  }
+
   function persistUiState() {
     try {
       const msgEl = shadow && shadow.getElementById('ssb-msg');
@@ -836,6 +882,7 @@
   function rebuildFromLists() {}
 
   function highlightRows() {
+    if (state.sendListFrozen) return;
     // Idempotent: chỉ thêm/bớt class khi khác — an toàn để gọi liên tục (observer/scroll/poll).
     const matchIds = new Set(state.matches.map((m) => m.id));
     const rootOf = (item) => item.closest('[role="row"]') || item;
@@ -865,7 +912,7 @@
   // Tô lại màu mỗi khi virtual list render lại dòng (cuộn, bấm chọn chat, app cập nhật…)
   let hlScheduled = false;
   function scheduleHighlight() {
-    if (hlScheduled) return;
+    if (state.sendListFrozen || hlScheduled) return;
     hlScheduled = true;
     requestAnimationFrame(() => {
       hlScheduled = false;
@@ -1752,6 +1799,7 @@
 
   // ⚡ Tải danh sách: CHỈ API next_cursor tuần tự. Không cuộn DOM / virtual list.
   async function scanFullList(opts) {
+    if (state.sendListFrozen) return;
     const scanOpts = opts || {};
     if (state.scanning) {
       if (scanOpts.restartIfBusy) {
@@ -3678,6 +3726,7 @@
     const classify = (g) => {
       if (!(g && g.payload)) {
         socketNoAckStreak[pageId] = (socketNoAckStreak[pageId] || 0) + 1;
+        recordSocketAckOutcome('noack', Date.now() - publishedAt, pageId);
         // Publish ĐÃ được giao cho helper rồi mới mất phản hồi: socket chết lúc này KHÔNG
         // chứng minh được frame chưa đi (FB có thể đã nhận) → 'noack' = không rõ, cấm bù
         // bắn lần 2. 'dead' thật (socket chết TRƯỚC khi publish) đã bị chặn ở đầu hàm.
@@ -3685,16 +3734,24 @@
       }
       socketNoAckStreak[pageId] = 0;
       let resp = null;
-      try { resp = JSON.parse(g.payload); } catch (e) { return { kind: 'noack', publishedAt: publishedAt }; }
+      try { resp = JSON.parse(g.payload); } catch (e) {
+        recordSocketAckOutcome('noack', Date.now() - publishedAt, pageId);
+        return { kind: 'noack', publishedAt: publishedAt };
+      }
       const replaced = helper.findAllBlockActions(resp.step, 'replaceOptimsiticMessage') || [];
       const failed = helper.findAllBlockActions(resp.step, 'markOptimisticMessageFailed') || [];
-      if (failed.length && !replaced.length) return { kind: 'rejected' };
+      if (failed.length && !replaced.length) {
+        recordSocketAckOutcome('rejected', Date.now() - publishedAt, pageId);
+        return { kind: 'rejected' };
+      }
       // QUAN TRỌNG: Khi gửi CẢ ẢNH LẪN CHỮ (2 task label "46"), nếu chữ đi được (replaced.length > 0)
       // nhưng ảnh bị từ chối (failed.length > 0), TUYỆT ĐỐI không được trả về 'ok' (sẽ làm mất ảnh mà chỉ có chữ!),
       // mà phải báo 'photo_failed_text_ok' để sendViaSocket upload fbId mới và bắn bù riêng phần ảnh!
       if (hasPhoto && hasText && failed.length > 0 && replaced.length > 0) {
+        recordSocketAckOutcome('rejected', Date.now() - publishedAt, pageId);
         return { kind: 'photo_failed_text_ok' };
       }
+      recordSocketAckOutcome('ok', Date.now() - publishedAt, pageId);
       return { kind: 'ok' };
     };
     // 🔥 NẤC 2 (v1.71.0): bắn xong NHẢ NGAY — không giữ worker chờ ACK của FB (vốn mất ~2,8s/tin).
@@ -3959,6 +4016,9 @@
         // Bắn lại đúng 1 lần qua hàng đợi ưu tiên đan xen công bằng (runPrioritySocket) để giải phóng
         // ngay lập tức, không dồn ứ hàng nghìn ca retry ở đuôi lượt mà vẫn không chặn các chat Lần 1!
         raw = await runPrioritySocket(() => socketPublishSend(helper, pageId, gid, text, attFbIds));
+        if (raw && raw.kind === 'ok') sendDiag.sockRetryRecovered++;
+        else if (raw && raw.kind === 'rejected') sendDiag.sockRetryRejected++;
+        else sendDiag.sockRetryOther++;
         if (raw && raw.kind === 'ok') {
           socketRejectStreak[pageId] = 0;
           socketConfirmedDeadStreak[pageId] = 0;
@@ -4091,7 +4151,7 @@
               if (myRun === runSeq && window && typeof window.__botfakeTrackStatus__ === 'function') window.__botfakeTrackStatus__(conv.id, 'uncertain');
             });
         };
-        // Giữ đúng BUS_PARALLEL_SOCKET (64) frame in-flight trên mỗi kết nối WebSocket:
+        // Giữ số frame in-flight trong giới hạn lane Socket/page (khởi điểm 64, thích ứng 32–96):
         // Worker chờ tới đúng lúc chiếm được ghế trong pageLane (bắt đầu bắn frame) rồi trả về ngay
         // (fired: true) mà không chờ /ls_resp ACK. Nhờ đó 192 worker không xả tràn hàng nghìn lệnh
         // vào pageLane.waiters ở giây thứ 0 (tránh nghẽn HTTP upload ảnh & tránh đứng tiến độ).
@@ -4653,8 +4713,8 @@
   //  • extSendLane (thích ứng 6, dải 6–16): bắn REPLY_INBOX_PHOTO qua Extension khi đã cầm đủ payload.
   //    Tự tăng khi Extension trả nhanh/rõ liên tục, tự giảm khi timeout (AIMD trong noteExtSendOutcome);
   //    bộ ngắt quá tải 3-timeout vẫn giữ nguyên vai trò bảo vệ phía trên lane này.
-  //  • getPageSocketLane (24 luồng/page): điều tiết số frame /ls_req in-flight trên mỗi kết nối WebSocket
-  //    của từng fanpage (tránh vượt ngưỡng burst của edge-chat.facebook.com gây markOptimisticMessageFailed).
+  //  • getPageSocketLane (khởi điểm 64, thích ứng 32–96/page): điều tiết số frame /ls_req in-flight
+  //    trên từng kết nối WebSocket theo độ trễ ACK (giữ tốc độ cao mà tự lùi khi có dấu hiệu nghẽn).
   //  • sideEffectLane (4 luồng): điều tiết các request phụ nền (fill_admin_name, update_global_id).
   const API_SEND_PARALLEL = 48;
   // Khâu dò globalId dùng LANE THÍCH ỨNG thay cho mức cố định: HAR cho thấy GET
@@ -4672,7 +4732,9 @@
   const BUS_PARALLEL_EXT = 10;    // số lệnh adapter.send (REPLY_INBOX_PHOTO) chạy song song — điểm bắt đầu của làn thích ứng Ext
   const EXT_SEND_MIN = 6;         // sàn làn Ext gửi: không thấp hơn mức đã kiểm chứng ổn định
   const EXT_SEND_MAX = 24;        // trần làn Ext gửi: mở tới 24 khi Extension trả lời nhanh/rõ ở lô lớn
-  const BUS_PARALLEL_SOCKET = 64; // số frame Socket (/ls_req) in-flight trên mỗi kết nối WebSocket (kèm giãn nhịp 6ms chống burst; giữ retry + socketConfirmedDeadStreak bảo vệ)
+  const BUS_PARALLEL_SOCKET = 64; // khởi điểm Socket/page; tự tăng/giảm theo ACK khỏe/chậm
+  const SOCKET_LANE_MIN = 32;
+  const SOCKET_LANE_MAX = 96;
   const SIDE_EFFECT_PARALLEL = 8; // số request nền (fill_admin_name / update_global_id) chạy song song
   function makeLane(parallel) {
     let active = 0;
@@ -4729,9 +4791,9 @@
     return enqueue;
   }
 
-  // Lane có GIỚI HẠN ĐỘNG cho riêng khâu dò globalId. Các lane gửi thật vẫn giữ
-  // mức cố định như cũ; chỉ nguồn dễ tự gây nghẽn (HTTP GET /messages và lệnh dò
-  // qua Extension) mới được bộ điều tiết tăng/giảm theo phản hồi thật.
+  // Lane có GIỚI HẠN ĐỘNG cho riêng khâu dò globalId. API/Ext send lanes giữ nguyên;
+  // nguồn dễ tự gây nghẽn (HTTP GET /messages và lệnh dò qua Extension) được tăng/giảm
+  // theo phản hồi thật, còn Socket/page có bộ điều tiết ACK riêng phía dưới.
   function makeAdaptiveLane(initial, min, max) {
     let active = 0;
     let limit = Math.max(min, Math.min(max, initial || min));
@@ -4774,6 +4836,108 @@
       return limit;
     };
     return enqueue;
+  }
+
+  // Lane Socket/page có giới hạn động. Khởi đầu ở cấu hình đã dùng; chỉ tăng khi ACK thành công
+  // nhanh liên tục, giảm khi ACK/no-ACK chậm lặp lại. Rejected recipient không tự hạ lane vì
+  // log thực tế cho thấy rejected có thể là khách bị chặn, không nhất thiết là nghẽn Socket.
+  function makeAdaptivePriorityLane(initial, min, max) {
+    let active = 0;
+    let limit = Math.max(min, Math.min(max, initial || min));
+    let normalSincePriority = 0;
+    const waiters = [];
+    const pWaiters = [];
+    const nextWaiter = () => {
+      if (pWaiters.length && (!waiters.length || normalSincePriority >= 1)) {
+        normalSincePriority = 0;
+        return pWaiters.shift();
+      }
+      if (waiters.length) {
+        normalSincePriority++;
+        return waiters.shift();
+      }
+      if (pWaiters.length) {
+        normalSincePriority = 0;
+        return pWaiters.shift();
+      }
+      return null;
+    };
+    const pump = () => {
+      if (state.stopRequested) {
+        while (pWaiters.length) pWaiters.shift()();
+        while (waiters.length) waiters.shift()();
+        return;
+      }
+      while (active < limit && (waiters.length || pWaiters.length)) {
+        const next = nextWaiter();
+        if (!next) break;
+        next();
+      }
+    };
+    const enqueue = (fn, opts) => new Promise((resolve) => {
+      const start = () => {
+        if (state.stopRequested) { resolve({ ok: false, sent: false, error: 'Đã dừng' }); return; }
+        active++;
+        Promise.resolve().then(fn)
+          .catch((e) => ({ ok: false, sent: false, error: 'Lỗi kênh: ' + (e && e.message || e) }))
+          .then((r) => { active--; pump(); resolve(r); });
+      };
+      if (active < limit && !waiters.length && !pWaiters.length) start();
+      else if (opts && opts.priority) {
+        if (active < limit) start();
+        else pWaiters.push(start);
+      } else {
+        waiters.push(start);
+        pump();
+      }
+    });
+    enqueue.priority = (fn) => enqueue(fn, { priority: true });
+    enqueue.busy = () => active >= limit || waiters.length > 0 || pWaiters.length > 0;
+    enqueue.activeCount = () => active;
+    enqueue.waitingCount = () => waiters.length + pWaiters.length;
+    enqueue.getLimit = () => limit;
+    enqueue.setLimit = (next) => {
+      limit = Math.max(min, Math.min(max, Math.round(next) || min));
+      pump();
+      return limit;
+    };
+    return enqueue;
+  }
+
+  const socketPageLaneCtl = Object.create(null);
+  function noteSocketPageLaneOutcome(pageId, kind, latencyMs) {
+    try {
+      const pid = String(pageId || '');
+      const lane = pid && pageSocketLanes[pid];
+      if (!lane) return;
+      const ctl = socketPageLaneCtl[pid] || (socketPageLaneCtl[pid] = { fastOk: 0, slowAck: 0 });
+      const ms = Math.max(0, Number(latencyMs) || 0);
+      if (kind === 'ok' && ms < 2500) {
+        ctl.fastOk++;
+        ctl.slowAck = 0;
+        if (ctl.fastOk >= 20 && lane.getLimit() < SOCKET_LANE_MAX) {
+          ctl.fastOk = 0;
+          const next = lane.setLimit(lane.getLimit() + 8);
+          logLine('⚡ Socket ACK nhanh ổn định — tăng lane page ' + pid + ' lên ' + next + '.');
+        }
+      } else if (kind === 'noack' || ms >= 6000) {
+        ctl.fastOk = 0;
+        ctl.slowAck++;
+        if (ctl.slowAck >= 2 && lane.getLimit() > SOCKET_LANE_MIN) {
+          ctl.slowAck = 0;
+          const next = lane.setLimit(Math.max(SOCKET_LANE_MIN, Math.floor(lane.getLimit() * 0.8)));
+          logLine('🐢 ACK Socket chậm/lâu mất — giảm lane page ' + pid + ' xuống ' + next + '.');
+        }
+      }
+      // Rejected không tự giảm luồng: khi đó thường là trạng thái recipient, không phải ACK congestion.
+    } catch (e) { /* điều tiết lane không được làm hỏng gửi */ }
+  }
+
+  function getPageSocketLaneRange() {
+    const values = Object.keys(pageSocketLanes).map((pid) => pageSocketLanes[pid].getLimit());
+    if (!values.length) return String(BUS_PARALLEL_SOCKET);
+    const lo = Math.min.apply(Math, values), hi = Math.max.apply(Math, values);
+    return lo === hi ? String(lo) : (lo + '–' + hi);
   }
 
   const apiSendLane = makeLane(API_SEND_PARALLEL);
@@ -4974,7 +5138,10 @@
   function getPageSocketLane(pageId) {
     const pid = String(pageId || '');
     if (!pid) return socketLane;
-    if (!pageSocketLanes[pid]) pageSocketLanes[pid] = makeLane(BUS_PARALLEL_SOCKET);
+    if (!pageSocketLanes[pid]) {
+      pageSocketLanes[pid] = makeAdaptivePriorityLane(BUS_PARALLEL_SOCKET, SOCKET_LANE_MIN, SOCKET_LANE_MAX);
+      socketPageLaneCtl[pid] = { fastOk: 0, slowAck: 0 };
+    }
     return pageSocketLanes[pid];
   }
   const sideEffectLane = makeLane(SIDE_EFFECT_PARALLEL);
@@ -5756,7 +5923,25 @@
   const buStats = { ok: 0, cancelled: 0, byWhy: {} };
   // Đếm các lần BẮN LẠI cùng nội dung ngay trong 1 lần gửi Socket (retry khi FB báo
   // rejected + bắn lại riêng ảnh) — in vào TỔNG HỢP để đối chiếu với phản ánh lặp của khách
-  const sendDiag = { sockRetry: 0, photoRetry: 0 };
+  const sendDiag = {
+    sockRetry: 0, sockRetryRecovered: 0, sockRetryRejected: 0, sockRetryOther: 0, photoRetry: 0,
+    socketAckOk: 0, socketAckRejected: 0, socketNoAck: 0,
+    socketAckMsTotal: 0, socketAckMsMax: 0,
+  };
+
+  function recordSocketAckOutcome(kind, elapsedMs, pageId) {
+    try {
+      const ms = Math.max(0, Number(elapsedMs) || 0);
+      noteSocketPageLaneOutcome(pageId, kind, ms);
+      if (kind === 'ok') sendDiag.socketAckOk++;
+      else if (kind === 'rejected') sendDiag.socketAckRejected++;
+      else if (kind === 'noack') sendDiag.socketNoAck++;
+      if (kind === 'ok' || kind === 'rejected' || kind === 'noack') {
+        sendDiag.socketAckMsTotal += ms;
+        sendDiag.socketAckMsMax = Math.max(sendDiag.socketAckMsMax, ms);
+      }
+    } catch (e) { /* diagnostics must never affect sending */ }
+  }
   function buWhyBucket(why) {
     const w = String(why || '');
     if (w.indexOf('API từ chối') === 0) return 'API tu choi';
@@ -5934,7 +6119,15 @@
             ? ' | 🧯 Ext quá hạn ' + extTimeoutStats.timeout + ' · kiểm chứng thấy tin ' + extTimeoutStats.found + ' · chưa thấy tin ' + extTimeoutStats.notFound + ' · không kiểm chứng được ' + extTimeoutStats.unknown + ' · bỏ qua lúc Ext quá tải ' + extTimeoutStats.skipped
             : '')
           + ((sendDiag.sockRetry || sendDiag.photoRetry)
-            ? ' | 🔂 Socket bắn lại sau rejected: ' + sendDiag.sockRetry + ' · bắn lại ảnh: ' + sendDiag.photoRetry
+            ? ' | 🔂 Socket retry ' + sendDiag.sockRetry + ' (cứu được ' + sendDiag.sockRetryRecovered
+              + ' · vẫn rejected ' + sendDiag.sockRetryRejected + ' · kết quả khác ' + sendDiag.sockRetryOther
+              + ') · retry ảnh ' + sendDiag.photoRetry
+            : '')
+          + ((sendDiag.socketAckOk || sendDiag.socketAckRejected || sendDiag.socketNoAck)
+            ? ' | 📡 ACK Socket: OK ' + sendDiag.socketAckOk + ' · rejected ' + sendDiag.socketAckRejected
+              + ' · no-ACK ' + sendDiag.socketNoAck + ' · TB ' + Math.round(sendDiag.socketAckMsTotal
+                / Math.max(1, sendDiag.socketAckOk + sendDiag.socketAckRejected + sendDiag.socketNoAck))
+              + 'ms · max ' + sendDiag.socketAckMsMax + 'ms'
             : '')
           + ' | ⏱ Tổng thời gian: ' + elapsedSec + 's');
         logLine('🧭 Chẩn đoán globalId: cache ' + gidStats.cacheHit
@@ -5950,7 +6143,8 @@
           + ' · gate bỏ Ext no-gid ' + gidStats.gateSkip
           + ' · lane HTTP ' + ctxFetchLane.getLimit()
           + ' / Ext dò ' + gidExtLane.getLimit()
-          + ' / Ext gửi ' + extSendLane.getLimit());
+          + ' / Ext gửi ' + extSendLane.getLimit()
+          + ' / Socket/page ' + getPageSocketLaneRange());
       }
     } catch (e) { /* ignore */ }
   }
@@ -6366,67 +6560,136 @@
     return [{ text: typedText || '', list: (matches || []).slice() }];
   }
 
+  async function readClipboardText() {
+    try {
+      if (navigator.clipboard && typeof navigator.clipboard.readText === 'function') {
+        const txt = await Promise.race([
+          navigator.clipboard.readText(),
+          new Promise((_, reject) => setTimeout(() => reject(new Error('clipboard timeout')), 800)),
+        ]);
+        if (typeof txt === 'string' && txt.trim()) {
+          state.lastCopiedText = txt;
+          return txt;
+        }
+      }
+    } catch (e) { /* trình duyệt chưa cấp quyền hoặc chặn readText -> dùng bản copy gần nhất trên trang */ }
+    return state.lastCopiedText || '';
+  }
+
   async function sendToAll() {
-    if (state.sending) return; // chặn bấm đúp / gọi đúp → gửi TRÙNG
-    // Cờ listIncomplete CHỈ nói về lần QUÉT DANH SÁCH TRÊN TRANG (scanFullList: API trả thiếu
-    // so với màn hình). Chat của "câu đã lưu" / "list vừa gửi" là dữ liệu tự thân (items) →
-    // không phụ thuộc lần quét trang, nên không chặn oan (trước đây bị chặn → phải tải lại).
+    try { markSendIdleIfSettled(); } catch (e0) { /* ignore */ }
+    if (state.sending || state.confirmingSend) return; // chặn bấm đúp / gọi đúp → gửi TRÙNG
+    if (state.sendListFrozen) {
+      logLine('⏳ Danh sách đang được xử lý — chờ lượt gửi/cập nhật hiện tại hoàn tất rồi chạy lượt mới.');
+      return;
+    }
     if (state.listIncomplete) {
       alert('Danh sách tải CHƯA ĐẦY ĐỦ nên chưa thể gửi.\nHãy bấm “⚡ Tải danh sách” để tải lại cho đủ rồi mới gửi.');
       logLine('⛔ Chặn gửi: danh sách tải chưa đầy đủ — bấm ⚡ Tải danh sách để tải lại.');
       return;
     }
-    // LƯU Ý: panel nằm trong shadow DOM → phải lấy phần tử qua shadow.getElementById,
-    // document.querySelector sẽ không thấy (đây là nguyên nhân lỗi "Hãy nhập nội dung câu cần gửi")
-    const msgEl = shadow && shadow.getElementById('ssb-msg');
-    const typedText = (msgEl && msgEl.value || '').trim() || ((state.quickReply && state.quickReply.text) || ''); // câu nhanh khôi phục sau F5 mà ô câu trống → dùng chữ của câu nhanh
-    const imgState = state.image || null;
-    let targets = state.matches.filter((m) => m.checked);
-    if (!targets.length) {
-      alert('Chưa có đoạn chat nào được chọn.\nHãy bấm ⚡ Tải danh sách rồi ☑ Chọn tất cả.');
+    state.confirmingSend = true;
+    const selectedSnapshot = state.matches.filter((m) => m && m.checked).map((m) => ({ ...m }));
+    if (!selectedSnapshot.length) {
+      state.confirmingSend = false;
+      applyRunStopButtons();
+      alert('Chưa có đoạn chat nào được chọn.\nHãy bấm ⚡ Tải danh sách rồi ☑ Chọn tất cả (hoặc Alt+Click chọn chat).');
       return;
     }
-    // loại dòng trùng id — 1 chat chỉ được gửi 1 lần
+    freezeSendChecklist();
+    let sendConfirmed = false;
+    let typedText = '';
+    const useClipboardMode = state.msgSource === 'clipboard';
+    try {
+      if (useClipboardMode) {
+        const rawClip = await readClipboardText();
+        typedText = String(rawClip || '').trim();
+        const clipPreviewEl = shadow && shadow.getElementById('ssb-clip-preview-text');
+        if (clipPreviewEl) {
+          clipPreviewEl.textContent = typedText
+            ? ('Nội dung Clipboard vừa đọc: “' + clip(typedText, 120) + '”')
+            : '(Clipboard hiện đang trống hoặc chưa cấp quyền đọc Clipboard)';
+        }
+      } else {
+        const msgEl = shadow && shadow.getElementById('ssb-msg');
+        typedText = (msgEl && msgEl.value || '').trim() || ((state.quickReply && state.quickReply.text) || '');
+      }
+      // Nhường 20ms để chu kỳ keydown/keyup của phím Tab hoàn tất trước khi mở hộp thoại modal alert/confirm
+      await sleep(20);
+      const imgState = state.image || null;
+      let targets = selectedSnapshot.slice();
+      {
+        const seenIds = new Set();
+        const uniq = [];
+        targets.forEach((m) => {
+          if (!seenIds.has(m.id)) { seenIds.add(m.id); uniq.push(m); }
+        });
+        if (uniq.length !== targets.length) {
+          logLine('⚠ Loại ' + (targets.length - uniq.length) + ' dòng trùng lặp trong danh sách gửi');
+        }
+        targets = uniq;
+      }
+      if (state.sentIds && state.sentIds.size > 0) {
+        const before = targets.length;
+        targets = targets.filter((m) => !state.sentIds.has(m.id));
+        if (targets.length < before) {
+          logLine('⏩ Bỏ qua ' + (before - targets.length) + ' chat đã gửi — chỉ gửi phần còn lại.');
+        }
+      }
+      let sendGroups = buildSendGroups(targets, state.savedLists, typedText);
+      const textsAll = sendGroups.map((g) => g.text).filter((t) => t && t.trim());
+      if (!textsAll.length && !imgState && !(state.quickReply && state.quickReply.items && state.quickReply.items.length)) {
+        if (useClipboardMode) {
+          alert('📋 Đang ở chế độ gửi bằng dữ liệu Clipboard nhưng Clipboard hiện đang trống (hoặc chưa cho phép quyền đọc Clipboard).\nHãy copy nội dung tin cần gửi rồi bấm Chạy / phím Tab lại.');
+        } else {
+          alert('Hãy nhập nội dung câu cần gửi (hoặc chọn ảnh).');
+        }
+        return;
+      }
+      const names = targets.slice(0, MAX_NAME_LIST).map((m) => m.name || m.id).join(', ')
+        + (targets.length > MAX_NAME_LIST ? ', …' : '');
+      const nComment = targets.filter((m) => m.type === 'comment').length;
+      const warnComment = nComment
+        ? '\n\n⚠ Trong đó ' + nComment + ' chat loại BÌNH LUẬN — sẽ gửi dưới dạng TRẢ LỜI BÌNH LUẬN (công khai dưới bài viết)!'
+        : '';
+      const imgNote = imgState ? '\n\n📷 Kèm ảnh: ' + (imgState.name || 'ảnh')
+        : (state.quickReply && state.quickReply.items && state.quickReply.items.length)
+          ? '\n\n⚡ Câu nhanh "' + state.quickReply.shortcut + '" — ' + state.quickReply.items.length + ' ảnh (bắt bằng Alt+Q)' : '';
+      const modeTag = useClipboardMode ? ' [📋 TỪ CLIPBOARD]' : ' [📝 CÂU TRÊN GIAO DIỆN]';
+      const textNote = textsAll.length > 1
+        ? '\n\n📝 ' + textsAll.length + ' nội dung — mỗi câu được gửi đúng chữ đã lưu: '
+          + textsAll.map((t) => '“' + clip(t, 40) + '”').join(', ')
+        : '';
+      if (!confirm('Gửi ' + (textsAll.length > 1 ? textsAll.length + ' nội dung' : (textsAll.length ? '1 câu' + modeTag : 'ảnh'))
+        + ' tới ' + targets.length + ' đoạn chat đã chọn?\n\n'
+        + (textsAll.length === 1 ? '“' + clip(textsAll[0] || '(chỉ gửi ảnh)', 160) + '”' : '(mỗi câu đúng nội dung đã lưu)')
+        + textNote + imgNote + '\n\nNhận: ' + names + warnComment)) return;
+      sendConfirmed = true;
+    } finally {
+      state.confirmingSend = false;
+      if (!sendConfirmed) {
+        unfreezeSendChecklist(selectedSnapshot.map((m) => m.id));
+        render();
+      }
+    }
+    if (state.matches.length) {
+      clearSelection();
+      logLine('🧹 Đã xóa checkbox/chọn chat ngay khi bắt đầu lượt gửi.');
+    }
+    const imgState = state.image || null;
+    let targets = selectedSnapshot.slice();
     {
       const seenIds = new Set();
       const uniq = [];
       targets.forEach((m) => {
         if (!seenIds.has(m.id)) { seenIds.add(m.id); uniq.push(m); }
       });
-      if (uniq.length !== targets.length) {
-        logLine('⚠ Loại ' + (targets.length - uniq.length) + ' dòng trùng lặp trong danh sách gửi');
-      }
       targets = uniq;
     }
-    // Bỏ qua chat đã gửi ở lượt trước (khi bấm "▶ Charging tiếp")
     if (state.sentIds && state.sentIds.size > 0) {
-      const before = targets.length;
       targets = targets.filter((m) => !state.sentIds.has(m.id));
-      if (targets.length < before) {
-        logLine('⏩ Bỏ qua ' + (before - targets.length) + ' chat đã gửi — chỉ gửi phần còn lại.');
-      }
     }
-    // nội dung sẽ gửi: câu đã tích → chữ của TỪNG CÂU; chat lẻ → ô đang gõ
     let sendGroups = buildSendGroups(targets, state.savedLists, typedText);
-    const textsAll = sendGroups.map((g) => g.text).filter((t) => t && t.trim());
-    if (!textsAll.length && !imgState && !(state.quickReply && state.quickReply.items && state.quickReply.items.length)) { alert('Hãy nhập nội dung câu cần gửi (hoặc chọn ảnh).'); return; }
-    const names = targets.slice(0, MAX_NAME_LIST).map((m) => m.name || m.id).join(', ')
-      + (targets.length > MAX_NAME_LIST ? ', …' : '');
-    const nComment = targets.filter((m) => m.type === 'comment').length;
-    const warnComment = nComment
-      ? '\n\n⚠ Trong đó ' + nComment + ' chat loại BÌNH LUẬN — sẽ gửi dưới dạng TRẢ LỜI BÌNH LUẬN (công khai dưới bài viết)!'
-      : '';
-    const imgNote = imgState ? '\n\n📷 Kèm ảnh: ' + (imgState.name || 'ảnh')
-      : (state.quickReply && state.quickReply.items && state.quickReply.items.length)
-        ? '\n\n⚡ Câu nhanh "' + state.quickReply.shortcut + '" — ' + state.quickReply.items.length + ' ảnh (bắt bằng Alt+Q)' : '';
-    const textNote = textsAll.length > 1
-      ? '\n\n📝 ' + textsAll.length + ' nội dung — mỗi câu được gửi đúng chữ đã lưu: '
-        + textsAll.map((t) => '“' + clip(t, 40) + '”').join(', ')
-      : '';
-    if (!confirm('Gửi ' + (textsAll.length > 1 ? textsAll.length + ' nội dung' : (textsAll.length ? '1 câu' : 'ảnh'))
-      + ' tới ' + targets.length + ' đoạn chat đã chọn?\n\n'
-      + (textsAll.length === 1 ? '“' + clip(textsAll[0] || '(chỉ gửi ảnh)', 120) + '”' : '(mỗi câu đúng nội dung đã lưu)')
-      + textNote + imgNote + '\n\nNhận: ' + names + warnComment)) return;
 
     // ĐÁNH DẤU ĐANG GỬI NGAY từ trước bước lọc: bước lọc tag/tải ảnh có thể chờ API —
     // không chặn đúp ở đây thì bấm lần 2 chạy song song lần 1 (log hiện 2 dòng lọc)
@@ -6478,7 +6741,10 @@
     extTimeoutStats.notFound = 0; extTimeoutStats.unknown = 0;
     extSendCtl.probeInFlight = false; // lượt mới không được kẹt bởi thăm dò của lượt cũ đã dừng
     resetGidStats();
-    sendDiag.sockRetry = 0; sendDiag.photoRetry = 0;
+    sendDiag.sockRetry = 0; sendDiag.sockRetryRecovered = 0; sendDiag.sockRetryRejected = 0;
+    sendDiag.sockRetryOther = 0; sendDiag.photoRetry = 0;
+    sendDiag.socketAckOk = 0; sendDiag.socketAckRejected = 0; sendDiag.socketNoAck = 0;
+    sendDiag.socketAckMsTotal = 0; sendDiag.socketAckMsMax = 0;
     batchStats.finalLogged = false;
     reportExtJob({ phase: 'send', pct: 0, ok: 0, total: 0 }); // sau reset — không bị lượt cũ đổi thành idle
     render();
@@ -6548,7 +6814,8 @@
           logLine('⛔ Không tải được ảnh (' + up.error + ') — HỦY gửi để tránh gửi thiếu ảnh.');
           state.sending = false;
           batchStats.active = false;
-          reportExtJob({ phase: 'idle' });
+          unfreezeSendChecklist();
+            reportExtJob({ phase: 'idle' });
           stopKeepAliveAudio();
           render();
           return;
@@ -7008,12 +7275,6 @@
             + ' (trung bình ' + (totalAll / Math.max(1, (Date.now() - batchStats.startedAt) / 1000) * 60).toFixed(0) + ' tin/phút).'));
     }
     updateBatchSummaryUI();
-    // Gửi xong → TỰ BỎ CHỌN các đoạn chat đã đánh dấu (giống nút "Xóa"): dấu chọn đã "tiêu" vào
-    // lượt gửi này, để sẵn sàng chọn lượt mới — và bấm chạy lại không bao giờ dính dấu cũ (chống trùng).
-    if (state.matches.length) {
-      clearSelection();
-      logLine('🧹 Đã tự bỏ chọn các chat vừa gửi.');
-    }
     render();
   }
 
@@ -7148,11 +7409,16 @@
   }
 
   function buildPanel() {
-    if (window.__BOTFAKE_TAB_CLIPBOARD_ACTIVE__) return;
-    if (document.getElementById(PANEL_ID)) return;
+    const existingHost = document.getElementById(PANEL_ID);
+    if (existingHost) {
+      if (existingHost.getAttribute('data-tab-clip') === '1' && shadow) return;
+      try { existingHost.remove(); } catch (e0) { /* ignore */ }
+      shadow = null;
+    }
     ensureStyle();
     const host = document.createElement('div');
     host.id = PANEL_ID;
+    host.setAttribute('data-tab-clip', '1');
     host.style.cssText = 'position:fixed;right:12px;bottom:12px;z-index:2147483646;font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;';
     shadow = host.attachShadow({ mode: 'open' });
     shadow.innerHTML = `
@@ -7277,7 +7543,7 @@
         </div>
         <div class="body" id="ssb-body">
           <div class="row" style="align-items:center;gap:6px">
-            <button class="b b-green" id="ssb-send" style="flex:1">▶ Chạy</button>
+            <button class="b b-green" id="ssb-send" style="flex:1" title="Bấm nút này hoặc nhấn phím Tab để chạy (có bảng xác nhận trước khi gửi)">▶ Chạy (Tab)</button>
             <button class="b b-red" id="ssb-stop" disabled style="flex:1">⏹ Dừng</button>
           </div>
           <div class="prog"><i id="ssb-bar"></i></div>
@@ -7298,8 +7564,15 @@
           <div class="prog scan"><i id="ssb-scanbar"></i></div>
           <div class="prog-stat scan" id="ssb-scanstat">Tải DS: 0%</div>
           <div>
-            <div class="label">2) Câu cần gửi</div>
+            <div class="row" style="align-items:center;justify-content:space-between;margin-bottom:4px">
+              <div class="label" style="margin:0">2) Câu cần gửi</div>
+              <button class="b b-blue" id="ssb-msg-mode" type="button" style="padding:3px 8px;font-size:11px" title="Bấm để chuyển đổi qua lại giữa 2 chế độ: Gửi bằng câu trên giao diện ↔ Gửi bằng dữ liệu đang copy trên Clipboard">📝 Chế độ: Câu trên giao diện</button>
+            </div>
             <textarea id="ssb-msg" placeholder="Nhập 1 câu sẽ gửi cho tất cả đoạn chat ở trên…"></textarea>
+            <div class="snippet-box" id="ssb-clip-box" style="display:none;border-color:#a855f7;color:#f3e8ff;background:#1e1033">
+              📋 <b>Đang bật: Gửi bằng dữ liệu trên Clipboard</b><br>
+              <span id="ssb-clip-preview-text" style="color:#d8b4fe;font-size:10.5px">Khi bấm <b>▶ Chạy</b> hoặc nhấn phím <b>Tab</b>, script sẽ tự lấy nội dung đang copy trên Clipboard và hiện hộp xác nhận trước khi gửi.</span>
+            </div>
             <div class="row" style="align-items:center">
               <button class="b b-gray" id="ssb-img-pick" title="Bấm nút này rồi CLICK vào 1 ảnh bất kỳ trên giao diện Pancake (ảnh trong chat, ảnh mẫu…) — ảnh đó sẽ được dùng làm ảnh gửi">🖼 Chọn ảnh trên trang</button>
               <span class="hint" id="ssb-img-info">Chưa chọn — bấm nút rồi click 1 ảnh trên giao diện (hoặc Ctrl+V dán ảnh)</span>
@@ -7737,6 +8010,7 @@
       } catch (err) { /* ignore */ }
     });
     on('ssb-selall', 'click', async () => {
+      if (state.sendListFrozen) return;
       if (!state.allRows || !state.allRows.size || state.allRowsPartial) {
         logLine('⚡ Chưa tải đủ danh sách — tự tải toàn bộ rồi chọn tất cả…');
         await scanFullList({ full: true, restartIfBusy: true });
@@ -7756,6 +8030,7 @@
       render();
     });
     on('ssb-to-end', 'click', async () => {
+      if (state.sendListFrozen) return;
       // Chọn TẤT CẢ chat từ chat đang mở (trong app) trở xuống cuối danh sách
       const info = selectedRowInfo();
       if (!info) {
@@ -7795,11 +8070,13 @@
       }
     });
     on('ssb-clear', 'click', () => {
+      if (state.sendListFrozen) return;
       clearSelection();
       logLine('Đã xóa lựa chọn');
       render();
     });
     on('ssb-scan', 'click', async () => {
+      if (state.sendListFrozen) return;
       if (state.scanning) {
         state.scanStopRequested = true;
         logLine('⏹ Đã yêu cầu dừng tải danh sách — dùng ngay số chat vừa tải!');
@@ -7914,21 +8191,63 @@
       const pagesArr = (st0 && st0.pages && st0.pages.activated) || [];
       warmUpSockets(pagesArr.map((x) => ({ pageId: x && x.id })));
     } catch (e) { /* ignore */ }
-        on('ssb-send', 'click', () => {
-      if (state.sending) return;
+    const applyMsgSourceModeUI = () => {
+      const modeBtn = root.getElementById('ssb-msg-mode');
+      const msgEl2 = root.getElementById('ssb-msg');
+      const clipBox = root.getElementById('ssb-clip-box');
+      const isClip = state.msgSource === 'clipboard';
+      if (modeBtn) {
+        modeBtn.textContent = isClip ? '📋 Chế độ: Dữ liệu Clipboard' : '📝 Chế độ: Câu trên giao diện';
+        modeBtn.style.background = isClip ? '#9333ea' : '#2563eb';
+        modeBtn.style.color = '#fff';
+      }
+      if (msgEl2) msgEl2.style.display = isClip ? 'none' : '';
+      if (clipBox) clipBox.style.display = isClip ? '' : 'none';
+    };
+    applyMsgSourceModeUI();
+    on('ssb-msg-mode', 'click', async () => {
+      state.msgSource = (state.msgSource === 'clipboard') ? 'ui' : 'clipboard';
+      try { localStorage.setItem(MSG_MODE_KEY, state.msgSource); } catch (e) { /* ignore */ }
+      applyMsgSourceModeUI();
+      if (state.msgSource === 'clipboard') {
+        const previewEl = root.getElementById('ssb-clip-preview-text');
+        const txt = String(await readClipboardText() || '').trim();
+        if (previewEl) {
+          previewEl.textContent = txt
+            ? ('Đang có trên Clipboard: “' + clip(txt, 120) + '” — bấm ▶ Chạy (hoặc phím Tab) để xác nhận & gửi.')
+            : 'Khi bấm ▶ Chạy hoặc nhấn phím Tab, script sẽ tự lấy nội dung đang copy trên Clipboard và hiện hộp xác nhận trước khi gửi.';
+        }
+        logLine('📋 Đã chuyển sang chế độ: GỬI BẰNG DỮ LIỆU TRÊN CLIPBOARD');
+      } else {
+        logLine('📝 Đã chuyển sang chế độ: GỬI BẰNG CÂU TRÊN GIAO DIỆN');
+      }
+    });
+    const triggerSendRun = () => {
+      try { markSendIdleIfSettled(); } catch (e0) { /* ignore */ }
+      if (state.confirmingSend) return;
+      if (state.sending) {
+        logLine('⏳ Đang trong lượt gửi — hãy chờ hoàn tất hoặc bấm ⏹ Dừng trước khi chạy lượt mới.');
+        return;
+      }
       if (state.sentIds && state.sentIds.size > 0) {
         logLine('⏩ Có ' + state.sentIds.size + ' chat đã gửi ở lượt trước — sẽ bỏ qua, chỉ gửi phần còn lại.');
       }
       sendToAll().catch((err) => {
+        state.confirmingSend = false;
         // Đường chốt cuối: exception nào thoát khỏi sendToAll cũng phải nhả nút + tắt overlay
         logLine('⛔ Lỗi ngoài dự kiến khi gửi: ' + (err && err.message || err) + ' — dừng lượt.');
         state.stopRequested = true;
         batchStats.loopFinished = true;
         markSendIdleIfSettled();
+        if (!state.sending) {
+          unfreezeSendChecklist();
+          }
         reportExtJob({ phase: 'idle' });
         render();
       });
-    });
+    };
+    window.__botfakeTriggerSend__ = triggerSendRun;
+    on('ssb-send', 'click', triggerSendRun);
     const requestStop = () => {
       if (!state.sending) return;
       state.stopRequested = true;
@@ -8024,6 +8343,11 @@
     if (!shadow) return;
     const scan = shadow.getElementById('ssb-scan');
     if (!scan) return;
+    if (state.sendListFrozen) {
+      scan.disabled = true;
+      scan.textContent = '🔒 Đang gửi — tạm khóa tải danh sách';
+      return;
+    }
     scan.disabled = false;
     if (state.scanning) {
       scan.textContent = state.scanStopRequested
@@ -8037,11 +8361,16 @@
     const send = shadow.getElementById('ssb-send');
     const stop = shadow.getElementById('ssb-stop');
     const busy = !!state.sending;
+    const locked = !!(state.sendListFrozen || state.confirmingSend);
+    ['ssb-selall', 'ssb-to-end', 'ssb-clear'].forEach((id) => {
+      const btn = shadow.getElementById(id);
+      if (btn) btn.disabled = locked;
+    });
     if (send) {
-      send.disabled = busy;
+      send.disabled = busy || locked;
       send.textContent = busy
         ? (state.stopRequested ? '⏳ Đang dừng…' : '⏳ Đang gửi…')
-        : '▶ Chạy';
+        : (locked ? '🔒 Đang khóa danh sách…' : '▶ Chạy (Tab)');
     }
     if (stop) {
       stop.disabled = !busy;
@@ -8057,9 +8386,11 @@
     if (!batchStats.loopFinished && !state.stopRequested) return;
     if (state.stopRequested) {
       state.sending = false;
+      unfreezeSendChecklist();
       applyRunStopButtons();
       stopKeepAliveAudio();
       reportExtJob({ phase: 'idle' });
+      render();
       return;
     }
     let pending = 0;
@@ -8069,9 +8400,11 @@
       return;
     }
     state.sending = false;
+    unfreezeSendChecklist();
     applyRunStopButtons();
     stopKeepAliveAudio();
     reportExtJob({ phase: 'idle' });
+    render();
   }
 
   function setProgress(done, total, ok) {
@@ -8130,8 +8463,8 @@
     const cnt = shadow.getElementById('ssb-count');
     if (cnt) cnt.textContent = String(state.matches.length);
 
-    const list = shadow.getElementById('ssb-list');
-    if (list) {
+    const list = getBotChecklistElement();
+    if (list && !state.sendListFrozen) {
       // Với chuỗi hàng nghìn chat: chỉ dựng lại HTML danh sách khi ĐỔI danh sách/tick —
       // không build lại mỗi lần render (tiến độ gửi cập nhật liên tục sẽ gây đơ).
       const listKey = state.matches.map((m) => m.id + '~' + (m.checked ? 1 : 0)).join('|');
@@ -8231,8 +8564,7 @@
 
   // Chặn ở các event "down/up" của chuột — app không được mở chat khi đang chọn chuỗi
   function onRowGesture(e) {
-    if (window.__BOTFAKE_TAB_CLIPBOARD_ACTIVE__) return;
-    if (!rowGuardOn()) return;                  // người dùng đã bỏ tích "Chặn mở chat"
+    if (state.sendListFrozen || !rowGuardOn()) return;                  // người dùng đã bỏ tích "Chặn mở chat"
     if (!altHeldNow(e) && !ctrlHeldNow(e) && !state.pickMode) return; // chuột thường → không can thiệp
     const info = convRowTarget(e);
     if (!info) return;
@@ -8240,9 +8572,9 @@
   }
 
   function onDocClick(e) {
-    if (window.__BOTFAKE_TAB_CLIPBOARD_ACTIVE__) return;
+    if (state.sendListFrozen) return;
     // Xử lý click trong panel BOTFAKE (#ssb-list): Ctrl+click chọn/bỏ chọn cùng snippet
-    const listEl = shadow && shadow.getElementById('ssb-list');
+    const listEl = getBotChecklistElement();
     if (listEl && listEl.contains(e.target)) {
       const row = e.target.closest && e.target.closest('.item');
       if (row) {
@@ -8381,24 +8713,59 @@
   }
 
   function onKeydown(e) {
-    if (window.__BOTFAKE_TAB_CLIPBOARD_ACTIVE__) return;
+    if (!e || e.__botfakeKeyHandled) return;
+    const isTabKey = (e.key === 'Tab' || e.code === 'Tab' || e.keyCode === 9 || e.which === 9);
+    // Phím Tab: kích hoạt nút ▶ Chạy (luôn hiện hộp xác nhận trước khi gửi)
+    if (isTabKey && !e.altKey && !e.ctrlKey && !e.metaKey && !e.shiftKey && !e.isComposing) {
+      if (!state.enabled || !isPancakeHost()) return;
+      e.__botfakeKeyHandled = true;
+      e.preventDefault();
+      e.stopPropagation();
+      if (e.stopImmediatePropagation) e.stopImmediatePropagation();
+      if (e.repeat) return;
+      if (!shadow || !document.getElementById(PANEL_ID)) {
+        try { showBotfakePanel(); } catch (e0) { /* ignore */ }
+      }
+      if (typeof window.__botfakeTriggerSend__ === 'function') {
+        window.__botfakeTriggerSend__();
+      } else {
+        try { markSendIdleIfSettled(); } catch (e1) { /* ignore */ }
+        if (!state.sending && !state.confirmingSend) {
+          sendToAll().catch(() => {
+            state.confirmingSend = false;
+            if (!state.sending) { unfreezeSendChecklist(); render(); }
+          });
+        }
+      }
+      return;
+    }
     if (e.key === 'Escape' && state.imgPick) {
+      e.__botfakeKeyHandled = true;
       if (typeof window.__botfakeImgPick__ === 'function') window.__botfakeImgPick__(false);
       logLine('🖼 Đã hủy chọn ảnh');
       return;
     }
     // Alt+Q: bật/tắt chế độ BẮT CÂU NHANH (chờ click vào popup "/" của app)
-    if (e.altKey && !e.ctrlKey && !e.metaKey && (e.key === 'q' || e.key === 'Q')) {
+    if (e.altKey && !e.ctrlKey && !e.metaKey && !e.shiftKey && (e.key === 'q' || e.key === 'Q' || e.code === 'KeyQ' || e.keyCode === 81 || e.which === 81)) {
+      e.__botfakeKeyHandled = true;
       e.preventDefault();
+      e.stopPropagation();
+      if (e.stopImmediatePropagation) e.stopImmediatePropagation();
+      if (e.repeat) return;
+      if (!shadow || !document.getElementById(PANEL_ID)) {
+        try { showBotfakePanel(); } catch (e0) { /* ignore */ }
+      }
       if (typeof window.__botfakeQrCapture__ === 'function') window.__botfakeQrCapture__();
       return;
     }
     if (e.key === 'Escape' && state.qrCapture) {
+      e.__botfakeKeyHandled = true;
       if (typeof window.__botfakeQrCapture__ === 'function') window.__botfakeQrCapture__(false);
       logLine('🎯 Đã hủy chế độ bắt câu');
       return;
     }
     if (e.key === 'Escape' && (state.pickMode || (state.rangeStart && !state.rangeEnd))) {
+      e.__botfakeKeyHandled = true;
       state.pickMode = false;
       if (state.rangeStart && !state.rangeEnd) {
         state.rangeStart = null;
@@ -8412,7 +8779,9 @@
       render();
       return;
     }
-    if (e.altKey && e.shiftKey && (e.key === 'B' || e.key === 'b')) {
+    if (e.altKey && e.shiftKey && (e.key === 'B' || e.key === 'b' || e.code === 'KeyB')) {
+      e.__botfakeKeyHandled = true;
+      if (e.repeat) return;
       const host = document.getElementById(PANEL_ID);
       if (host) {
         const showing = host.style.display === 'none';
@@ -8425,7 +8794,9 @@
         }
       }
     }
-    if (e.altKey && e.shiftKey && (e.key === 'D' || e.key === 'd')) {
+    if (e.altKey && e.shiftKey && (e.key === 'D' || e.key === 'd' || e.code === 'KeyD')) {
+      e.__botfakeKeyHandled = true;
+      if (e.repeat) return;
       const info = selectedRowInfo();
       if (info) setTarget(info, 'Alt+Shift+D');
     }
@@ -8435,6 +8806,45 @@
 
   hookNetwork();
 
+  // Theo dõi sự kiện copy/cut trên trang và khi quay lại tab để cập nhật ngay bản xem trước Clipboard
+  const onCopyOrCut = (e) => {
+    try {
+      let copied = '';
+      if (e && e.clipboardData && typeof e.clipboardData.getData === 'function') {
+        copied = e.clipboardData.getData('text/plain') || '';
+      }
+      if (!copied && window.getSelection) {
+        copied = String(window.getSelection() || '');
+      }
+      if (!copied) {
+        const ae = document.activeElement;
+        if (ae && (ae.tagName === 'TEXTAREA' || ae.tagName === 'INPUT') && typeof ae.selectionStart === 'number') {
+          copied = String(ae.value || '').slice(ae.selectionStart, ae.selectionEnd);
+        }
+      }
+      if (copied && copied.trim()) {
+        state.lastCopiedText = copied;
+        const previewEl = shadow && shadow.getElementById('ssb-clip-preview-text');
+        if (previewEl) {
+          previewEl.textContent = 'Đang có trên Clipboard: “' + clip(copied.trim(), 120) + '” — bấm ▶ Chạy (hoặc phím Tab) để xác nhận & gửi.';
+        }
+      }
+    } catch (err) { /* ignore */ }
+  };
+  window.addEventListener('copy', onCopyOrCut, true);
+  window.addEventListener('cut', onCopyOrCut, true);
+  window.addEventListener('focus', () => {
+    if (state.msgSource === 'clipboard' && !state.confirmingSend) {
+      readClipboardText().then((txt) => {
+        const clean = String(txt || '').trim();
+        const previewEl = shadow && shadow.getElementById('ssb-clip-preview-text');
+        if (clean && previewEl) {
+          previewEl.textContent = 'Đang có trên Clipboard: “' + clip(clean, 120) + '” — bấm ▶ Chạy (hoặc phím Tab) để xác nhận & gửi.';
+        }
+      }).catch(() => {});
+    }
+  });
+
   // GẮN LISTENER CHUỘT NGAY TẠI ĐÂY (script chạy ở document-start → TRƯỚC khi JS của app
   // gắn listener của nó). Đây là lý do phải gắn sớm: nếu app đăng ký listener capture trên
   // window trước ta thì stopImmediatePropagation của ta vô hiệu (listener đăng ký trước chạy trước).
@@ -8443,6 +8853,7 @@
   window.addEventListener('click', onDocClick, true);
   ROW_GUARD_EVENTS.forEach((ev) => window.addEventListener(ev, onRowGesture, true));
   window.addEventListener('keydown', onKeydown, true);
+  document.addEventListener('keydown', onKeydown, true);
 
   // Theo dõi Alt / Ctrl THẬT SỰ đang được giữ (dùng khi event click không còn kèm altKey/ctrlKey
   // do người dùng nhả phím hơi sớm). Có keyup + blur + đáo hạn 900ms nên KHÔNG bao giờ "dính" lâu
@@ -8460,7 +8871,6 @@
   window.addEventListener('blur', () => { modState.altAt = 0; modState.ctrlAt = 0; });
 
   function showBotfakePanel() {
-    if (window.__BOTFAKE_TAB_CLIPBOARD_ACTIVE__) return;
     buildPanel();
     const host = document.getElementById(PANEL_ID);
     if (host) host.style.display = '';
@@ -8473,7 +8883,6 @@
   }
 
   extListen((m, _s, sendResponse) => {
-    if (window.__BOTFAKE_TAB_CLIPBOARD_ACTIVE__) return;
     if (m && m.type === 'BOTFAKE_SHOW_PANEL') {
       showBotfakePanel();
       sendResponse && sendResponse({ ok: true });
@@ -8487,7 +8896,6 @@
   }
 
   function init() {
-    if (window.__BOTFAKE_TAB_CLIPBOARD_ACTIVE__) return;
     if (!isPancakeHost()) return;
     showBotfakePanel();
     logLine('Sẵn sàng. Panel chỉ trên pancake.vn — tab khác chỉ hiện thanh tiến độ khi đang chạy.');

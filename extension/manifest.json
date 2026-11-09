@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
-  "name": "BOTFAKE LITE",
-  "version": "1.91.67",
-  "description": "Gửi hàng loạt Pancake trong background + overlay Pancake #1/#2 khi đổi tab",
+  "name": "BOTFAKE LITE — Wave 200 coordinator test",
+  "version": "200.13.0",
+  "description": "Bản test clone Wave 200.13: service worker điều phối, Pancake tab thực thi Socket/ACK",
   "permissions": [
     "tabs",
     "storage",
@@ -55,7 +55,7 @@
         "https://socialos.vip/*"
       ],
       "js": [
-        "pancake-send-lite.user.js"
+        "pancake-send-lite-wave200.user.js"
       ],
       "run_at": "document_start",
       "all_frames": false,
