@@ -15,6 +15,9 @@ const CONCURRENCY = 24;
 const jobs = {};
 /** @type {Record<number, { stop: boolean, running: boolean }>} */
 const bgCtl = {};
+const dedicatedBySenderTab = Object.create(null);
+const dedicatedByUiTab = Object.create(null);
+const DEDICATED_SENDER_BOOT_TIMEOUT_MS = 120000;
 
 async function pancakeNumber(tabId) {
   try {
@@ -75,6 +78,33 @@ async function broadcast() {
 function tell(tabId, msg) {
   if (!tabId) return;
   try { chrome.tabs.sendMessage(tabId, msg, () => void chrome.runtime.lastError); } catch (e) { /* ignore */ }
+  const dedicated = dedicatedBySenderTab[tabId];
+  if (dedicated && dedicated.uiTabId && msg && (msg.type === 'BOTFAKE_WAVE_PROGRESS' || msg.type === 'BOTFAKE_WAVE_DONE')) {
+    try { chrome.tabs.sendMessage(dedicated.uiTabId, Object.assign({}, msg, { dedicated: true }), () => void chrome.runtime.lastError); } catch (e) { /* ignore */ }
+  }
+}
+
+function failDedicatedSender(senderTabId, error) {
+  const item = dedicatedBySenderTab[senderTabId];
+  if (!item) return;
+  if (item.bootTimer) clearTimeout(item.bootTimer);
+  tell(item.uiTabId, { type: 'BOTFAKE_DEDICATED_DONE', jobId: item.jobId, ok: false, error: String(error || 'Sender tab không sẵn sàng') });
+  delete dedicatedBySenderTab[senderTabId];
+  if (dedicatedByUiTab[item.uiTabId] === senderTabId) delete dedicatedByUiTab[item.uiTabId];
+  try { chrome.tabs.remove(senderTabId, () => void chrome.runtime.lastError); } catch (e) { /* ignore */ }
+}
+
+function stopWaveForTab(tabId) {
+  const ctl = waveCtl[tabId];
+  if (!ctl) return;
+  ctl.stop = true;
+  ['socket', 'ext'].forEach((name) => {
+    while (ctl.waiters[name].length) ctl.waiters[name].shift()(null);
+  });
+  while (ctl.mainWaiters.length) ctl.mainWaiters.shift()();
+  ctl.timers.forEach((timer) => { try { clearTimeout(timer); } catch (e) { /* ignore */ } });
+  ctl.timers.clear();
+  ctl.socketCool = 0;
 }
 
 function resolvePhoto(item, photo) {
@@ -639,8 +669,74 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
   if (msg.type === 'BOTFAKE_JOB') {
     if (!tabId) { sendResponse && sendResponse({ ok: false }); return; }
-    upsert(tabId, msg).then(() => sendResponse && sendResponse({ ok: true }));
+    upsert(tabId, msg).then(() => {
+      const dedicated = dedicatedBySenderTab[tabId];
+      if (dedicated) tell(dedicated.uiTabId, {
+        type: 'BOTFAKE_DEDICATED_PROGRESS', jobId: dedicated.jobId,
+        pct: msg.pct, ok: msg.ok, total: msg.total, done: msg.done,
+        phase: msg.phase, sending: msg.sending,
+      });
+      sendResponse && sendResponse({ ok: true });
+    });
     return true;
+  }
+
+  if (msg.type === 'BOTFAKE_DEDICATED_START') {
+    if (!tabId || !msg.job || !msg.job.jobId || !msg.job.url) {
+      sendResponse({ ok: false, error: 'Thiếu tab/job/url cho sender tab riêng' });
+      return;
+    }
+    if (dedicatedByUiTab[tabId]) {
+      sendResponse({ ok: false, error: 'Tab này đã có sender job riêng đang chạy' });
+      return;
+    }
+    chrome.tabs.create({ url: String(msg.job.url), active: false }, (created) => {
+      const err = chrome.runtime.lastError;
+      if (err || !created || !created.id) {
+        sendResponse({ ok: false, error: (err && err.message) || 'Không tạo được sender tab' });
+        return;
+      }
+      const senderTabId = created.id;
+      const item = {
+        uiTabId: tabId,
+        senderTabId,
+        jobId: String(msg.job.jobId),
+        job: msg.job,
+        ready: false,
+        bootTimer: null,
+      };
+      item.bootTimer = setTimeout(() => failDedicatedSender(senderTabId, 'Sender tab khởi động quá hạn'), DEDICATED_SENDER_BOOT_TIMEOUT_MS);
+      dedicatedBySenderTab[senderTabId] = item;
+      dedicatedByUiTab[tabId] = senderTabId;
+      sendResponse({ ok: true, jobId: item.jobId, senderTabId });
+    });
+    return true;
+  }
+
+  if (msg.type === 'BOTFAKE_WAVE_SENDER_READY') {
+    const item = tabId && dedicatedBySenderTab[tabId];
+    if (!item || item.ready) { sendResponse({ ok: !!item }); return; }
+    item.ready = true;
+    if (item.bootTimer) { clearTimeout(item.bootTimer); item.bootTimer = null; }
+    try {
+      chrome.tabs.sendMessage(tabId, { type: 'BOTFAKE_WAVE_EXTERNAL_JOB', job: item.job }, (response) => {
+        const err = chrome.runtime.lastError;
+        if (err) failDedicatedSender(tabId, err.message || 'Không gửi được job tới sender tab');
+      });
+    } catch (e) { failDedicatedSender(tabId, String(e && e.message || e)); }
+    sendResponse({ ok: true, jobId: item.jobId });
+    return;
+  }
+
+  if (msg.type === 'BOTFAKE_DEDICATED_SEND_DONE') {
+    const item = tabId && dedicatedBySenderTab[tabId];
+    if (!item || item.jobId !== msg.jobId) { sendResponse({ ok: false, error: 'Dedicated job không còn hoạt động' }); return; }
+    tell(item.uiTabId, Object.assign({ type: 'BOTFAKE_DEDICATED_DONE', jobId: item.jobId }, msg.result || {}));
+    delete dedicatedBySenderTab[tabId];
+    if (dedicatedByUiTab[item.uiTabId] === tabId) delete dedicatedByUiTab[item.uiTabId];
+    sendResponse({ ok: true });
+    try { chrome.tabs.remove(tabId, () => void chrome.runtime.lastError); } catch (e) { /* ignore */ }
+    return;
   }
 
   if (msg.type === 'BOTFAKE_WAVE_START') {
@@ -657,15 +753,10 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   }
 
   if (msg.type === 'BOTFAKE_WAVE_STOP') {
-    if (tabId && waveCtl[tabId]) {
-      waveCtl[tabId].stop = true;
-      ['socket', 'ext'].forEach((name) => {
-        while (waveCtl[tabId].waiters[name].length) waveCtl[tabId].waiters[name].shift()(null);
-      });
-      while (waveCtl[tabId].mainWaiters.length) waveCtl[tabId].mainWaiters.shift()();
-      waveCtl[tabId].timers.forEach((timer) => { try { clearTimeout(timer); } catch (e) { /* ignore */ } });
-      waveCtl[tabId].timers.clear();
-      waveCtl[tabId].socketCool = 0;
+    if (tabId) {
+      const senderTabId = dedicatedByUiTab[tabId];
+      stopWaveForTab(senderTabId || tabId);
+      if (senderTabId) tell(senderTabId, { type: 'BOTFAKE_WAVE_STOP' });
     }
     sendResponse({ ok: true });
     return;
@@ -693,16 +784,19 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
 chrome.tabs.onRemoved.addListener((tabId) => {
   if (bgCtl[tabId]) bgCtl[tabId].stop = true;
-  const wave = waveCtl[tabId];
-  if (wave) {
-    wave.stop = true;
-    ['socket', 'ext'].forEach((name) => {
-      while (wave.waiters[name].length) wave.waiters[name].shift()(null);
-    });
-    while (wave.mainWaiters.length) wave.mainWaiters.shift()();
-    wave.timers.forEach((timer) => { try { clearTimeout(timer); } catch (e) { /* ignore */ } });
-    wave.timers.clear();
-    wave.socketCool = 0;
+  stopWaveForTab(tabId);
+  const ownedSenderTabId = dedicatedByUiTab[tabId];
+  if (ownedSenderTabId && dedicatedBySenderTab[ownedSenderTabId]) {
+    stopWaveForTab(ownedSenderTabId);
+    tell(ownedSenderTabId, { type: 'BOTFAKE_WAVE_STOP' });
+    dedicatedBySenderTab[ownedSenderTabId].uiClosed = true;
+  }
+  const dedicated = dedicatedBySenderTab[tabId];
+  if (dedicated) {
+    if (dedicated.bootTimer) clearTimeout(dedicated.bootTimer);
+    tell(dedicated.uiTabId, { type: 'BOTFAKE_DEDICATED_DONE', jobId: dedicated.jobId, ok: false, error: 'Sender tab đã đóng khi job chưa hoàn tất' });
+    delete dedicatedBySenderTab[tabId];
+    if (dedicatedByUiTab[dedicated.uiTabId] === tabId) delete dedicatedByUiTab[dedicated.uiTabId];
   }
   if (jobs[tabId]) { delete jobs[tabId]; persistJobs(); broadcast(); }
 });

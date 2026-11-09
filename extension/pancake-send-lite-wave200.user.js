@@ -110,6 +110,8 @@
     listsLoaded: false,       // đã nạp xong danh sách câu từ IndexedDB chưa (để UI không báo "trống" oan)
     lastSent: null,         // ẢNH CHỤP lượt gửi gần nhất { at, typedText, items:[chat…], lists:[{id,name,text}] }
                             // để nút "↺ Chọn lại list vừa gửi" chọn lại y nguyên mà KHÔNG phải tải danh sách
+    externalSendJob: null,  // job đã được xác nhận ở tab UI, thực thi trong sender tab riêng
+    isDedicatedSender: false,
   };
 
   // Chỉ nhớ conversation ID có Socket xác nhận rejected qua lần retry; không nhớ no-ACK,
@@ -6402,14 +6404,14 @@
     // Defer thẳng trước khi tính counter, tránh tạo thêm CPU load cho tất cả các tab.
     const isLargeSending = batchStats.total > 200 && state.sending && !batchStats.loopFinished;
     if (isLargeSending) {
-      if (!summaryUiTimer) summaryUiTimer = setTimeout(flushBatchSummaryUI, 250);
+      if (!summaryUiTimer) summaryUiTimer = setTimeout(flushBatchSummaryUI, 1000);
       return;
     }
     const c = getBatchSummaryCounts();
     const isDoneAll = batchStats.loopFinished && (c.pending === 0 || state.stopRequested);
-    // Khi lô lớn còn ACK/bù nền, cập nhật tổng hợp 4 lần/giây; chốt cuối vẫn flush ngay.
+    // Khi lô lớn còn ACK/bù nền, chỉ dựng lại tổng hợp 1 lần/giây; chốt cuối vẫn flush ngay.
     if (!isDoneAll && c.total > 200) {
-      if (!summaryUiTimer) summaryUiTimer = setTimeout(flushBatchSummaryUI, 250);
+      if (!summaryUiTimer) summaryUiTimer = setTimeout(flushBatchSummaryUI, 1000);
       return;
     }
     if (summaryUiTimer) { clearTimeout(summaryUiTimer); summaryUiTimer = null; }
@@ -6815,6 +6817,208 @@
     return [{ text: typedText || '', list: (matches || []).slice() }];
   }
 
+  function buildCurrentSendGroups(matches, savedLists, typedText) {
+    const extGroups = state.externalSendJob && state.externalSendJob.groups;
+    if (!Array.isArray(extGroups)) return buildSendGroups(matches, savedLists, typedText);
+    const byId = new Map((matches || []).map((item) => [String(item.id), item]));
+    return extGroups.map((group) => ({
+      text: String(group && group.text || ''),
+      list: (group && Array.isArray(group.list) ? group.list : [])
+        .map((item) => byId.get(String(item && item.id)))
+        .filter(Boolean),
+    })).filter((group) => group.list.length);
+  }
+
+  function copyDedicatedTarget(item) {
+    const id = String(item && item.id || '');
+    return {
+      id,
+      pageId: item && (item.pageId || item.page_id) || id.split('_')[0],
+      name: String(item && item.name || ''),
+      type: String(item && item.type || ''),
+      snippet: String(item && item.snippet || ''),
+      snippetRaw: String(item && item.snippetRaw || item && item.snippet_raw || ''),
+      time: item && item.time || '',
+      threadId: item && (item.threadId || item.thread_id) || '',
+      customerId: item && (item.customerId || item.customer_id) || '',
+      globalId: item && (item.globalId || item.global_id) || '',
+      global_id: item && (item.global_id || item.globalId) || '',
+      fromPsid: item && (item.fromPsid || item.from_psid) || '',
+      platform: item && item.platform || '',
+    };
+  }
+
+  function openDedicatedAssetDb() {
+    return new Promise((resolve, reject) => {
+      const req = indexedDB.open('SSB_DEDICATED_WAVE_ASSETS_V1', 1);
+      req.onupgradeneeded = () => {
+        if (!req.result.objectStoreNames.contains('assets')) req.result.createObjectStore('assets');
+      };
+      req.onsuccess = () => resolve(req.result);
+      req.onerror = () => reject(req.error || new Error('Không mở được kho ảnh sender tab'));
+    });
+  }
+  async function putDedicatedAsset(key, file) {
+    const db = await openDedicatedAssetDb();
+    return new Promise((resolve, reject) => {
+      const tx = db.transaction('assets', 'readwrite');
+      tx.objectStore('assets').put(file, key);
+      tx.oncomplete = () => { db.close(); resolve(true); };
+      tx.onerror = tx.onabort = () => { db.close(); reject(tx.error || new Error('Không lưu được ảnh cho sender tab')); };
+    });
+  }
+  async function getDedicatedAsset(key) {
+    const db = await openDedicatedAssetDb();
+    return new Promise((resolve, reject) => {
+      const tx = db.transaction('assets', 'readonly');
+      const req = tx.objectStore('assets').get(key);
+      req.onsuccess = () => resolve(req.result || null);
+      req.onerror = () => reject(req.error || new Error('Không đọc được ảnh cho sender tab'));
+      tx.oncomplete = () => db.close();
+      tx.onerror = tx.onabort = () => { db.close(); reject(tx.error || new Error('Lỗi đọc kho ảnh sender tab')); };
+    });
+  }
+  async function deleteDedicatedAsset(key) {
+    if (!key) return;
+    try {
+      const db = await openDedicatedAssetDb();
+      await new Promise((resolve) => {
+        const tx = db.transaction('assets', 'readwrite');
+        tx.objectStore('assets').delete(key);
+        tx.oncomplete = tx.onerror = tx.onabort = resolve;
+      });
+      db.close();
+    } catch (e) { /* orphaned private asset is harmless; clear it on next run */ }
+  }
+
+  async function runDedicatedSenderBatch(targets, sendGroups, typedText, imageState, quickReply, waveSize) {
+    const jobId = 'dedicated-' + Date.now() + '-' + Math.random().toString(36).slice(2, 9);
+    const safeTargets = (targets || []).map(copyDedicatedTarget).filter((item) => item.id);
+    const targetById = new Map(safeTargets.map((item) => [item.id, item]));
+    const safeGroups = (sendGroups || []).map((group) => ({
+      text: String(group && group.text || ''),
+      list: (group && Array.isArray(group.list) ? group.list : [])
+        .map((item) => targetById.get(String(item && item.id)))
+        .filter(Boolean),
+    })).filter((group) => group.list.length);
+    let image = null;
+    let imageAssetKey = '';
+    if (imageState) {
+      let file = imageState.file || null;
+      if (!file && imageState.url && /^blob:/i.test(imageState.url)) file = await fetch(imageState.url).then((r) => r.blob());
+      if (file) {
+        imageAssetKey = 'wave-image:' + jobId;
+        await putDedicatedAsset(imageAssetKey, file);
+      }
+      image = {
+        name: String(imageState.name || (file && file.name) || 'ảnh'),
+        type: String((file && file.type) || ''),
+        assetKey: imageAssetKey,
+        url: file ? '' : String(imageState.url || ''),
+        w: Number(imageState.w) || 0,
+        h: Number(imageState.h) || 0,
+        web: !!imageState.web,
+      };
+    }
+    let quick = null;
+    try { quick = quickReply ? JSON.parse(JSON.stringify(quickReply)) : null; } catch (e) { quick = null; }
+    const total = safeGroups.reduce((sum, group) => sum + group.list.length, 0);
+    if (!total) throw new Error('Dedicated sender không nhận được danh sách gửi hợp lệ');
+
+    batchStats.active = true;
+    batchStats.total = total;
+    batchStats.startedAt = Date.now();
+    batchStats.loopFinished = false;
+    batchStats.finalLogged = false;
+    summaryCounters.okApi = summaryCounters.okExt = summaryCounters.okSocket = 0;
+    summaryCounters.fail = summaryCounters.unsure = summaryCounters.skipLate = 0;
+    setProgress(0, total, 0);
+    logLine('🛡️ Tách lượt gửi sang tab Pancake sender riêng; tab đang dùng chỉ theo dõi tiến độ. Giữ nguyên cap/retry/fallback W200.');
+
+    let resolveDone;
+    let rejectDone;
+    const donePromise = new Promise((resolve, reject) => { resolveDone = resolve; rejectDone = reject; });
+    let doneSeen = false;
+    const unsubscribe = extListen((msg) => {
+      if (!msg || msg.jobId !== jobId) return;
+      if (msg.type === 'BOTFAKE_DEDICATED_PROGRESS') {
+        if (msg.total != null) {
+          batchStats.total = total;
+          setProgress(Math.min(total, Number(msg.done) || 0), total, Number(msg.ok) || 0);
+        }
+      } else if (msg.type === 'BOTFAKE_DEDICATED_DONE' && !doneSeen) {
+        doneSeen = true;
+        if (msg.error) rejectDone(new Error(msg.error));
+        else resolveDone(msg);
+      }
+    });
+    try {
+      const job = {
+        jobId,
+        url: location.href,
+        targets: safeTargets,
+        groups: safeGroups,
+        typedText: String(typedText || ''),
+        image,
+        quickReply: quick,
+        waveSize: Math.max(1, Number(waveSize) || 200),
+      };
+      const start = await extCall({ type: 'BOTFAKE_DEDICATED_START', job }, 15000);
+      if (!start || start.err || !start.res || !start.res.ok) {
+        throw new Error((start && start.res && start.res.error) || (start && start.err) || 'Không tạo được sender tab riêng');
+      }
+      const result = await donePromise;
+      const summary = result.summary || result;
+      summaryCounters.okApi = Number(summary.okApi) || 0;
+      summaryCounters.okExt = Number(summary.okExt) || 0;
+      summaryCounters.okSocket = Number(summary.okSocket) || 0;
+      summaryCounters.fail = Number(summary.fail) || 0;
+      summaryCounters.unsure = Number(summary.unsure) || 0;
+      summaryCounters.skipLate = Number(summary.skipLate) || 0;
+      if (result.stopped) state.stopRequested = true;
+      try {
+        const ids = JSON.parse(localStorage.getItem('SSB_SENT_IDS') || '[]');
+        if (Array.isArray(ids)) state.sentIds = new Set(ids);
+      } catch (e) { /* keep in-memory snapshot */ }
+      try {
+        const savedLog = JSON.parse(localStorage.getItem(LOG_KEY) || '[]');
+        if (Array.isArray(savedLog)) state.log = savedLog.slice(-300);
+      } catch (e) { /* keep in-memory log */ }
+      const unavailablePrefix = UNAVAILABLE_CONV_ID_PREFIX;
+      try {
+        unavailableConversationIds.clear();
+        for (let i = 0; i < localStorage.length; i++) {
+          const key = localStorage.key(i) || '';
+          if (key.indexOf(unavailablePrefix) === 0) {
+            try { unavailableConversationIds.add(decodeURIComponent(key.slice(unavailablePrefix.length))); } catch (e) { /* ignore */ }
+          }
+        }
+      } catch (e) { /* keep current IDs */ }
+      batchStats.loopFinished = true;
+      batchStats.active = false;
+      setProgress(total, total, summary.okApi + summary.okExt + summary.okSocket);
+      updateBatchSummaryUI();
+      render();
+      return result;
+    } catch (e) {
+      state.stopRequested = true;
+      batchStats.loopFinished = true;
+      batchStats.active = false;
+      logLine('⛔ Dedicated sender dừng: ' + String(e && e.message || e) + ' — không fallback sang tab đang hiển thị để tránh gửi trùng.');
+      updateBatchSummaryUI();
+      throw e;
+    } finally {
+      unsubscribe();
+      await deleteDedicatedAsset(imageAssetKey);
+      state.sending = false;
+      unfreezeSendChecklist();
+      applyRunStopButtons();
+      stopKeepAliveAudio();
+      reportExtJob({ phase: 'idle' });
+      render();
+    }
+  }
+
   async function readClipboardText() {
     try {
       if (navigator.clipboard && typeof navigator.clipboard.readText === 'function') {
@@ -6905,7 +7109,7 @@
           logLine('⏩ Bỏ qua ' + (before - targets.length) + ' chat đã gửi — chỉ gửi phần còn lại.');
         }
       }
-      let sendGroups = buildSendGroups(targets, state.savedLists, typedText);
+      let sendGroups = buildCurrentSendGroups(targets, state.savedLists, typedText);
       const textsAll = sendGroups.map((g) => g.text).filter((t) => t && t.trim());
       if (!textsAll.length && !imgState && !(state.quickReply && state.quickReply.items && state.quickReply.items.length)) {
         if (useClipboardMode) {
@@ -6929,7 +7133,7 @@
         ? '\n\n📝 ' + textsAll.length + ' nội dung — mỗi câu được gửi đúng chữ đã lưu: '
           + textsAll.map((t) => '“' + clip(t, 40) + '”').join(', ')
         : '';
-      if (!confirm('Gửi ' + (textsAll.length > 1 ? textsAll.length + ' nội dung' : (textsAll.length ? '1 câu' + modeTag : 'ảnh'))
+      if (!state.externalSendJob && !confirm('Gửi ' + (textsAll.length > 1 ? textsAll.length + ' nội dung' : (textsAll.length ? '1 câu' + modeTag : 'ảnh'))
         + ' tới ' + targets.length + ' đoạn chat đã chọn?\n\n'
         + (textsAll.length === 1 ? '“' + clip(textsAll[0] || '(chỉ gửi ảnh)', 160) + '”' : '(mỗi câu đúng nội dung đã lưu)')
         + textNote + imgNote + '\n\nNhận: ' + names + warnComment)) return;
@@ -6959,7 +7163,7 @@
     if (state.sentIds && state.sentIds.size > 0) {
       targets = targets.filter((m) => !state.sentIds.has(m.id));
     }
-    let sendGroups = buildSendGroups(targets, state.savedLists, typedText);
+    let sendGroups = buildCurrentSendGroups(targets, state.savedLists, typedText);
 
     // ĐÁNH DẤU ĐANG GỬI NGAY từ trước bước lọc: bước lọc tag/tải ảnh có thể chờ API —
     // không chặn đúp ở đây thì bấm lần 2 chạy song song lần 1 (log hiện 2 dòng lọc)
@@ -7017,6 +7221,14 @@
     batchStats.finalLogged = false;
     reportExtJob({ phase: 'send', pct: 0, ok: 0, total: 0 }); // sau reset — không bị lượt cũ đổi thành idle
     render();
+    // Tách toàn bộ sender sang tab Pancake nền; tab UI chỉ theo dõi tiến độ, không trực tiếp xử lý Socket/ACK.
+    if (extBgAvailable() && !state.isDedicatedSender) {
+      const waveChoice = shadow && shadow.getElementById('ssb-wave');
+      const waveSize = parseInt((waveChoice && waveChoice.value) || '200', 10) || 200;
+      try { await runDedicatedSenderBatch(targets, sendGroups, typedText, imgState, state.quickReply, waveSize); }
+      catch (e) { logLine('⚠ Lượt gửi tab nền kết thúc lỗi: ' + String(e && e.message || e)); }
+      return;
+    }
     // Khởi động warmUpSockets + BATCH_GET_GLOBAL_ID NGAY TỪ ĐẦU (chạy song song với lọc tag + upload ảnh)
     try { warmUpSockets(targets, { forceBatch: true }); } catch (e) { /* ignore */ }
 
@@ -7129,7 +7341,7 @@
     const gapRaw = parseInt((gapEl && gapEl.value) || '250', 10);
     const WAVE_GAP = isNaN(gapRaw) ? 250 : Math.max(0, Math.min(60000, gapRaw));
     // gửi theo từng nhóm nội dung (câu khác câu → chữ khác chữ)
-    sendGroups = buildSendGroups(targets, state.savedLists, typedText);
+    sendGroups = buildCurrentSendGroups(targets, state.savedLists, typedText);
     // v1.82.5 — cùng 1 chat chỉ nằm 1 nhóm: nếu 2 câu cùng chứa 1 chat thì giữ lần đầu, không bắn 2 lần.
     {
       const seenG = new Set();
@@ -9027,10 +9239,10 @@
       console.log('[SSB]', s);
       return;
     }
-    // Khi chạy lô lớn (>200 chat): giới hạn cập nhật DOM log còn 3–4 lần/giây;
-    // ghi localStorage riêng theo nhịp 1s để tránh layout/IPC disk write liên tục gây lag.
+    // Khi chạy lô lớn (>200 chat): chỉ cập nhật DOM log 1 lần/giây;
+    // nhịp gửi/counters không bị chặn, chỉ phần trình bày log được gộp.
     if (state.sending && batchStats.total > 200) {
-      if (!logFlushTimer) logFlushTimer = setTimeout(flushLogUI, 300);
+      if (!logFlushTimer) logFlushTimer = setTimeout(flushLogUI, 1000);
       return;
     }
     if (logFlushTimer) { clearTimeout(logFlushTimer); logFlushTimer = null; }
@@ -9110,16 +9322,38 @@
     render();
   }
 
-  function setProgress(done, total, ok) {
-    const pct = total ? Math.min(100, Math.round((done / total) * 100)) : 0;
+  let progressUiTimer = null;
+  let progressUiLastAt = 0;
+  let pendingProgressSnapshot = null;
+  function flushProgressUi() {
+    progressUiTimer = null;
+    const snap = pendingProgressSnapshot;
+    pendingProgressSnapshot = null;
+    if (!snap) return;
+    progressUiLastAt = Date.now();
     const bar = shadow && shadow.getElementById('ssb-bar');
-    if (bar) bar.style.width = pct + '%';
+    if (bar) bar.style.width = snap.pct + '%';
     const st = shadow && shadow.getElementById('ssb-progstat');
-    if (st) {
-      const okN = (ok != null) ? ok : done;
-      st.textContent = pct + '% · ✅ ' + (okN || 0) + '/' + (total || 0);
+    if (st) st.textContent = snap.pct + '% · ✅ ' + (snap.ok || 0) + '/' + (snap.total || 0);
+    reportExtJob({ phase: 'send', pct: snap.pct, ok: snap.ok, total: snap.total, done: snap.done });
+  }
+  function setProgress(done, total, ok) {
+    const snap = {
+      pct: total ? Math.min(100, Math.round((done / total) * 100)) : 0,
+      ok: (ok != null) ? ok : done,
+      total: total || 0,
+      done: done || 0,
+    };
+    const immediate = total <= 200 || done >= total || !state.sending;
+    const elapsed = Date.now() - progressUiLastAt;
+    if (immediate || elapsed >= 250) {
+      if (progressUiTimer) { clearTimeout(progressUiTimer); progressUiTimer = null; }
+      pendingProgressSnapshot = snap;
+      flushProgressUi();
+      return;
     }
-    reportExtJob({ phase: 'send', pct: pct, ok: (ok != null) ? ok : done, total: total, done: done });
+    pendingProgressSnapshot = snap;
+    if (!progressUiTimer) progressUiTimer = setTimeout(flushProgressUi, Math.max(1, 250 - elapsed));
   }
 
   function setScanProgress(n, pct) {
@@ -9617,6 +9851,85 @@
     init();
   }
 
+  async function startExternalWaveJob(job) {
+    if (!job || !job.jobId || !Array.isArray(job.targets) || !job.targets.length) throw new Error('External sender job không hợp lệ');
+    if (state.sending || state.confirmingSend) throw new Error('Sender tab đang bận');
+    state.isDedicatedSender = true;
+    state.externalSendJob = job;
+    state.mode = 'pick';
+    state.listIncomplete = false;
+    state.sendListFrozen = false;
+    state.msgSource = 'ui';
+    state.quickReply = job.quickReply || null;
+    state.matches = job.targets.map((item) => Object.assign({}, item, {
+      id: String(item.id), checked: true,
+      pageId: item.pageId || String(item.id).split('_')[0],
+      knownUnavailable: isRememberedUnavailable(item.id),
+      isTarget: true, mark: 'target',
+    }));
+    if (job.image) {
+      let file = null;
+      if (job.image.assetKey) {
+        file = await getDedicatedAsset(job.image.assetKey);
+        if (!file) throw new Error('Sender tab không tìm thấy ảnh đã xác nhận');
+      } else if (job.image.dataUrl) {
+        const blob = await fetch(job.image.dataUrl).then((r) => r.blob());
+        file = new File([blob], job.image.name || 'image', { type: job.image.type || blob.type || 'image/*' });
+      }
+      if (file) {
+        const named = new File([file], job.image.name || file.name || 'image', { type: job.image.type || file.type || 'image/*' });
+        state.image = { file: named, name: job.image.name || named.name || 'ảnh', url: URL.createObjectURL(named), w: job.image.w || 0, h: job.image.h || 0 };
+      } else if (job.image.url) {
+        state.image = { file: null, url: job.image.url, name: job.image.name || 'ảnh', w: job.image.w || 0, h: job.image.h || 0, web: !!job.image.web };
+      } else state.image = null;
+    } else state.image = null;
+    if (shadow) {
+      const msgEl = shadow.getElementById('ssb-msg');
+      if (msgEl) msgEl.value = String(job.typedText || '');
+      render();
+    }
+    let result;
+    try {
+      await sendToAll();
+      // sendToAll resolves when dispatch lanes finish, but Socket/ACK retries may still be settling.
+      // Keep this tab alive until the same final-settlement condition used by the UI is reached.
+      while (true) {
+        const liveSummary = getBatchSummaryCounts();
+        if (!liveSummary.pending && !state.sending) break;
+        reportExtJob({
+          phase: 'send',
+          pct: liveSummary.total ? Math.round((liveSummary.settled / liveSummary.total) * 100) : 0,
+          ok: liveSummary.okTotal,
+          total: liveSummary.total,
+          done: liveSummary.settled
+        });
+        await new Promise((resolve) => setTimeout(resolve, 500));
+      }
+      const summary = getBatchSummaryCounts();
+      result = {
+        ok: !state.stopRequested,
+        stopped: !!state.stopRequested,
+        total: summary.total,
+        done: summary.settled,
+        okApi: summary.okApi,
+        okExt: summary.okExt,
+        okSocket: summary.okSocket,
+        fail: summary.failTotal,
+        unsure: summary.unsureTotal,
+        skipLate: summary.skipTotal,
+        sentIds: Array.from(state.sentIds || []),
+        unavailableIds: Array.from(unavailableConversationIds),
+      };
+    } catch (e) {
+      result = { ok: false, stopped: !!state.stopRequested, error: String(e && e.message || e) };
+    } finally {
+      state.externalSendJob = null;
+      state.isDedicatedSender = false;
+    }
+    await extCall({ type: 'BOTFAKE_DEDICATED_SEND_DONE', jobId: job.jobId, result: result }, 15000);
+    return result;
+  }
+
   // Gỡ lỗi cho người nâng cao: window.__SSB__
   window.__SSB__ = {
     state,
@@ -9641,5 +9954,20 @@
         completeRange(rows[j]);
       }
     },
+    startExternalWaveJob,
   };
+
+  extListen((m) => {
+    if (m && m.type === 'BOTFAKE_WAVE_EXTERNAL_JOB' && m.job) {
+      startExternalWaveJob(m.job).catch((e) => {
+        extCall({ type: 'BOTFAKE_DEDICATED_SEND_DONE', jobId: m.job.jobId,
+          result: { ok: false, error: String(e && e.message || e) } }, 15000);
+      });
+    } else if (m && m.type === 'BOTFAKE_WAVE_STOP' && state.isDedicatedSender) {
+      state.stopRequested = true;
+      applyRunStopButtons();
+    }
+  });
+  // The SW creates this tab only after the originating UI has confirmed and frozen its target snapshot.
+  extCall({ type: 'BOTFAKE_WAVE_SENDER_READY' }, 5000);
 })();
