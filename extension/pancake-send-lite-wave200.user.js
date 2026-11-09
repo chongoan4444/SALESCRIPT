@@ -7730,8 +7730,9 @@
     const WAVE_API_BACKLOG_HIGH_WATER = 96;
 
     const runGroupWaves200 = async (gtext, fullList) => {
-      // Extension test clone: dispatch the entire group once; failures/timeouts never fall back locally.
-      if (extBgAvailable()) return runExtensionWaveCoordinator(gtext, fullList);
+      // In dedicated mode the sender tab owns the Wave pipeline; only the control plane stays in the SW.
+      // Avoid bouncing every Wave task through tabs.sendMessage back into this same tab.
+      if (extBgAvailable() && !state.isDedicatedSender) return runExtensionWaveCoordinator(gtext, fullList);
       const socketRetryQueue = [];
       const socketRetryWaiters = [];
       const socketCoolTimers = new Map();
