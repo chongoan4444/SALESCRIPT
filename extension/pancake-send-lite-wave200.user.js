@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE LITE (Wave 200 · Tab + Clipboard)
 // @namespace    salescript
-// @version      1.91.72-w200.13
+// @version      1.91.72-w200.14
 // @description  BOTFAKE — nền v1.91.72 Tab + Clipboard, điều phối Wave 200 cục bộ trong tab Pancake (4 làn chính + 2 làn bù song song).
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -47,7 +47,7 @@
   /* ============================ HẰNG SỐ ============================ */
 
   const PANEL_ID = 'ssb-root';          // ssb = SaleScript Bulk — không đụng pk-*/adj-*/pancake-* của script khác
-  const APP_VERSION = '1.91.72-W200.13'; // hiện ở tiêu đề panel — đối chiếu với @version trong header
+  const APP_VERSION = '1.91.72-W200.14'; // hiện ở tiêu đề panel — đối chiếu với @version trong header
   const STYLE_ID = 'ssb-style';
 
   const MAX_NAME_LIST = 12;             // số tên hiển thị khi xác nhận
@@ -99,6 +99,7 @@
     lastAltClickTime: 0,         // thời gian Alt+click lần 1
     sentIds: new Set(),          // id chat đã gửi thành công — giữ qua lượt để "▶ Charging tiếp" không gửi lại
     pickMode: false,
+    deselectMode: false,      // click nút rồi click 1 dòng Pancake để bỏ tick đúng chat đó
     log: [],
     savedLists: [],         // các list đã lưu [{id,name,items:[{id,pageId,name,snippet,snippetRaw,time,type,platform}]}]
     listSel: new Set(),     // id các list ĐANG TÍCH — gộp thành lựa chọn để gửi (gửi được nhiều list cùng lúc)
@@ -912,6 +913,7 @@
     state.rangeStart = null;
     state.rangeEnd = null;
     state.matches = [];
+    state.deselectMode = false;
     state.listSel = new Set();
     state.loadedName = null;
     renderSavedLists();
@@ -920,6 +922,7 @@
 
 
   function freezeSendChecklist() {
+    state.deselectMode = false;
     state.sendListFrozen = true;
     state.matches.forEach((m) => { if (m) m.checked = false; });
     const list = getBotChecklistElement();
@@ -958,15 +961,16 @@
   function highlightRows() {
     if (state.sendListFrozen) return;
     // Idempotent: chỉ thêm/bớt class khi khác — an toàn để gọi liên tục (observer/scroll/poll).
-    const matchIds = new Set(state.matches.map((m) => m.id));
+    // Chỉ highlight những chat còn tick; chat đã bỏ chọn phải mất màu ngay.
+    const matchIds = new Set(state.matches.filter((m) => m && m.checked && !m.knownUnavailable).map((m) => String(m.id)));
     const rootOf = (item) => item.closest('[role="row"]') || item;
     $$('.conversation-list-item').forEach((item) => {
       let want = '';
       if (state.enabled) {
         const info = rowInfo(item);
-        if (info) {
+        if (info && matchIds.has(String(info.id))) {
           if (markOf(info)) want = 'ssb-m-target';
-          else if (matchIds.has(info.id)) want = 'ssb-m-match';
+          else want = 'ssb-m-match';
         }
       }
       const paint = (el) => {
@@ -8073,6 +8077,7 @@
             <div class="snippet-box" id="ssb-target">Chưa chọn — bấm ⚡ Tải danh sách rồi <b>Chọn tất cả</b></div>
             <div class="row" style="margin-top:6px">
               <button class="b b-blue" id="ssb-selall" title="Chọn toàn bộ chat trong danh sách đã tải">☑ Chọn tất cả</button>
+              <button class="b b-gray" id="ssb-deselect-one" title="Bấm nút này, rồi click một đoạn chat trên danh sách Pancake để bỏ chọn chat đó">⊖ Bỏ chọn 1 chat</button>
               <button class="b b-gray" id="ssb-to-end">⬇ Từ đây xuống cuối</button>
               <button class="b b-gray" id="ssb-clear">Xóa</button>
             </div>
@@ -8144,6 +8149,7 @@
     };
     on('ssb-toggle', 'click', () => {
       state.enabled = !state.enabled;
+      if (!state.enabled) state.deselectMode = false;
       highlightRows(); // bật: tô lại / tắt: gỡ hết màu
       render();
     });
@@ -8543,6 +8549,15 @@
       logLine('🧹 Đã xóa bộ nhớ ' + removed + ' ID unavailable; các chat vẫn để bỏ chọn, có thể tự tick lại.');
       render();
     });
+    on('ssb-deselect-one', 'click', () => {
+      if (!state.enabled || state.sendListFrozen || state.confirmingSend) return;
+      state.deselectMode = !state.deselectMode;
+      if (state.deselectMode) state.pickMode = false;
+      logLine(state.deselectMode
+        ? '👆 Bỏ chọn 1 chat: giờ hãy click đúng dòng chat trong danh sách Pancake (Esc để hủy).'
+        : 'Đã hủy chế độ bỏ chọn 1 chat.');
+      render();
+    });
     on('ssb-selall', 'click', async () => {
       if (state.sendListFrozen) return;
       if (!state.allRows || !state.allRows.size || state.allRowsPartial) {
@@ -8909,9 +8924,9 @@
     const stop = shadow.getElementById('ssb-stop');
     const busy = !!state.sending;
     const locked = !!(state.sendListFrozen || state.confirmingSend);
-    ['ssb-selall', 'ssb-to-end', 'ssb-clear'].forEach((id) => {
+    ['ssb-selall', 'ssb-deselect-one', 'ssb-to-end', 'ssb-clear'].forEach((id) => {
       const btn = shadow.getElementById(id);
-      if (btn) btn.disabled = locked;
+      if (btn) btn.disabled = locked || (id === 'ssb-deselect-one' && !state.enabled);
     });
     const clearUnavailable = shadow.getElementById('ssb-clear-unavailable');
     if (clearUnavailable) {
@@ -9024,25 +9039,32 @@
       tgl.textContent = state.enabled ? 'BẬT' : 'TẮT';
       tgl.className = 'badge ' + (state.enabled ? 'on' : 'off');
     }
+    const deselectBtn = shadow.getElementById('ssb-deselect-one');
+    if (deselectBtn) {
+      deselectBtn.textContent = state.deselectMode ? '👆 Click chat cần bỏ chọn… (Esc hủy)' : '⊖ Bỏ chọn 1 chat';
+      deselectBtn.style.background = state.deselectMode ? '#b45309' : '';
+      deselectBtn.style.color = state.deselectMode ? '#fff' : '';
+    }
+    const checkedMatchCount = state.matches.filter((m) => m && m.checked && !m.knownUnavailable).length;
     const tgt = shadow.getElementById('ssb-target');
     if (tgt) {
       if (state.mode === 'range' && state.rangeStart && state.rangeEnd) {
         tgt.innerHTML = '🔗 Chuỗi: <b>' + esc(state.rangeStart.name || '?') + '</b> (' + esc(state.rangeStart.time || '') + ')'
           + ' → <b>' + esc(state.rangeEnd.name || '?') + '</b> (' + esc(state.rangeEnd.time || '') + ')'
-          + '<br>' + state.matches.length + ' chat trong chuỗi';
+          + '<br>' + state.matches.length + ' chat trong chuỗi · đang chọn ' + checkedMatchCount;
       } else if (state.mode === 'range' && state.rangeStart) {
         tgt.innerHTML = '🅰 Đã chọn & đặt ĐẦU CHUỖI: <b>' + esc(state.rangeStart.name || '?') + '</b> · ' + esc(state.rangeStart.time || '')
-          + '<br>Giữ Alt nhấp tiếp dòng <b>CUỐI chuỗi</b> (hoặc bấm Chạy nếu chỉ gửi 1 chat này)…';
+          + '<br>Giữ Alt nhấp tiếp dòng <b>CUỐI chuỗi</b> (hoặc bấm Chạy nếu chỉ gửi 1 chat này)…<br>Đang chọn: ' + checkedMatchCount;
       } else if (state.mode === 'all' && state.matches.length) {
-        tgt.innerHTML = '☑ Đã chọn <b>tất cả</b> — ' + state.matches.length + ' chat';
+        tgt.innerHTML = '☑ Đã chọn <b>' + checkedMatchCount + '/' + state.matches.length + ' chat</b>';
       } else if (state.mode === 'pick' && state.matches.length) {
-        tgt.innerHTML = '☑ Đã chọn lẻ <b>' + state.matches.length + ' chat</b>';
+        tgt.innerHTML = '☑ Đã chọn lẻ <b>' + checkedMatchCount + ' chat</b>';
       } else {
         tgt.innerHTML = 'Chưa chọn — Alt+Click chọn chat/chuỗi hoặc bấm ⚡ Tải danh sách';
       }
     }
     const cnt = shadow.getElementById('ssb-count');
-    if (cnt) cnt.textContent = String(state.matches.length);
+    if (cnt) cnt.textContent = String(checkedMatchCount);
 
     const list = getBotChecklistElement();
     if (list && !state.sendListFrozen) {
@@ -9145,8 +9167,14 @@
 
   // Chặn ở các event "down/up" của chuột — app không được mở chat khi đang chọn chuỗi
   function onRowGesture(e) {
-    if (state.sendListFrozen || !rowGuardOn()) return;                  // người dùng đã bỏ tích "Chặn mở chat"
-    if (!altHeldNow(e) && !ctrlHeldNow(e) && !state.pickMode) return; // chuột thường → không can thiệp
+    if (state.sendListFrozen) return;
+    if (state.deselectMode) {
+      const info = convRowTarget(e);
+      if (info) swallowRowEvent(e, true); // giữ default để click tiếp theo vẫn tới onDocClick
+      return;
+    }
+    if (!rowGuardOn()) return;
+    if (!altHeldNow(e) && !ctrlHeldNow(e) && !state.pickMode) return;
     const info = convRowTarget(e);
     if (!info) return;
     swallowRowEvent(e, e.type === 'pointerdown' || e.type === 'pointerup');
@@ -9183,6 +9211,28 @@
     }
 
     if (!state.enabled) return;
+    if (state.deselectMode) {
+      const item = e.target && e.target.closest && e.target.closest('.conversation-list-item');
+      if (!item) return;
+      const info = rowInfo(item);
+      if (!info) return;
+      swallowRowEvent(e, false);
+      state.deselectMode = false;
+      const match = state.matches.find((m) => m && String(m.id) === String(info.id));
+      if (!match) {
+        logLine('⚠ Chat "' + (info.name || info.id) + '" không có trong checklist hiện tại nên không có gì để bỏ chọn.');
+      } else if (!match.checked) {
+        logLine('ℹ Chat "' + (info.name || info.id) + '" đã bỏ chọn sẵn.');
+      } else {
+        match.checked = false;
+        preloadSelectedSeq++;
+        schedulePreloadSelectedChats();
+        logLine('⬜ Đã bỏ chọn chat: ' + (info.name || info.id));
+      }
+      highlightRows();
+      render();
+      return;
+    }
     const isCtrl = ctrlHeldNow(e);
     const isAlt = !isCtrl && altHeldNow(e);
     const pickAct = !!(state.pickMode && !isCtrl && !isAlt);
@@ -9343,6 +9393,13 @@
       e.__botfakeKeyHandled = true;
       if (typeof window.__botfakeQrCapture__ === 'function') window.__botfakeQrCapture__(false);
       logLine('🎯 Đã hủy chế độ bắt câu');
+      return;
+    }
+    if (e.key === 'Escape' && state.deselectMode) {
+      e.__botfakeKeyHandled = true;
+      state.deselectMode = false;
+      logLine('Đã hủy chế độ bỏ chọn 1 chat; danh sách chọn không đổi.');
+      render();
       return;
     }
     if (e.key === 'Escape' && (state.pickMode || (state.rangeStart && !state.rangeEnd))) {

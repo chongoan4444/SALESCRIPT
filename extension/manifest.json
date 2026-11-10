@@ -1,15 +1,16 @@
 {
   "manifest_version": 3,
   "name": "BOTFAKE LITE — Wave 200 local tab test",
-  "version": "200.13.0",
-  "description": "Bản test clone Wave 200.13: tab Pancake điều phối và thực thi pipeline gửi",
+  "version": "200.14.0",
+  "description": "Bản test clone Wave 200.14: tab Pancake điều phối và thực thi pipeline gửi",
   "permissions": [
     "tabs",
     "storage",
     "scripting",
     "cookies",
     "declarativeNetRequest",
-    "declarativeNetRequestWithHostAccess"
+    "declarativeNetRequestWithHostAccess",
+    "alarms"
   ],
   "host_permissions": [
     "https://pages.fm/*",

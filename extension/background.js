@@ -16,6 +16,106 @@ const jobs = {};
 /** @type {Record<number, { stop: boolean, running: boolean }>} */
 const bgCtl = {};
 
+const AWAKE_LEASES_KEY = 'bfAutoDiscardableLeases';
+const AWAKE_LEASE_STALE_MS = 10 * 60 * 1000;
+/** tabId -> previous autoDiscardable value, restored when a job ends */
+const awakeLeases = {};
+const activelyHeldTabs = new Set();
+let awakeLeasesHydrated = false;
+let awakeLeasesHydratePromise = null;
+
+async function hydrateAwakeLeases() {
+  if (awakeLeasesHydrated) return;
+  if (!awakeLeasesHydratePromise) {
+    awakeLeasesHydratePromise = (async () => {
+      try {
+        const s = await chrome.storage.local.get(AWAKE_LEASES_KEY);
+        const saved = s && s[AWAKE_LEASES_KEY];
+        if (saved) Object.keys(saved).forEach((k) => { awakeLeases[k] = saved[k]; });
+      } catch (e) { /* ignore */ }
+      awakeLeasesHydrated = true;
+    })();
+  }
+  await awakeLeasesHydratePromise;
+}
+
+async function persistAwakeLeases() {
+  try { await chrome.storage.local.set({ [AWAKE_LEASES_KEY]: awakeLeases }); } catch (e) { /* ignore */ }
+}
+
+async function holdTabFromDiscard(tabId) {
+  await hydrateAwakeLeases();
+  const key = String(tabId);
+  let createdLease = false;
+  try {
+    if (!Object.prototype.hasOwnProperty.call(awakeLeases, key)) {
+      const tab = await chrome.tabs.get(tabId);
+      awakeLeases[key] = tab.autoDiscardable !== false;
+      createdLease = true;
+      // Persist the user's prior setting before changing it, so worker restarts can restore it.
+      await persistAwakeLeases();
+    }
+    // Reapply once after a worker restart if needed, never once per progress tick.
+    if (!activelyHeldTabs.has(key)) {
+      await chrome.tabs.update(tabId, { autoDiscardable: false });
+      activelyHeldTabs.add(key);
+    }
+  } catch (e) {
+    if (createdLease) {
+      delete awakeLeases[key];
+      await persistAwakeLeases();
+    }
+  }
+  if (Object.prototype.hasOwnProperty.call(awakeLeases, key)) ensureDiscardLeaseAlarm();
+}
+
+async function releaseTabDiscardLease(tabId) {
+  await hydrateAwakeLeases();
+  const key = String(tabId);
+  if (!Object.prototype.hasOwnProperty.call(awakeLeases, key)) return;
+  const previous = awakeLeases[key] !== false;
+  try { await chrome.tabs.update(tabId, { autoDiscardable: previous }); } catch (e) { /* tab may be closed */ }
+  activelyHeldTabs.delete(key);
+  delete awakeLeases[key];
+  await persistAwakeLeases();
+  clearDiscardLeaseAlarmIfIdle();
+}
+
+async function cleanupStaleDiscardLeases() {
+  await hydrateJobs();
+  await hydrateAwakeLeases();
+  const now = Date.now();
+  let changed = false;
+  for (const key of Object.keys(awakeLeases)) {
+    const job = jobs[Number(key)];
+    const active = job && (job.sending || job.scanning) && now - (job.at || 0) < AWAKE_LEASE_STALE_MS;
+    if (!active) {
+      await releaseTabDiscardLease(Number(key));
+      delete jobs[Number(key)];
+      changed = true;
+    }
+  }
+  if (Object.keys(awakeLeases).length) ensureDiscardLeaseAlarm();
+  else clearDiscardLeaseAlarmIfIdle();
+  if (changed) {
+    persistJobs();
+    await broadcast();
+  }
+}
+
+function ensureDiscardLeaseAlarm() {
+  try { Promise.resolve(chrome.alarms.create('bf-discard-lease-cleanup', { periodInMinutes: 1 })).catch(() => {}); } catch (e) { /* ignore */ }
+}
+function clearDiscardLeaseAlarmIfIdle() {
+  if (Object.keys(awakeLeases).length) return;
+  try { Promise.resolve(chrome.alarms.clear('bf-discard-lease-cleanup')).catch(() => {}); } catch (e) { /* ignore */ }
+}
+chrome.alarms.onAlarm.addListener((alarm) => {
+  if (alarm && alarm.name === 'bf-discard-lease-cleanup') cleanupStaleDiscardLeases();
+});
+chrome.runtime.onStartup.addListener(() => cleanupStaleDiscardLeases());
+
+
 async function pancakeNumber(tabId) {
   try {
     const tabs = await chrome.tabs.query({ url: PANCAKE_URL });
@@ -58,6 +158,13 @@ async function upsert(tabId, data) {
   jobs[tabId] = Object.assign({}, prev, data, { tabId, n, pageName, label, at: Date.now() });
   if (data.phase === 'idle' && !data.sending && !data.scanning) delete jobs[tabId];
   persistJobs(); // SW ngủ dậy vẫn còn job để phát lại (biến trong RAM mất khi SW tắt)
+  if (jobs[tabId] && (jobs[tabId].sending || jobs[tabId].scanning)) {
+    // Best-effort: giữ Pancake khỏi bị Chrome Memory Saver DISCARD trong lúc job chạy.
+    // Không tắt timer throttling của tab ẩn.
+    await holdTabFromDiscard(tabId);
+  } else {
+    await releaseTabDiscardLease(tabId);
+  }
   await broadcast();
 }
 
@@ -425,17 +532,38 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   }
 });
 
-chrome.tabs.onRemoved.addListener((tabId) => {
+chrome.tabs.onRemoved.addListener(async (tabId) => {
   if (bgCtl[tabId]) bgCtl[tabId].stop = true;
-  if (jobs[tabId]) { delete jobs[tabId]; persistJobs(); broadcast(); }
+  await hydrateJobs();
+  if (jobs[tabId]) { delete jobs[tabId]; persistJobs(); }
+  await hydrateAwakeLeases();
+  if (Object.prototype.hasOwnProperty.call(awakeLeases, String(tabId))) {
+    delete awakeLeases[String(tabId)];
+    await persistAwakeLeases();
+  }
+  clearDiscardLeaseAlarmIfIdle();
+  broadcast();
 });
 
 chrome.tabs.onMoved.addListener(() => broadcast());
 chrome.tabs.onUpdated.addListener((tabId, info) => {
-  if (info.status === 'complete' || info.url) broadcast();
+  if (info.status === 'loading') {
+    // Refresh/navigation kết thúc script trong trang; nhả lease để không giữ cờ cấm discard mãi.
+    (async () => {
+      await hydrateJobs();
+      delete jobs[tabId];
+      persistJobs();
+      if (bgCtl[tabId]) bgCtl[tabId].stop = true;
+      await releaseTabDiscardLease(tabId);
+      await broadcast();
+    })();
+  } else if (info.status === 'complete' || info.url) {
+    broadcast();
+  }
 });
 
 chrome.runtime.onInstalled.addListener(async () => {
+  await cleanupStaleDiscardLeases();
   // Tiêm overlay/bridge vào các tab ĐANG MỞ SẴN: content script chỉ tự chạy khi tab tải lại,
   // nên sau mỗi lần reload extension mà không tiêm tay, chuyển qua tab cũ sẽ không thấy overlay
   try {
