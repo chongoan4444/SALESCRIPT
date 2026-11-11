@@ -442,6 +442,7 @@ async function swFetchJson(msg) {
   const isPost = String(msg.method || 'GET').toUpperCase() === 'POST';
   const timeoutMs = msg.timeoutMs || 15000;
   let lastErr = '';
+  const retryStatuses = [];
   for (let t = 1; t <= max; t++) {
     const ctl = new AbortController();
     const timer = setTimeout(() => ctl.abort(), timeoutMs);
@@ -465,29 +466,30 @@ async function swFetchJson(msg) {
       }
       clearTimeout(timer);
       if (r.status === 429 || r.status >= 500) {
+        retryStatuses.push(r.status);
         lastErr = 'HTTP ' + r.status;
         if (t < max) { await new Promise((x) => setTimeout(x, 400 * t)); continue; }
-        return { ok: false, error: lastErr };
+        return { ok: false, error: lastErr, retryStatuses };
       }
       if (!r.ok) {
         const body = (await r.text().catch(() => '')).slice(0, 140);
-        return { ok: false, error: 'HTTP ' + r.status + (body ? ' · ' + body : '') };
+        return { ok: false, error: 'HTTP ' + r.status + (body ? ' · ' + body : ''), retryStatuses };
       }
       const txt = await r.text();
-      if (!txt || !txt.trim()) return { ok: true, data: { conversations: [] } };
-      try { return { ok: true, data: JSON.parse(txt) }; } catch (e) {
-        try { return { ok: true, data: JSON.parse(atob(txt)) }; } catch (e2) {
-          return { ok: false, error: 'Phản hồi không phải JSON' };
+      if (!txt || !txt.trim()) return { ok: true, data: { conversations: [] }, retryStatuses };
+      try { return { ok: true, data: JSON.parse(txt), retryStatuses }; } catch (e) {
+        try { return { ok: true, data: JSON.parse(atob(txt)), retryStatuses }; } catch (e2) {
+          return { ok: false, error: 'Phản hồi không phải JSON', retryStatuses };
         }
       }
     } catch (e) {
       clearTimeout(timer);
       lastErr = (e && e.name === 'AbortError') ? 'timeout' : ('Lỗi mạng: ' + (e && e.message || e));
       if (t < max) { await new Promise((x) => setTimeout(x, 400 * t)); continue; }
-      return { ok: false, error: lastErr };
+      return { ok: false, error: lastErr, retryStatuses };
     }
   }
-  return { ok: false, error: lastErr || 'Không tải được' };
+  return { ok: false, error: lastErr || 'Không tải được', retryStatuses };
 }
 
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {

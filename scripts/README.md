@@ -1,5 +1,7 @@
 # BOTFAKE — Gửi 1 câu cho toàn bộ đoạn chat có cùng snippet
 
+> **Dữ liệu HAR:** Các HAR trong repo công khai đã được làm sạch: chỉ giữ timing/status/size, ẩn ID endpoint và bỏ body/header/cookie/token. Ghi chú phân tích bên dưới được viết từ bản HAR thô trước khi làm sạch. HAR mới bị `.gitignore` để tránh đưa dữ liệu phiên/khách lên repo.
+
 File: `pancake-send-by-snippet.user.js` — chạy bằng **Tampermonkey** trên trang chat Pancake
 (`/page/conversation`). Gửi **cùng 1 câu** (có thể **kèm 1 ảnh**) cho tất cả đoạn chat đã chọn.
 

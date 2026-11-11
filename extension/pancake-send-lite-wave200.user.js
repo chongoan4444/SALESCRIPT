@@ -1140,17 +1140,34 @@
   // GET/POST an toàn cho tải danh sách & đọc lịch sử: tự thử lại khi bị rate-limit (429)/5xx/lỗi mạng; trả lỗi kèm chi tiết
   let bgDeadUntil = 0; // mốc SW fetch chết → tạm fetch thẳng trên trang
   async function fetchJson(url, tries, reqOpts) {
+    const retryStatuses = [];
+    const appendRetryStatuses = (result) => {
+      if (result && Array.isArray(result.retryStatuses)) {
+        result.retryStatuses.forEach((status) => {
+          const n = Number(status);
+          if (n > 0) retryStatuses.push(n);
+        });
+      }
+    };
+    const withRetryStatuses = (result) => Object.assign({}, result || {}, { retryStatuses: retryStatuses.slice() });
     // Tab đang mở: fetch ngay trên trang (đúng cookie/token như app, không tốn IPC hay lỗi thiếu access_token ở SW).
     // Tab ẩn: mới chuyển SW để khỏi bị Chrome bóp; nếu SW trả lỗi hoặc success:false thì fallback về fetch trên trang.
     const tabHidden = typeof document !== 'undefined' && !!document.hidden;
     if (tabHidden && extBgAvailable() && Date.now() >= bgDeadUntil) {
       const r = await bgFetchJson(url, tries, reqOpts);
+      appendRetryStatuses(r);
+      const sawBg429 = retryStatuses.some((status) => status === 429)
+        || /(?:HTTP\s*)?429/.test((r && r.error) || '');
+      if (sawBg429) {
+        // Để fetchPage thấy 429 và kích hoạt cooldown chung; không bắn thêm ngay qua fetch trang.
+        return withRetryStatuses(r);
+      }
       const transport = r && !r.ok
         && /^(timeout|SW fetch lỗi|The message port|Could not establish|Extension context)/i.test(String(r.error || ''));
       if (transport) {
         bgDeadUntil = Date.now() + 60000; // SW chết/mất bridge → 60s tới fetch trên trang, không treo 120s/lần gọi
       } else if (r && r.ok && !(r.data && r.data.success === false)) {
-        return r;
+        return withRetryStatuses(r);
       }
     }
     const max = tries || 3;
@@ -1170,33 +1187,36 @@
         });
         if (abortTimer) { clearTimeout(abortTimer); abortTimer = null; }
         if (r.status === 429 || r.status >= 500) {
+          retryStatuses.push(r.status);
           lastErr = 'HTTP ' + r.status;
           if (t < max) { await sleep(400 * t); continue; }
-          return { ok: false, error: lastErr };
+          return { ok: false, error: lastErr, retryStatuses: retryStatuses.slice() };
         }
         if (!r.ok) {
           const body = (typeof r.text === 'function' ? (await r.text() || '') : '').slice(0, 140);
-          return { ok: false, error: 'HTTP ' + r.status + (body ? ' · ' + body : '') };
+          return { ok: false, error: 'HTTP ' + r.status + (body ? ' · ' + body : ''), retryStatuses: retryStatuses.slice() };
         }
         if (typeof r.text !== 'function' && typeof r.json === 'function') {
           const d = await r.json().catch(() => null);
-          return d ? { ok: true, data: d } : { ok: false, error: 'Phản hồi không phải JSON' };
+          return d
+            ? { ok: true, data: d, retryStatuses: retryStatuses.slice() }
+            : { ok: false, error: 'Phản hồi không phải JSON', retryStatuses: retryStatuses.slice() };
         }
         const txt = await r.text();
-        if (!txt || !txt.trim()) return { ok: true, data: { conversations: [] } }; // body rỗng = hết dữ liệu
-        try { return { ok: true, data: JSON.parse(txt) }; } catch (e) {
-          try { return { ok: true, data: JSON.parse(atob(txt)) }; } catch (e2) {
-            return { ok: false, error: 'Phản hồi không phải JSON' };
+        if (!txt || !txt.trim()) return { ok: true, data: { conversations: [] }, retryStatuses: retryStatuses.slice() }; // body rỗng = hết dữ liệu
+        try { return { ok: true, data: JSON.parse(txt), retryStatuses: retryStatuses.slice() }; } catch (e) {
+          try { return { ok: true, data: JSON.parse(atob(txt)), retryStatuses: retryStatuses.slice() }; } catch (e2) {
+            return { ok: false, error: 'Phản hồi không phải JSON', retryStatuses: retryStatuses.slice() };
           }
         }
       } catch (e) {
         if (abortTimer) clearTimeout(abortTimer);
         lastErr = (e && e.name === 'AbortError') ? 'quá ' + Math.round(((reqOpts && reqOpts.timeoutMs) || 15000) / 1000) + 's chưa phản hồi' : 'Lỗi mạng: ' + (e && e.message || e);
         if (t < max) { await sleep(400 * t); continue; }
-        return { ok: false, error: lastErr };
+        return { ok: false, error: lastErr, retryStatuses: retryStatuses.slice() };
       }
     }
-    return { ok: false, error: lastErr || 'Không tải được' };
+    return { ok: false, error: lastErr || 'Không tải được', retryStatuses: retryStatuses.slice() };
   }
 
   // Đọc tham số danh sách GIỐNG HỆT app (buildConversationsRequest — module 907775 @1402744 trong _app):
@@ -1491,7 +1511,11 @@
       while (!stopped() && Date.now() < rl.pauseUntil) await sleep(150);
       if (stopped()) return { ok: false, error: 'stopped' };
       const res = await fetchJson(req.url, eo.tries || 3, { method: req.method, bodyObj: req.bodyObj, timeoutMs: eo.timeoutMs || 12000 });
-      if (!res.ok) { if (/429/.test(res.error || '')) rlNote429(); return { ok: false, error: res.error }; }
+      const saw429 = (res && Array.isArray(res.retryStatuses) && res.retryStatuses.some((status) => Number(status) === 429))
+        || /(?:HTTP\s*)?429/.test((res && res.error) || '');
+      // fetchJson tự retry 429 nội bộ; ghi nhận cả 429 đã hồi phục trước khi đi sang cursor tiếp theo.
+      if (saw429) rlNote429();
+      if (!res.ok) return { ok: false, error: res.error };
       const j = res.data || {};
       if (j.success === false) return { ok: false, error: j.message || j.error || 'success=false' };
       return { ok: true, data: j, ids: req.ids, unreadFirst: req.unreadFirst };

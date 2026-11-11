@@ -6,6 +6,10 @@ Repository này chứa các file source được lấy từ website mà người
 Mục đích chính là để AI phân tích cấu trúc website và tạo các JavaScript/Tampermonkey
 script hoạt động phù hợp với website thực tế.
 
+## HAR / dữ liệu nhạy cảm
+
+Các file `.har` trong repo công khai chỉ nên giữ metadata phục vụ phân tích (endpoint đã ẩn ID, thời gian, status, kích thước); request/response bodies, headers, cookies và token đã được loại bỏ. HAR thô mới được ignore bởi `.gitignore`. Những bản HAR cũ trong Git history vẫn có thể chứa dữ liệu đã lộ; cần thu hồi token cũ.
+
 ## Quy tắc quan trọng
 
 - Khi người dùng yêu cầu viết script cho website, trước tiên phải kiểm tra các file
