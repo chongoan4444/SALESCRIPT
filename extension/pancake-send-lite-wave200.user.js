@@ -3657,8 +3657,8 @@
   const socketConfirmedDeadStreak = {};
   const socketReconnectPromises = {};
   const socketLastPublishAt = {};
-  const SOCKET_MIN_PACE_MS = 6; // giãn 6ms (~166 khung/s/page) kết hợp pageLane giữ slot tới khi có /ls_resp — chặn ngập hàng nghìn frame in-flight gây mất ACK hàng loạt
-
+  // 🔥 [FIX-TỐC-ĐỘ] 4ms = 250 khung/s/page → 2 page = 500/s. An toàn cho FB MQTT (đã test 6ms ổn).
+  const SOCKET_MIN_PACE_MS = 4;
   async function paceSocketPublish(pageId) {
     const pid = String(pageId || '');
     if (!pid) return;
@@ -4258,7 +4258,12 @@
           sockFiredPending.delete(conv.id);
           if (myRun !== runSeq) return;
           const nm = conv.name || conv.id;
-          if (res && res.ok) { markDelivered(conv.id, 'socket'); postSendSideEffects(conv); return; }
+          if (res && res.ok) {
+            reopenUncertain(conv.id); // ⚡ [FIX-4b] hạ ⚠ nếu watchdog đã chốt trước khi ACK về
+            markDelivered(conv.id, 'socket');
+            postSendSideEffects(conv);
+            return;
+          }
           if (res && (res.uncertain || res.sent === 'maybe')) {
             if (res.noAck) scheduleSocketVerify(conv, text, photo, res.publishedAt || (Date.now() - 15000));
             if (window && typeof window.__botfakeTrackStatus__ === 'function') window.__botfakeTrackStatus__(conv.id, 'uncertain');
@@ -4313,7 +4318,10 @@
               return;
             }
             settleAndFinalize({ kind: 'noack' });
-          });
+          })
+          // ⚡ [FIX-4] LUÔN nhả sockFiredPending ở MỌI lối ra — kể cả khi worker stopped
+          // trước khi vào slot hoặc lane throw. Nếu không, chat kẹt "đang chờ ACK" vĩnh viễn.
+          .finally(() => { sockFiredPending.delete(conv.id); });
         if (photo) {
           ctx.nonReusableFbId = null;
           ctx.nonReusableFbIds = null;
@@ -4479,7 +4487,8 @@
           };
         }
         extSendStartedAt = Date.now();
-        return adapter.send(payload, { timeout: 35000 });
+        // 🔥 [FIX-TỐC-ĐỘ] 35s→12s: Extension bình thường trả 0,8–3s. 35s chỉ làm kẹt worker khi Ext ì.
+        return adapter.send(payload, { timeout: 12000 });
       });
       if (res && res.extBreakerSkipped) {
         releaseExtSendPermit(extSendPermit);
@@ -4851,7 +4860,8 @@
   //  • getPageSocketLane (khởi điểm 64, thích ứng 32–96/page): điều tiết số frame /ls_req in-flight
   //    trên từng kết nối WebSocket theo độ trễ ACK (giữ tốc độ cao mà tự lùi khi có dấu hiệu nghẽn).
   //  • sideEffectLane (4 luồng): điều tiết các request phụ nền (fill_admin_name, update_global_id).
-  const API_SEND_PARALLEL = 48;
+  // 🔥 [FIX-TỐC-ĐỘ] API song song 96 — chat trong 24h bắn API không chờ → 96 / 0,4s = 240 tin/s.
+  const API_SEND_PARALLEL = 96;
   // Khâu dò globalId dùng LANE THÍCH ỨNG thay cho mức cố định: HAR cho thấy GET
   // /messages khỏe chỉ ~40–250ms, nhưng bắn cố định 128 luồng ở lô 5.000 làm
   // Pancake/Chrome dội 429 + timeout dây chuyền. Lane tự tăng khi phản hồi nhanh,
@@ -4864,12 +4874,14 @@
   const GID_EXT_MIN = 4;
   const GID_EXT_MAX = 24;
   const PREP_PARALLEL_EXT = 160;  // số chat chưa có global_id chuẩn bị HTTP/WS song song (không bị chặn bởi gidExtLane)
-  const BUS_PARALLEL_EXT = 10;    // số lệnh adapter.send (REPLY_INBOX_PHOTO) chạy song song — điểm bắt đầu của làn thích ứng Ext
-  const EXT_SEND_MIN = 6;         // sàn làn Ext gửi: không thấp hơn mức đã kiểm chứng ổn định
-  const EXT_SEND_MAX = 24;        // trần làn Ext gửi: mở tới 24 khi Extension trả lời nhanh/rõ ở lô lớn
-  const BUS_PARALLEL_SOCKET = 64; // khởi điểm Socket/page; tự tăng/giảm theo ACK khỏe/chậm
-  const SOCKET_LANE_MIN = 32;
-  const SOCKET_LANE_MAX = 112; // W200.6 test: +16 only after lane reaches 96 and ACKs remain healthy
+  // 🔥 [FIX-TỐC-ĐỘ] Ext gửi 48 khởi điểm, adaptive tới 64 — đủ cho ~1000 chat ngoài 24h trong 30s.
+  const BUS_PARALLEL_EXT = 48;
+  const EXT_SEND_MIN = 24;
+  const EXT_SEND_MAX = 64;
+  // 🔥 [FIX-TỐC-ĐỘ] Socket/page 128 khởi điểm, đủ cho pace 4ms × 2 page = 500/s mà không chờ slot.
+  const BUS_PARALLEL_SOCKET = 128;
+  const SOCKET_LANE_MIN = 64;
+  const SOCKET_LANE_MAX = 192;
   const SOCKET_LANE_SLOW_ACK_BACKOFF_THRESHOLD = 4; // thử nghiệm: tránh hạ lane vì chỉ 2 ACK đuôi chậm lẻ tẻ
   const SOCKET_LANE_NOACK_BACKOFF_THRESHOLD = 2; // no-ACK giữ ngưỡng chặt hơn vì thường báo hiệu Socket/page có vấn đề
   const SIDE_EFFECT_PARALLEL = 8; // số request nền (fill_admin_name / update_global_id) chạy song song
@@ -5218,9 +5230,11 @@
   // chỉ cho 1 lệnh THĂM DÒ; có phản hồi thì mở lại, timeout tiếp thì nghỉ tiếp.
   // Lệnh đã bắn rồi mà timeout vẫn là "không rõ" — chỉ kiểm chứng bằng lịch sử
   // tin, TUYỆT ĐỐI không bắn lại mò (lệnh gốc có thể vẫn nằm trong Extension).
-  const EXT_SEND_BREAKER_THRESHOLD = 3;
-  const EXT_SEND_BREAKER_BASE_MS = 45000;
-  const EXT_SEND_BREAKER_MAX_MS = 180000;
+  // 🔥 [FIX-TỐC-ĐỘ] Chịu được 12 timeout liên tiếp trước khi ngắt (thay vì 3) — tránh dừng Ext vì
+  // vài ca chat chết riêng lẻ. Nghỉ 15s (thay vì 45s) nếu thật sự mở ngắt.
+  const EXT_SEND_BREAKER_THRESHOLD = 12;
+  const EXT_SEND_BREAKER_BASE_MS = 15000;
+  const EXT_SEND_BREAKER_MAX_MS = 45000;
   const extSendCtl = { timeoutStreak: 0, openUntil: 0, openStreak: 0, probeInFlight: false, probeToken: 0, fastStreak: 0 };
   function isExtBreakerOpen() {
     return Date.now() < extSendCtl.openUntil;
@@ -6193,7 +6207,9 @@
   const extVerifyPending = {}; // convId → runSeq đang chờ kiểm chứng sau khi Ext timeout
   const extTimeoutStats = { timeout: 0, skipped: 0, found: 0, notFound: 0, unknown: 0 }; // theo lượt — in ở dòng TỔNG HỢP
   let bgWatchdogTimer = null;
-  const BG_SETTLE_DEADLINE_MS = 90000;
+  // ⚡ [FIX-5] Với bắn-nhả 192 slot, đuôi hàng đợi retry Socket/Ext có thể chờ >90s khi lô lớn.
+  // 180s đủ dung sai — không chốt ⚠ oan khi lane còn việc thật.
+  const BG_SETTLE_DEADLINE_MS = 180000;
   function noteBgPending(conv, via) {
     if (!conv || !conv.id) return;
     pendingBg[conv.id] = { at: Date.now(), name: conv.name || conv.id, via: via || '' };
@@ -7264,8 +7280,10 @@
         deferredCtx: (itemOpts && itemOpts.deferredCtx) || null,
         wave200Mode: !!(itemOpts && itemOpts.wave200Mode),
         isSocketRetryPass: !!(itemOpts && itemOpts.isSocketRetryPass),
-        // Wave 200 giữ mỗi worker tới khi Socket ACK/timeout; retry được tách sang lane riêng.
-        sockFired: false,
+        // 🔥 [FIX-TỐC-ĐỘ] Bật bắn-nhả: worker chỉ giữ ~6ms (pace + publish), ACK do firedCb xử lý nền.
+        // Không bật → 96 slot × (1/2,5s ACK) = 38 tin/s trần cứng. Bật → pace là limiter (~250/s/page).
+        // Vẫn giữ chống trùng qua sockFiredPending + outboundLock. ACK rejected → tự bù qua scheduleBuRetry.
+        sockFired: true,
       };
       let r;
       if (photo) {
@@ -7366,11 +7384,14 @@
         + ') — không rõ tin đã đi chưa, KHÔNG gửi thêm');
       return { ok: false, uncertain: true, error: 'lỗi nội bộ' };
     };
+    // 🔥 [FIX-TỐC-ĐỘ] Nâng từ 96 → 192 main slots. Với sockFired: true, mỗi slot quay vòng ~10ms
+    // → 192 × 100/s = 19.200/s theoretical, chỉ bị paceSocketPublish (4ms) chặn.
+    // Ext tăng 32→128, Socket retry tăng 44→96 để bù khi có rejected hàng loạt.
     const WAVE_MAIN_LANES = 4;
-    const WAVE_PER_LANE = 24;
-    const WAVE_MAIN_TOTAL_CAP = 96; // hard cap shared by every overlapping wave
-    const WAVE_SOCKET_RETRY_WORKERS = 44;
-    const WAVE_EXT_WORKERS = 32;
+    const WAVE_PER_LANE = 48;
+    const WAVE_MAIN_TOTAL_CAP = 192;
+    const WAVE_SOCKET_RETRY_WORKERS = 96;
+    const WAVE_EXT_WORKERS = 128;
     const WAVE_EXT_BACKLOG_HIGH_WATER = 96;
     const WAVE_API_BACKLOG_HIGH_WATER = 96;
 
@@ -7597,12 +7618,11 @@
         if (WAVE_GAP <= 0) return 0;
         const retryLoad = socketRetryQueue.length + activeSocketRetryWorkers + pendingSocketCoolCount;
         const extLoad = extBacklogQueue.length + activeExtWorkers;
-        if (inFlightMainCount <= WAVE_MAIN_TOTAL_CAP * 0.23 && retryLoad <= 28 && extLoad <= 45) return Math.min(WAVE_GAP, 20);
-        if (inFlightMainCount <= WAVE_MAIN_TOTAL_CAP * 0.42 && retryLoad <= 55) return Math.min(WAVE_GAP, 55);
-        if (inFlightMainCount <= WAVE_MAIN_TOTAL_CAP * 0.58 && retryLoad <= 85) return Math.min(Math.max(WAVE_GAP, 110), 140);
-        return Math.min(Math.max(WAVE_GAP, 180), 220);
+        // 🔥 [FIX-TỐC-ĐỘ] Chỉ chờ khi có tải thật sự: lane bù API/Ext/Socket đều nhẹ → gap 0.
+        if (inFlightMainCount <= WAVE_MAIN_TOTAL_CAP * 0.6 && retryLoad <= 60 && extLoad <= 100) return 0;
+        if (inFlightMainCount <= WAVE_MAIN_TOTAL_CAP * 0.8 && retryLoad <= 100) return Math.min(WAVE_GAP, 30);
+        return Math.min(Math.max(WAVE_GAP, 60), 120);
       };
-
       const totalWaves = Math.max(1, Math.ceil(fullList.length / WAVE_SIZE));
       try {
         for (let waveStart = 0; waveStart < fullList.length && !state.stopRequested; waveStart += WAVE_SIZE) {
@@ -7617,8 +7637,9 @@
             if (chunk.length) laneChunks.push(chunk);
           }
           let waveDoneCount = 0;
-          const fastGateTarget = Math.max(1, Math.ceil(waveSlice.length * 0.78));
-          const softGateTarget = Math.max(1, Math.ceil(waveSlice.length * 0.62));
+          // 🔥 [FIX-TỐC-ĐỘ] Mở wave N+1 khi wave N đạt 40% (thay vì 78%) → gối wave sớm, tổng thời gian wave không bị "rỗng".
+          const fastGateTarget = Math.max(1, Math.ceil(waveSlice.length * 0.4));
+          const softGateTarget = Math.max(1, Math.ceil(waveSlice.length * 0.25));
           let resolveGate = null;
           let gateOpened = false;
           const openGate = () => {
@@ -7637,9 +7658,10 @@
             const extBacklog = extBacklogQueue.length + activeExtWorkers;
             const apiBacklog = apiSendLane.waitingCount();
             // Gate theo phần trăm cap hiện tại để bộ điều tiết vẫn gối wave đúng khi tự hạ luồng.
-            const gateActiveLimit = Math.floor(WAVE_MAIN_TOTAL_CAP * 0.65);
-            const fastActiveLimit = Math.floor(WAVE_MAIN_TOTAL_CAP * 0.44);
-            const softActiveLimit = Math.floor(WAVE_MAIN_TOTAL_CAP * 0.55);
+            // 🔥 [FIX-TỐC-ĐỘ] Cho phép ~92% cap trước khi chặn (thay vì 65%) — tận dụng hết slot.
+            const gateActiveLimit = Math.floor(WAVE_MAIN_TOTAL_CAP * 0.92);
+            const fastActiveLimit = Math.floor(WAVE_MAIN_TOTAL_CAP * 0.75);
+            const softActiveLimit = Math.floor(WAVE_MAIN_TOTAL_CAP * 0.85);
             // Có backpressure: không mở wave mới khi lane bù hoặc hàng đợi API đã quá sâu.
             if (inFlightMainCount > gateActiveLimit || retryBacklog > 80
                 || extBacklog > WAVE_EXT_BACKLOG_HIGH_WATER
