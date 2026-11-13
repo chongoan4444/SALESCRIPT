@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Hỗ trợ trả lời Sale (Draggable Bubble - v5.5)
 // @namespace    http://tampermonkey.net/
-// @version      6.1.0
+// @version      6.2.0
 // @description  Trợ lý trả lời nhanh cho Sale: gõ câu tắt dạng /cn trong ô soạn tin Pancake → câu trả lời tự nhảy vào ô, Enter là gửi. Bong bóng nổi kéo thả, quản lý danh mục & câu tắt ngay trên trang.
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -14,6 +14,7 @@
 // @grant        GM_setValue
 // @grant        GM_getValue
 // @grant        GM_setClipboard
+// @grant        GM_deleteValue
 // @run-at       document-end
 // @noframes
 // ==/UserScript==
@@ -36,12 +37,15 @@
  *
  * THAY ĐỔI SO VỚI v5.5:
  * - BỎ hoàn toàn cơ chế "mô tả câu / nhãn" (label) + bấm vào câu trong panel để ghi đè ô nhập.
- *   (Nay mỗi câu có CÂU TẮT dạng /cn — gõ ngay trong ô soạn tin Pancake là câu tự nhảy vào.)
- * - THÊM câu tắt (shortcut) dạng  /cn  — gõ ngay trong ô soạn tin Pancake:
- *     gõ "/cn" → hiện danh sách gợi ý ngay trên ô nhập → Enter/Tab (hoặc bấm gợi ý)
+ *   (Nay mỗi câu có CÂU TẮT — gõ ngay trong ô soạn tin Pancake là câu tự nhảy vào.)
+ * - THÊM câu tắt (shortcut) dạng  //cn  (HAI gạch chéo) — gõ ngay trong ô soạn tin Pancake:
+ *     gõ "//cn" → hiện danh sách gợi ý ngay trên ô nhập → Enter/Tab (hoặc bấm gợi ý)
  *     → câu trả lời được CHÈN vào đúng vị trí con trỏ, giữ nguyên chữ đang gõ dở;
  *     bấm Enter lần nữa là gửi (script không tự gửi, không tự Enter).
- * - Panel: danh mục + câu tắt, có ô tìm kiếm, hiện chip "/câu_tắt" để biết gõ gì.
+ * - v6.2.0: CHỈ kích hoạt khi câu tắt bắt đầu bằng "//" (một gạch "/" vẫn là bảng câu nhanh
+ *   gốc của Pancake), và DANH SÁCH VỀ TRẮNG — bỏ hết câu mẫu/câu đã lưu của bản cũ để
+ *   người dùng tự thêm câu của mình (dữ liệu cũ được in ra console để sao lưu nếu cần).
+ * - Panel: danh mục + câu tắt, có ô tìm kiếm, hiện chip "//câu_tắt" để biết gõ gì.
  * - Chế độ Chỉnh sửa: thêm/sửa/xóa danh mục & câu tắt bằng form trong panel (không dùng prompt),
  *   kéo thả ⠿ để sắp xếp, chặn trùng câu tắt.
  * - Tự động di trú dữ liệu cũ (localStorage/GM 'sqr_data_v5') sang dữ liệu mới.
@@ -54,8 +58,10 @@
 
   /* ============================ HẰNG SỐ ============================ */
 
-  const APP_VERSION = '6.1.0';
-  const KEY_DATA = 'tln_data_v1';
+  const APP_VERSION = '6.2.0';
+  const KEY_DATA = 'tln_data_v2';          // v6.2.0: dữ liệu trắng (người dùng tự thêm), kích hoạt bằng "//"
+  const KEY_DATA_OLD = 'tln_data_v1';      // dữ liệu của v6.0/6.1 (bị bỏ khi nâng cấp)
+  const CLEAR_FLAG = 'tln_cleared_v2';     // đánh dấu đã dọn dữ liệu mẫu một lần
   const KEY_POS = 'tln_pos_v1';
   const KEY_LEGACY = 'sqr_data_v5';      // dữ liệu của bản v5.5 (để di trú)
   const KEY_LEGACY_POS = 'sqr_btn_pos';
@@ -69,37 +75,8 @@
 
   /* ============================ DỮ LIỆU MẶC ĐỊNH ============================ */
 
-  const DEFAULT_DATA = [
-    {
-      id: 'cat_chao',
-      title: 'Chào hỏi & Tư vấn',
-      items: [
-        { shortcut: 'chao', text: 'Dạ em chào anh/chị, em có thể hỗ trợ gì cho mình ạ?' },
-        { shortcut: 'sanhang', text: 'Dạ chào bạn, shop sẵn hàng mẫu này ạ!' },
-      ],
-    },
-    {
-      id: 'cat_macthu',
-      title: 'Mặc thử mới lấy',
-      items: [
-        { shortcut: 'dongkiem', text: 'Dạ bên em có hỗ trợ đồng kiểm khi nhận hàng, mình mặc thử ưng ý mới thanh toán ạ.' },
-      ],
-    },
-    {
-      id: 'cat_lo',
-      title: 'Khách sợ mặc lộ',
-      items: [
-        { shortcut: 'khonglo', text: 'Chất vải này dày dặn, đứng phom và có lớp lót bên trong nên hoàn toàn không lo bị lộ đâu ạ.' },
-      ],
-    },
-    {
-      id: 'cat_gia',
-      title: 'Chênh lệch giá với shop khác',
-      items: [
-        { shortcut: 'hangchuan', text: 'Dạ sản phẩm bên em là hàng chuẩn may kĩ, form chuẩn và bảo hành đổi trả, không phải hàng gia công đại trà ạ.' },
-      ],
-    },
-  ];
+  // v6.2.0: KHÔNG còn câu mẫu — danh sách trắng, người dùng tự thêm câu tắt của mình.
+  const DEFAULT_DATA = [];
 
   /* ============================ TIỆN ÍCH ============================ */
 
@@ -153,7 +130,7 @@
 
   function gmGet(key, fallback) {
     try {
-      if (typeof GM_getValue !== 'undefined') {
+      if (typeof GM_getValue === 'function') {
         const v = GM_getValue(key, null);
         if (v != null) return v;
       }
@@ -209,20 +186,36 @@
       }));
   }
 
+  function removeSavedKey(key) {
+    try { if (typeof GM_deleteValue === 'function') GM_deleteValue(key); } catch (e) { /* ignore */ }
+    try { if (typeof GM_setValue === 'function') GM_setValue(key, null); } catch (e) { /* ignore */ }
+    try { localStorage.removeItem(key); } catch (e) { /* ignore */ }
+  }
+
   function loadData() {
+    // v6.2.0: dọn MỘT LẦN dữ liệu của bản cũ (câu mẫu + câu đã lưu ở v6.0/6.1 + dữ liệu v5.5)
+    // để danh sách về trắng hoàn toàn. Người dùng có thể khôi phục bằng cách chép lại
+    // JSON đã sao lưu trong console (xem log khi chạy).
+    const cleared = gmGet(CLEAR_FLAG, false) === true;
+    const oldData = gmGet(KEY_DATA_OLD, null);
+
+    if (!cleared) {
+      if (Array.isArray(oldData) && oldData.length) {
+        console.log('[TRALOINHANH] Sao lưu dữ liệu cũ của bạn trước khi dọn (chép lại nếu cần):',
+          JSON.stringify(oldData));
+      }
+      removeSavedKey(KEY_DATA_OLD);
+      removeSavedKey(KEY_LEGACY);
+      gmSet(KEY_DATA, []);
+      gmSet(CLEAR_FLAG, true);
+      return [];
+    }
+
+    // Người dùng đã chủ động dọn → nếu file cũ còn sót thì chỉ đọc dữ liệu mới, không hồi sinh câu cũ
     const saved = gmGet(KEY_DATA, null);
     if (Array.isArray(saved) && saved.length) {
       const data = normalizeData(saved);
       if (data.length) return data;
-    }
-    // Di trú dữ liệu của bản v5.5 (danh mục + câu, chưa có câu tắt)
-    const legacy = gmGet(KEY_LEGACY, null);
-    if (Array.isArray(legacy) && legacy.length) {
-      const migrated = normalizeData(legacy);
-      if (migrated.length) {
-        gmSet(KEY_DATA, migrated);
-        return migrated;
-      }
     }
     return normalizeData(DEFAULT_DATA);
   }
@@ -896,41 +889,46 @@
     return false;
   }
 
-  /* ============================ ĐỌC TOKEN "/xx" TẠI CON TRỎ ============================ */
+  /* ============================ ĐỌC TOKEN "//xx" TẠI CON TRỎ ============================ */
 
-  const TOKEN_RE = /(?:^|[\s([{"'“”‘’<>⟦])?\/([^\s/]{0,32})$/;
+  // v6.2.0: CHỈ kích hoạt khi câu tắt bắt đầu bằng HAI gạch chéo "//".
+  //  - "//"        → mở bảng chọn (gợi ý toàn bộ câu tắt)
+  //  - "//cn"      → lọc theo "cn"
+  //  - "/cn"       → KHÔNG làm gì (để dành cho bảng câu nhanh "/" gốc của Pancake)
+  // "//" phải đứng đầu ô hoặc sau khoảng trắng/ký tự mở; "abc//cn", "https://x//y" → không kích hoạt.
+  // Token = "//" + chữ (không dấu, không khoảng trắng, tối đa 32 ký tự).
+  const TOKEN_RE = /(?:^|[\s([{"'“”‘’<>⟦])\/\/([^\s/]{0,32})$/;
 
-  /** Trả về { el, token, start, end, caretKind } của câu tắt đang gõ ở con trỏ. */
+  function parseToken(before, caretPos) {
+    const m = before.match(TOKEN_RE);
+    if (!m) return null;
+    const token = m[1] || '';
+    const start = caretPos - token.length - 2; // 2 = "//"
+    if (start < 0) return null;
+    // "//" phải đứng đầu ô hoặc sau khoảng trắng/ký tự mở ("abc//cn", "///cn" → không kích hoạt)
+    if (start > 0 && !/[\s([{"'“”‘’<>⟦]/.test(before.charAt(start - 1))) return null;
+    return { token, start, end: caretPos };
+  }
+
+  /** Trả về { kind, el, token, start, end } của câu tắt "//xx" đang gõ ở con trỏ, hoặc null. */
   function tokenAt(el) {
     if (!isEditableEl(el)) return null;
     const caret = readCaret(el);
     if (!caret) return null;
-    const tag = tagOf(el);
 
     if (caret.kind === 'value') {
       if (caret.start !== caret.end) return null; // đang bôi đen → không gợi ý
-      const before = caret.text.slice(0, caret.start);
-      const m = before.match(TOKEN_RE);
-      if (!m) return null;
-      const token = m[1] || '';
-      const start = caret.start - token.length - 1;
-      if (start < 0) return null;
-      // phải là "/" đứng đầu hoặc sau khoảng trắng/ký tự mở
-      if (start > 0 && !/[\s([{"'“”‘’<>⟦]/.test(before.charAt(start - 1))) return null;
-      return { kind: 'value', el, token, start, end: caret.start, caret: caret.start };
+      const info = parseToken(caret.text.slice(0, caret.start), caret.start);
+      if (!info) return null;
+      return { kind: 'value', el, token: info.token, start: info.start, end: info.end, caret: caret.start };
     }
 
     // contenteditable
     const offs = editableCaretOffsets(el);
     if (!offs || offs.start !== offs.end) return null;
-    const before = caret.text.slice(0, offs.start);
-    const m = before.match(TOKEN_RE);
-    if (!m) return null;
-    const token = m[1] || '';
-    const start = offs.start - token.length - 1;
-    if (start < 0) return null;
-    if (start > 0 && !/[\s([{"'“”‘’<>⟦]/.test(before.charAt(start - 1))) return null;
-    return { kind: 'editable', el, token, start, end: offs.start, caret: offs.start };
+    const info = parseToken(caret.text.slice(0, offs.start), offs.start);
+    if (!info) return null;
+    return { kind: 'editable', el, token: info.token, start: info.start, end: info.end, caret: offs.start };
   }
 
   /* ============================ BẢNG GỢI Ý ============================ */
@@ -990,7 +988,9 @@
       return;
     }
     const head = h('div', { class: 'tln-sg-head', title: 'Kéo để dời bảng · bấm đúp để về vị trí tự động' });
-    head.appendChild(h('span', { text: '⠿ Câu tắt khớp “/' + (picker.token || '') + '”' }));
+    head.appendChild(h('span', {
+      text: picker.token ? '⠿ Câu tắt khớp “//' + picker.token + '”' : '⠿ Câu tắt (gõ // rồi chữ tắt)',
+    }));
     const headRight = h('span', { class: 'tln-sg-head-right' });
     headRight.appendChild(h('span', { text: picker.list.length }));
     const resetBtn = h('button', {
@@ -1016,14 +1016,15 @@
         class: 'tln-sg' + (i === picker.index ? ' active' : ''),
         onmousedown: (e) => { e.preventDefault(); e.stopPropagation(); chooseSuggest(i); },
       });
-      row.appendChild(h('span', { class: 'tln-chip', text: '/' + rec.key, title: '/' + rec.key }));
+      row.appendChild(h('span', { class: 'tln-chip', text: '//' + rec.key, title: 'Gõ //' + rec.key }));
+
       row.appendChild(h('span', { class: 'tln-sg-text', text: rec.item.text }));
       list.appendChild(row);
     });
     suggest.appendChild(list);
     suggest.appendChild(h('div', {
       class: 'tln-sg-hint',
-      text: 'Enter / Tab để chèn  ·  ↑↓ chọn  ·  Esc đóng',
+      text: 'Enter / Tab (hoặc cách ra) để chèn  ·  ↑↓ chọn  ·  Esc đóng',
     }));
 
     suggest.classList.add('show');
@@ -1130,7 +1131,8 @@
     picker.open = true;
 
     const exactIdx = list.findIndex((r) => r.key === normShortcut(info.token));
-    picker.index = info.token ? (exactIdx >= 0 ? exactIdx : 0) : -1;
+    // không có chữ tắt (mới gõ "//") → chọn sẵn dòng đầu để Enter/Tab chèn luôn
+    picker.index = info.token ? (exactIdx >= 0 ? exactIdx : 0) : 0;
 
     if (settings.hideNative) hideNativePopup(true);
     renderSuggest();
@@ -1156,7 +1158,7 @@
     try {
       if (tagOf(el) === 'input' || tagOf(el) === 'textarea') el.setSelectionRange(caretAfter, caretAfter);
     } catch (e) { /* ignore */ }
-    showToast('Đã chèn câu /' + rec.key + ' — Enter để gửi');
+    showToast('Đã chèn câu //' + rec.key + ' — Enter để gửi');
   }
 
   /* ============================ BẮT SỰ KIỆN BÀN PHÍM ============================ */
@@ -1186,7 +1188,7 @@
     }
 
     if (key === ' ' && settings.autoExpand) {
-      // Gõ đúng câu tắt rồi cách ra ("/cn ") → chèn luôn, dấu cách vừa gõ thành khoảng trắng sau câu
+      // Gõ đúng câu tắt rồi cách ra ("//cn ") → chèn luôn, dấu cách vừa gõ thành khoảng trắng sau câu
       const spInfo = tokenAt(target);
       if (spInfo && spInfo.token) {
         const spRec = findExact(spInfo.token);
@@ -1202,7 +1204,7 @@
 
     if (key !== 'Enter' && key !== 'Tab') return;
 
-    // Enter khi ĐANG MỞ gợi ý nhưng chưa chọn dòng nào (mới gõ "/") → không chen ngang
+    // Enter khi ĐANG MỞ gợi ý nhưng chưa chọn dòng nào (mới gõ "//") → không chen ngang
     if (picker.open && picker.index >= 0 && picker.list.length) {
       e.preventDefault();
       e.stopPropagation();
@@ -1295,7 +1297,7 @@
       row.appendChild(handle);
     }
 
-    row.appendChild(h('span', { class: 'tln-chip', text: '/' + key, title: 'Gõ /' + key + ' trong ô soạn tin rồi Enter' }));
+    row.appendChild(h('span', { class: 'tln-chip', text: '//' + key, title: 'Gõ //' + key + ' trong ô soạn tin rồi Enter' }));
 
     const box = h('div', { class: 'tln-item-box' });
     box.appendChild(h('span', { class: 'tln-item-text', text: item.text, title: item.text }));
@@ -1345,7 +1347,7 @@
           arr.splice(itemIdx, 1);
           saveData();
           render();
-          showToast('Đã xóa câu /' + key);
+          showToast('Đã xóa câu //' + key);
         },
       }));
     } else {
@@ -1364,7 +1366,7 @@
     const target = pickTargetInput();
     if (target && insertAtCaret(target, item.text)) {
       try { target.focus({ preventScroll: true }); } catch (e) { /* ignore */ }
-      showToast('Đã chèn /' + key + ' vào ô trả lời — Enter để gửi');
+      showToast('Đã chèn //' + key + ' vào ô trả lời — Enter để gửi');
     } else {
       copyText(item.text);
       showToast('Đã sao chép /' + key + ' (chưa chọn ô nhập)');
@@ -1551,7 +1553,7 @@
         class: 'tln-empty',
         text: searchTerm
           ? 'Không có câu nào khớp “' + searchTerm + '”.'
-          : 'Chưa có câu tắt nào. Bấm “✏️ Chỉnh sửa” để thêm danh mục & câu tắt.',
+          : 'Chưa có câu tắt nào. Bấm “✏️ Chỉnh sửa” → “+ Thêm danh mục mới” rồi “+ Thêm câu tắt” (ví dụ câu tắt: cn → gõ //cn trong ô soạn tin).',
       }));
     }
 
@@ -1566,8 +1568,8 @@
     // Footer
     const footer = h('div', { class: 'tln-footer' });
     footer.appendChild(h('span', { text: 'Gõ ' }));
-    footer.appendChild(h('b', { text: '/câu_tắt' }));
-    footer.appendChild(h('span', { text: ' trong ô soạn tin rồi Enter/Tab (hoặc cách ra) để chèn — Enter lần nữa để gửi.' }));
+    footer.appendChild(h('b', { text: '//câu_tắt' }));
+    footer.appendChild(h('span', { text: ' (HAI gạch chéo) + chữ tắt trong ô soạn tin → Enter/Tab (hoặc cách ra) để chèn câu — Enter lần nữa để gửi.' }));
     footer.appendChild(h('br'));
 
     // Vị trí bảng gợi ý
@@ -1742,10 +1744,10 @@
       fields: [
         {
           key: 'shortcut',
-          label: 'CÂU TẮT (gõ trong ô soạn tin)',
+          label: 'CÂU TẮT (gõ // + chữ tắt trong ô soạn tin)',
           value: item.shortcut || '',
           placeholder: 'vd: cn',
-          hint: 'Chỉ chữ/số/gạch, không dấu, không khoảng trắng. Trong ô soạn tin bạn gõ /cn rồi Enter.',
+          hint: 'Chỉ chữ/số/._- (không dấu, không khoảng trắng). Trong ô soạn tin gõ //cn rồi Enter (hoặc cách ra).',
         },
         {
           key: 'text',
@@ -1760,7 +1762,7 @@
         if (!key) return fail('Chưa nhập câu tắt.', 'shortcut');
         if (/[^a-z0-9._-]/.test(key)) return fail('Câu tắt chỉ gồm chữ/số/._- (không dấu, không khoảng trắng).', 'shortcut');
         if (shortcutTaken(key, isEdit ? { catIdx: opts.catIdx, itemIdx: opts.itemIdx } : null)) {
-          return fail('Câu tắt “/' + key + '” đã được dùng ở câu khác.', 'shortcut');
+          return fail('Câu tắt “//' + key + '” đã được dùng ở câu khác.', 'shortcut');
         }
         if (!v.text) return fail('Chưa nhập nội dung câu trả lời.', 'text');
 
@@ -1772,7 +1774,7 @@
         }
         saveData();
         render();
-        showToast((isEdit ? 'Đã lưu câu /' : 'Đã thêm câu /') + key);
+        showToast((isEdit ? 'Đã lưu câu //' : 'Đã thêm câu //') + key);
       },
     });
   }
@@ -1824,5 +1826,5 @@
   // Mở sẵn danh mục đầu tiên cho dễ nhìn
   if (categories.length) openCats.add(categories[0].id);
 
-  console.log('[TRALOINHANH] v' + APP_VERSION + ' đã chạy — gõ /câu_tắt trong ô soạn tin rồi Enter.');
+  console.log('[TRALOINHANH] v' + APP_VERSION + ' đã chạy — gõ //chữ_tắt trong ô soạn tin rồi Enter (một gạch "/" vẫn là bảng câu nhanh của Pancake).');
 })();

@@ -1,6 +1,6 @@
 # TRALOINHANH — Trả lời nhanh cho Sale (câu tắt `/cn` + bong bóng kéo thả)
 
-File: `scripts/traloinhanh.user.js` (v6.1.0) — Tampermonkey, chạy trên trang chat Pancake
+File: `scripts/traloinhanh.user.js` (v6.2.0) — Tampermonkey, chạy trên trang chat Pancake
 (`pancake.vn`, `pages.fm`, `pancake.ph/id/in/biz`, `socialos.vip`).
 
 **Đây là bản nâng cấp của script “Hỗ trợ trả lời Sale (Draggable Bubble - v5.5)”.**
@@ -9,26 +9,33 @@ chỉ cần mở script cũ trong Tampermonkey → dán đè toàn bộ nội du
 
 ## Có gì mới so với v5.5
 
-| v5.5 | v6.0.0 |
+| v5.5 | v6.2.0 |
 |---|---|
-| Mỗi câu có “mô tả ngắn” (label) + bấm trong panel để **ghi đè** ô nhập | Bỏ label. Mỗi câu có **câu tắt** (`/cn`) — gõ ngay trong ô soạn tin là câu tự nhảy vào |
-| Phải mở panel rồi bấm từng câu | Gõ `/cn` + **Enter/Tab** (hoặc gõ thêm dấu cách) là xong, **không cần mở panel** |
+| Mỗi câu có “mô tả ngắn” (label) + bấm trong panel để **ghi đè** ô nhập | Bỏ label. Mỗi câu có **câu tắt** — gõ **`//cn`** ngay trong ô soạn tin là câu tự nhảy vào |
+| — | **Chỉ kích hoạt với `//`** (hai gạch): `/` một gạch vẫn là bảng câu nhanh gốc của Pancake |
+| — | **Danh sách về trắng**: bỏ hết câu mẫu + câu đã lưu của bản cũ, bạn tự thêm câu của mình |
+| Phải mở panel rồi bấm từng câu | Gõ `//cn` + **Enter/Tab** (hoặc gõ thêm dấu cách) là xong, **không cần mở panel** |
 | Ghi đè toàn bộ ô nhập | **Chèn tại con trỏ**, giữ nguyên chữ đang gõ dở (bôi đen thì thay vùng bôi đen) |
 | Thêm/sửa bằng `prompt()` của trình duyệt | Form trong panel, chặn **trùng câu tắt**, tự chuẩn hóa (bỏ dấu, lowercase, bỏ `/`) |
 | — | Ô **tìm kiếm** câu tắt/nội dung, nút 📋 sao chép từng câu, phím tắt `Alt+Shift+S` |
-| — | Tự **di trú** dữ liệu cũ (`sqr_data_v5`, kể cả label) sang dữ liệu mới, sinh câu tắt từ nhãn cũ |
+| — | Lần chạy đầu của v6.2.0 **dọn sạch** dữ liệu cũ (`tln_data_v1`, `sqr_data_v5`) và in bản sao ra console |
 | — | **Không còn che bảng "/" gốc của Pancake**: bảng gợi ý của script tự ẩn bảng gốc khi mở, và **kéo được** (lưu vị trí) nếu vẫn muốn dời đi chỗ khác |
 
 ## Sử dụng
 
+0. **Thêm câu tắt của bạn**: bấm bong bóng 💬 → “✏️ Chỉnh sửa” → “+ Thêm danh mục mới” →
+   trong danh mục bấm “+ Thêm câu tắt cho danh mục này” → nhập **câu tắt** (vd `cn`) + **nội dung câu trả lời**.
+   Danh sách mặc định **trống** (bản v6.2.0 đã xoá hết câu mẫu & câu cũ một lần khi nâng cấp).
 1. **Gõ câu tắt trong ô soạn tin** của Pancake (ô `textarea#replyBoxComposer`):
-   - Gõ `/` → hiện danh sách câu tắt gợi ý ngay **phía trên ô soạn tin**.
-   - Gõ tiếp chữ (vd `/cn`) → lọc dần, gợi ý khớp đầu câu tắt được ưu tiên.
+   - Gõ **`//`** (hai gạch chéo) → hiện danh sách câu tắt gợi ý ngay cạnh ô soạn tin.
+   - Gõ tiếp chữ (vd `//cn`) → lọc dần, gợi ý khớp đầu câu tắt được ưu tiên.
    - **Enter / Tab** (hoặc bấm vào gợi ý): chèn **nguyên văn câu trả lời** vào đúng vị trí con trỏ,
-     xóa luôn phần `/cn`, đặt con trỏ ở cuối câu → **bấm Enter lần nữa là gửi** (script không tự gửi).
+     xóa luôn phần `//cn`, đặt con trỏ ở cuối câu → **bấm Enter lần nữa là gửi** (script không tự gửi).
+   - **Một gạch `/` thì script KHÔNG làm gì** — đó vẫn là bảng câu nhanh "/" gốc của Pancake.
+   - `//` phải đứng đầu ô hoặc sau khoảng trắng/ký tự mở: `abc//cn`, `https://x//y`, `///cn` → không kích hoạt.
    - **↑ ↓** đổi lựa chọn, **Esc** đóng gợi ý. Gõ đúng câu tắt rồi **cách ra** cũng chèn luôn
      (tắt được bằng ô “Chèn ngay khi gõ xong câu tắt + dấu cách” ở cuối panel).
-   - `/` dính liền chữ (`abc/xyz`) thì **không** kích hoạt, để không phá link/giờ (`10/11`).
+   - `//` dính liền chữ (`abc//xyz`) thì **không** kích hoạt, để không phá link/giờ (`https://…`, `10/11`).
    - Đang gõ tiếng Việt bằng bộ gõ (IME) thì script **không chen ngang** — chỉ xử lý sau khi chốt chữ.
 2. **Bong bóng 💬** (kéo thả bất kỳ đâu, vị trí được nhớ qua F5): bấm để mở panel
    danh mục + câu tắt. `Alt+Shift+S` mở/đóng panel.
