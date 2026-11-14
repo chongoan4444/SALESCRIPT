@@ -798,8 +798,10 @@
       //          'manual' = mỗi tin bạn Enter một lần (kiểu cũ)
       chain: s.chain === 'manual' ? 'manual' : 'auto',
       // giãn cách giữa 2 tin khi tự đẩy (ms) — tránh bị Facebook chặn spam
-      // v6.5.0: cho phép 0ms (gửi nhanh nhất có thể) — 0..30000
-      gapMs: Math.max(0, Math.min(30000, Math.round(Number(s.gapMs)) || 0)),
+      // v6.5.0: mặc định 0ms = gửi ngay khi tin trước vừa đi (0..30000)
+      gapMs: Number.isFinite(Number(s.gapMs))
+        ? Math.max(0, Math.min(30000, Math.round(Number(s.gapMs))))
+        : 0,
     };
   }
   function saveSettings() {

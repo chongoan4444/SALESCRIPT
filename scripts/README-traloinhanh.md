@@ -43,7 +43,7 @@ chỉ cần mở script cũ trong Tampermonkey → dán đè toàn bộ nội du
 
    1. Tin 1 được điền vào ô chat.
    2. Bạn **Enter MỘT LẦN** (gửi tin 1) → app gửi xong, script **tự điền + tự gửi tiếp** tin 2, tin 3…
-      cách nhau **“Giãn cách mỗi tin”** (mặc định **1200 ms/tin**) — chỉnh ở **⚙ Cài đặt** (xem dưới).
+      cách nhau **“Giãn cách mỗi tin”** (mặc định **0 ms = nhanh nhất**) — chỉnh ở **⚙ Cài đặt** (xem dưới).
 
    Cạnh ô soạn tin có nhãn tím **“3 tin — Enter (gửi tin 1) là script tự gửi tiếp cả 3 tin”** →
    khi chạy đổi thành **“Đang tự gửi 2/3 tin…”**; bấm **✕** trên nhãn = **DỪNG** ngay.
@@ -111,12 +111,13 @@ Trong đó có mục **“Giãn cách mỗi tin”**:
 
 - Gõ số trực tiếp vào ô (**ms**), hoặc bấm **− / +** (mỗi lần 50 ms), hoặc bấm chip nhanh
   **⚡0ms · 0.1s · 0.2s · 0.3s · 0.5s · 1s**.
-- Giới hạn **0 – 30000 ms**; đặt xong là **lưu ngay** (giữ qua F5).
+- Giới hạn **0 – 30000 ms**; đặt xong là **lưu ngay** (giữ qua F5). Mặc định v6.5.0 = **0 ms**.
 - **`0ms` = gửi ngay** khi tin trước vừa rời ô soạn tin (vòng kiểm tra 25 ms → thực tế ~30 ms/tin).
   Đây là tốc độ nhanh nhất; 500 ms trước đây chỉ là mức tối thiểu cũ nên giờ đã bỏ.
 - Lưu ý: gửi quá nhanh (0–100 ms) với câu nhiều tin dễ bị Facebook coi là spam → nếu bị chặn,
   nâng lên 300–1000 ms.
 
-> Bản v6.4.0 bị lỗi CSS: rule dành cho checkbox (`.tln-auto input {width:12px;height:12px}`) đè lên ô số
+> Nếu câu của bạn có 3–5 tin mà gửi 0 ms liên tục bị Facebook chặn (báo spam/không gửi được),
+> nâng lên 200–500 ms là an toàn. Bản v6.4.0 bị lỗi CSS: rule dành cho checkbox (`.tln-auto input {width:12px;height:12px}`) đè lên ô số
 > nên ô “Giãn cách” bị co còn 12×12px, gần như không bấm/gõ được → đã sửa ở v6.4.1
 > (chỉ checkbox mới nhỏ; ô số cao 22px, rộng 66px) và tách toàn bộ cài đặt ra khỏi đáy panel.
