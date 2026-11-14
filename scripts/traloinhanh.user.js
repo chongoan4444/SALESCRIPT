@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Hỗ trợ trả lời Sale (Draggable Bubble - v5.5)
 // @namespace    http://tampermonkey.net/
-// @version      6.4.1
+// @version      6.5.0
 // @description  Trợ lý trả lời nhanh cho Sale: gõ câu tắt dạng /cn trong ô soạn tin Pancake → câu trả lời tự nhảy vào ô, Enter là gửi. Bong bóng nổi kéo thả, quản lý danh mục & câu tắt ngay trên trang.
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -42,6 +42,9 @@
  *     gõ "//cn" → hiện danh sách gợi ý ngay trên ô nhập → Enter/Tab (hoặc bấm gợi ý)
  *     → câu trả lời được CHÈN vào đúng vị trí con trỏ, giữ nguyên chữ đang gõ dở;
  *     bấm Enter lần nữa là gửi (script không tự gửi, không tự Enter).
+ * - v6.5.0: Giãn cách cho phép **0ms** (mặc định vẫn 1200ms): 0ms = gửi ngay khi tin trước vừa
+ *   đi khỏi ô soạn tin, vòng kiểm tra 25ms nên gần như tức thì (đo thực tế ~30ms/tin).
+ *   Chip nhanh: ⚡0ms · 0.1s · 0.2s · 0.3s · 0.5s · 1s; nút −/+ bước 50ms; min 0, max 30000ms.
  * - v6.4.0: Câu nhiều tin KHÔNG cần Enter từng tin nữa: bạn Enter MỘT LẦN (gửi tin 1) là script
  *   tự điền + tự gửi tiếp các tin còn lại, cách nhau "Giãn cách" (mặc định 1200ms, chỉnh trong
  *   panel). Cách gửi: bấm đúng nút Gửi của Pancake trong khung soạn tin (tìm theo title/class
@@ -68,7 +71,7 @@
 
   /* ============================ HẰNG SỐ ============================ */
 
-  const APP_VERSION = '6.4.1';
+  const APP_VERSION = '6.5.0';
   const KEY_DATA = 'tln_data_v2';          // v6.2.0: dữ liệu trắng (người dùng tự thêm), kích hoạt bằng "//"
   const KEY_DATA_OLD = 'tln_data_v1';      // dữ liệu của v6.0/6.1 (bị bỏ khi nâng cấp)
   const CLEAR_FLAG = 'tln_cleared_v2';     // đánh dấu đã dọn dữ liệu mẫu một lần
@@ -795,7 +798,8 @@
       //          'manual' = mỗi tin bạn Enter một lần (kiểu cũ)
       chain: s.chain === 'manual' ? 'manual' : 'auto',
       // giãn cách giữa 2 tin khi tự đẩy (ms) — tránh bị Facebook chặn spam
-      gapMs: Math.max(300, Math.min(10000, Number(s.gapMs) || 1200)),
+      // v6.5.0: cho phép 0ms (gửi nhanh nhất có thể) — 0..30000
+      gapMs: Math.max(0, Math.min(30000, Math.round(Number(s.gapMs)) || 0)),
     };
   }
   function saveSettings() {
@@ -1108,9 +1112,9 @@
   let pendingSend = null; // { parts, index, el, running, stop, waitSince, tries, deadline, sentCount }
   let pendingTimer = null;
 
-  const PENDING_POLL_MS = 120;
-  const PENDING_GAP_MAX_MS = 15000;
-  const ENTER_RETRY_GAP_MS = 1800;
+  const PENDING_POLL_MS = 25;          // nhịp kiểm tra ô soạn tin (nhanh để không cộng thêm delay)
+  const PENDING_GAP_MAX_MS = 20000;
+  const ENTER_RETRY_GAP_MS = 1500;
 
   function composerText(el) {
     if (!el || !el.isConnected) return '';
@@ -1251,11 +1255,20 @@
           fillNextPart();
           if (manual) {
             pendingSend.waitSince = Date.now();   // chờ người dùng Enter
+          } else if (settings.gapMs <= 0) {
+            // 0ms → gửi ngay trong cùng nhịp, không chờ
+            pendingSend.pendingAuto = false;
+            pendingSend.fillAt = 0;
+            flushWaitBadge();
+            triggerSend(el);
+            pendingSend.waitSince = Date.now();
+            pendingSend.deadline = Date.now() + PENDING_GAP_MAX_MS;
           } else {
             pendingSend.pendingAuto = true;       // sẽ tự gửi sau "Giãn cách"
             pendingSend.autoAt = Date.now() + settings.gapMs;
           }
-          flushWaitBadge();
+          if (!pendingSend) return;
+          if (settings.gapMs > 0 || manual) flushWaitBadge();
         } else {
           finishPending(null);                    // hết tin
           return;
@@ -2053,15 +2066,15 @@
     rowChain.appendChild(chainSel);
     wrap.appendChild(rowChain);
 
-    // 2) Giãn cách giữa các tin
+    // 2) Giãn cách giữa các tin (0 = nhanh nhất)
     const rowGap = h('div', { class: 'tln-set-row' });
     rowGap.appendChild(h('label', { class: 'tln-set-label', text: 'Giãn cách mỗi tin' }));
     const gapInput = h('input', {
-      class: 'tln-num', type: 'number', min: '300', max: '30000', step: '100',
-      value: String(settings.gapMs), title: 'Thời gian chờ giữa 2 tin khi tự gửi (mili-giây)',
+      class: 'tln-num', type: 'number', min: '0', max: '30000', step: '50',
+      value: String(settings.gapMs), title: 'Thời gian chờ giữa 2 tin khi tự gửi (ms). 0 = gửi ngay.',
     });
     const applyGap = (v) => {
-      const n = Math.max(300, Math.min(30000, Math.round(Number(v) || 1200)));
+      const n = Math.max(0, Math.min(30000, Math.round(Number(v) || 0)));
       gapInput.value = String(n);
       settings.gapMs = n;
       saveSettings();
@@ -2069,7 +2082,7 @@
     };
     gapInput.addEventListener('input', () => {
       const n = Math.round(Number(gapInput.value));
-      if (n >= 300 && n <= 30000) { settings.gapMs = n; saveSettings(); }
+      if (n >= 0 && n <= 30000) { settings.gapMs = n; saveSettings(); }
     });
     gapInput.addEventListener('change', () => applyGap(gapInput.value));
     gapInput.addEventListener('blur', () => applyGap(gapInput.value));
@@ -2078,27 +2091,33 @@
       if (e.key === 'Enter') { e.preventDefault(); applyGap(gapInput.value); }
     });
     const quick = h('div', { class: 'tln-gap-quick' });
-    [500, 1000, 1200, 2000, 3000].forEach((ms) => {
+    [0, 100, 200, 300, 500, 1000].forEach((ms) => {
       const b = h('button', {
-        class: 'tln-gap-btn' + (settings.gapMs === ms ? ' on' : ''), text: (ms / 1000) + 's',
+        class: 'tln-gap-btn' + (settings.gapMs === ms ? ' on' : ''),
+        text: ms === 0 ? '⚡ 0ms' : (ms / 1000) + 's',
         onclick: (e) => { e.preventDefault(); e.stopPropagation(); applyGap(ms); render(); },
       });
       quick.appendChild(b);
     });
     const gapLine = h('div', { class: 'tln-gap-line' });
     gapLine.appendChild(h('button', {
-      class: 'tln-num-btn', text: '−', title: 'Giảm 200ms',
-      onclick: (e) => { e.preventDefault(); e.stopPropagation(); applyGap(settings.gapMs - 200); },
+      class: 'tln-num-btn', text: '−', title: 'Giảm 50ms',
+      onclick: (e) => { e.preventDefault(); e.stopPropagation(); applyGap(settings.gapMs - 50); },
     }));
     gapLine.appendChild(gapInput);
     gapLine.appendChild(h('button', {
-      class: 'tln-num-btn', text: '+', title: 'Tăng 200ms',
-      onclick: (e) => { e.preventDefault(); e.stopPropagation(); applyGap(settings.gapMs + 200); },
+      class: 'tln-num-btn', text: '+', title: 'Tăng 50ms',
+      onclick: (e) => { e.preventDefault(); e.stopPropagation(); applyGap(settings.gapMs + 50); },
     }));
     gapLine.appendChild(h('span', { class: 'tln-set-unit', text: 'ms' }));
     rowGap.appendChild(gapLine);
     rowGap.appendChild(quick);
-    rowGap.appendChild(h('div', { class: 'tln-set-hint', text: 'Thời gian chờ giữa 2 tin khi tự gửi. Để 1000–1500ms cho an toàn, đừng quá thấp để tránh bị chặn spam.' }));
+    rowGap.appendChild(h('div', {
+      class: 'tln-set-hint',
+      text: settings.gapMs === 0
+        ? '⚡ 0ms: gửi ngay khi tin trước vừa đi (không chờ). Nhanh nhất, nhưng dễ bị Facebook coi là spam nếu câu có nhiều tin.'
+        : 'Thời gian chờ giữa 2 tin. Muốn nhanh nhất đặt 0ms; an toàn thì 500–1500ms.',
+    }));
     wrap.appendChild(rowGap);
 
     // 3) Vị trí bảng gợi ý

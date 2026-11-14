@@ -1,6 +1,6 @@
 # TRALOINHANH — Trả lời nhanh cho Sale (câu tắt `/cn` + bong bóng kéo thả)
 
-File: `scripts/traloinhanh.user.js` (v6.4.1) — Tampermonkey, chạy trên trang chat Pancake
+File: `scripts/traloinhanh.user.js` (v6.5.0) — Tampermonkey, chạy trên trang chat Pancake
 (`pancake.vn`, `pages.fm`, `pancake.ph/id/in/biz`, `socialos.vip`).
 
 **Đây là bản nâng cấp của script “Hỗ trợ trả lời Sale (Draggable Bubble - v5.5)”.**
@@ -109,9 +109,13 @@ và luôn có công tắc để tắt. Nếu bảng gốc vẫn hiện, dùng c�
 Bấm **⚙ Cài đặt** — nằm ở **góc phải tiêu đề panel** (hoặc nút “⚙ Cài đặt” ở đáy panel).
 Trong đó có mục **“Giãn cách mỗi tin”**:
 
-- Gõ số trực tiếp vào ô (**ms**), hoặc bấm **− / +** (mỗi lần 200 ms), hoặc bấm chip nhanh **0.5s / 1s / 1.2s / 2s / 3s**.
-- Giới hạn 300 – 30000 ms; đặt xong là **lưu ngay** (giữ qua F5).
-- Khuyến nghị 1000–1500 ms để không bị Facebook coi là spam; đừng để quá thấp.
+- Gõ số trực tiếp vào ô (**ms**), hoặc bấm **− / +** (mỗi lần 50 ms), hoặc bấm chip nhanh
+  **⚡0ms · 0.1s · 0.2s · 0.3s · 0.5s · 1s**.
+- Giới hạn **0 – 30000 ms**; đặt xong là **lưu ngay** (giữ qua F5).
+- **`0ms` = gửi ngay** khi tin trước vừa rời ô soạn tin (vòng kiểm tra 25 ms → thực tế ~30 ms/tin).
+  Đây là tốc độ nhanh nhất; 500 ms trước đây chỉ là mức tối thiểu cũ nên giờ đã bỏ.
+- Lưu ý: gửi quá nhanh (0–100 ms) với câu nhiều tin dễ bị Facebook coi là spam → nếu bị chặn,
+  nâng lên 300–1000 ms.
 
 > Bản v6.4.0 bị lỗi CSS: rule dành cho checkbox (`.tln-auto input {width:12px;height:12px}`) đè lên ô số
 > nên ô “Giãn cách” bị co còn 12×12px, gần như không bấm/gõ được → đã sửa ở v6.4.1
