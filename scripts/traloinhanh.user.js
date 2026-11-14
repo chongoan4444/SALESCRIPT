@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Hỗ trợ trả lời Sale (Draggable Bubble - v5.5)
 // @namespace    http://tampermonkey.net/
-// @version      6.4.0
+// @version      6.4.1
 // @description  Trợ lý trả lời nhanh cho Sale: gõ câu tắt dạng /cn trong ô soạn tin Pancake → câu trả lời tự nhảy vào ô, Enter là gửi. Bong bóng nổi kéo thả, quản lý danh mục & câu tắt ngay trên trang.
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -68,7 +68,7 @@
 
   /* ============================ HẰNG SỐ ============================ */
 
-  const APP_VERSION = '6.4.0';
+  const APP_VERSION = '6.4.1';
   const KEY_DATA = 'tln_data_v2';          // v6.2.0: dữ liệu trắng (người dùng tự thêm), kích hoạt bằng "//"
   const KEY_DATA_OLD = 'tln_data_v1';      // dữ liệu của v6.0/6.1 (bị bỏ khi nâng cấp)
   const CLEAR_FLAG = 'tln_cleared_v2';     // đánh dấu đã dọn dữ liệu mẫu một lần
@@ -646,16 +646,55 @@
       font-size: 10.5px; color: #64748b; line-height: 1.45;
     }
     .tln-footer b { color: #1d4ed8; }
-    .tln-auto { display: flex; align-items: center; gap: 5px; cursor: pointer; margin-top: 4px; font-size: 10.5px; }
-    .tln-auto input { width: 12px; height: 12px; cursor: pointer; margin: 0; }
     .tln-num {
-      width: 58px; font-size: 10.5px; color: #334155; border: 1px solid #cbd5e1; border-radius: 5px;
-      padding: 1px 4px; background: #fff; outline: none;
+      width: 66px; height: 22px; font-size: 11px; color: #0f172a; border: 1px solid #94a3b8;
+      border-radius: 6px; padding: 0 4px; background: #fff; outline: none; cursor: text;
     }
+    .tln-num:focus { border-color: #2563eb; box-shadow: 0 0 0 2px rgba(37,99,235,.2); }
+    .tln-num-btn {
+      width: 20px; height: 20px; border-radius: 5px; border: 1px solid #cbd5e1; background: #fff;
+      color: #334155; font-size: 12px; line-height: 1; cursor: pointer; padding: 0; font-weight: 700;
+    }
+    .tln-num-btn:hover { background: #e2e8f0; }
     .tln-select {
-      font-size: 10.5px; color: #334155; border: 1px solid #cbd5e1; border-radius: 5px;
-      padding: 1px 4px; background: #fff; cursor: pointer; outline: none; max-width: 148px;
+      height: 22px; font-size: 11px; color: #0f172a; border: 1px solid #94a3b8; border-radius: 6px;
+      padding: 0 4px; background: #fff; cursor: pointer; outline: none; max-width: 168px;
     }
+
+    .tln-gear {
+      margin-top: 5px; padding: 3px 8px; border-radius: 6px; border: 1px solid #cbd5e1;
+      background: #fff; color: #334155; font-size: 10.5px; font-weight: 700; cursor: pointer;
+    }
+    .tln-gear:hover { background: #e2e8f0; color: #1d4ed8; }
+    button.tln-x.on { background: #dbeafe; border-color: #93c5fd; color: #1d4ed8; }
+
+    .tln-settings {
+      flex-shrink: 0; max-height: 62%; overflow-y: auto; background: #f8fafc;
+      border-top: 1px solid #e2e8f0;
+    }
+    .tln-settings-head {
+      position: sticky; top: 0; z-index: 1; display: flex; align-items: center;
+      justify-content: space-between; padding: 7px 10px; background: #eef2f7;
+      border-bottom: 1px solid #e2e8f0; font-size: 11.5px; font-weight: 700; color: #0f172a;
+    }
+    .tln-settings-body { padding: 6px 10px 10px; }
+    .tln-set-row { padding: 6px 0; border-bottom: 1px dashed #dbe3ec; }
+    .tln-set-row:last-child { border-bottom: none; }
+    .tln-set-label {
+      display: block; font-size: 10.5px; font-weight: 700; color: #334155; margin-bottom: 4px;
+    }
+    .tln-set-unit { font-size: 10.5px; color: #64748b; font-weight: 700; }
+    .tln-set-hint { font-size: 9.8px; color: #7c8798; line-height: 1.45; margin-top: 4px; }
+    .tln-gap-line { display: flex; align-items: center; gap: 5px; }
+    .tln-gap-quick { display: flex; align-items: center; gap: 4px; margin-top: 5px; flex-wrap: wrap; }
+    .tln-gap-btn {
+      padding: 2px 7px; border-radius: 10px; border: 1px solid #cbd5e1; background: #fff;
+      color: #334155; font-size: 10px; font-weight: 700; cursor: pointer;
+    }
+    .tln-gap-btn:hover { background: #e2e8f0; }
+    .tln-gap-btn.on { background: #2563eb; border-color: #2563eb; color: #fff; }
+    .tln-switch { display: flex; align-items: center; gap: 6px; cursor: pointer; font-size: 10.5px; color: #334155; }
+    .tln-switch input { width: 13px; height: 13px; margin: 0; cursor: pointer; flex-shrink: 0; }
 
     /* --- Gợi ý câu tắt nổi trên ô soạn tin --- */
     #tln-suggest {
@@ -772,6 +811,7 @@
   let lastActiveInput = null;
   const openCats = new Set();     // id danh mục đang mở
   let searchTerm = '';
+  let showSettings = false;
   let draggedCatIdx = null;
   let draggedItem = null;         // { catIdx, itemIdx }
 
@@ -1979,6 +2019,135 @@
     return catEl;
   }
 
+  /** Bảng Cài đặt (tách khỏi danh sách câu cho gọn, mở bằng nút ⚙). */
+  function buildSettingsPanel() {
+    const box = h('div', { class: 'tln-settings' });
+    const head = h('div', { class: 'tln-settings-head' });
+    head.appendChild(h('span', { text: '⚙ Cài đặt' }));
+    head.appendChild(h('button', {
+      class: 'tln-x', text: '✕', title: 'Đóng cài đặt',
+      onclick: () => { showSettings = false; render(); },
+    }));
+    box.appendChild(head);
+
+    const wrap = h('div', { class: 'tln-settings-body' });
+
+    // 1) Cách gửi câu nhiều tin
+    const rowChain = h('div', { class: 'tln-set-row' });
+    rowChain.appendChild(h('label', { class: 'tln-set-label', text: 'Câu nhiều tin' }));
+    const chainSel = h('select', { class: 'tln-select' });
+    [{ v: 'auto', t: 'Tự gửi liên tiếp (Enter 1 lần)' }, { v: 'manual', t: 'Thủ công (Enter từng tin)' }]
+      .forEach((o) => {
+        const opt = h('option', { value: o.v, text: o.t });
+        if (settings.chain === o.v) opt.selected = true;
+        chainSel.appendChild(opt);
+      });
+    chainSel.addEventListener('change', () => {
+      settings.chain = chainSel.value === 'manual' ? 'manual' : 'auto';
+      saveSettings();
+      flushWaitBadge();
+      showToast(settings.chain === 'manual'
+        ? 'Thủ công: mỗi tin bạn Enter một lần'
+        : 'Tự động: Enter tin đầu là gửi tiếp hết');
+    });
+    rowChain.appendChild(chainSel);
+    wrap.appendChild(rowChain);
+
+    // 2) Giãn cách giữa các tin
+    const rowGap = h('div', { class: 'tln-set-row' });
+    rowGap.appendChild(h('label', { class: 'tln-set-label', text: 'Giãn cách mỗi tin' }));
+    const gapInput = h('input', {
+      class: 'tln-num', type: 'number', min: '300', max: '30000', step: '100',
+      value: String(settings.gapMs), title: 'Thời gian chờ giữa 2 tin khi tự gửi (mili-giây)',
+    });
+    const applyGap = (v) => {
+      const n = Math.max(300, Math.min(30000, Math.round(Number(v) || 1200)));
+      gapInput.value = String(n);
+      settings.gapMs = n;
+      saveSettings();
+      flushWaitBadge();
+    };
+    gapInput.addEventListener('input', () => {
+      const n = Math.round(Number(gapInput.value));
+      if (n >= 300 && n <= 30000) { settings.gapMs = n; saveSettings(); }
+    });
+    gapInput.addEventListener('change', () => applyGap(gapInput.value));
+    gapInput.addEventListener('blur', () => applyGap(gapInput.value));
+    gapInput.addEventListener('keydown', (e) => {
+      e.stopPropagation();
+      if (e.key === 'Enter') { e.preventDefault(); applyGap(gapInput.value); }
+    });
+    const quick = h('div', { class: 'tln-gap-quick' });
+    [500, 1000, 1200, 2000, 3000].forEach((ms) => {
+      const b = h('button', {
+        class: 'tln-gap-btn' + (settings.gapMs === ms ? ' on' : ''), text: (ms / 1000) + 's',
+        onclick: (e) => { e.preventDefault(); e.stopPropagation(); applyGap(ms); render(); },
+      });
+      quick.appendChild(b);
+    });
+    const gapLine = h('div', { class: 'tln-gap-line' });
+    gapLine.appendChild(h('button', {
+      class: 'tln-num-btn', text: '−', title: 'Giảm 200ms',
+      onclick: (e) => { e.preventDefault(); e.stopPropagation(); applyGap(settings.gapMs - 200); },
+    }));
+    gapLine.appendChild(gapInput);
+    gapLine.appendChild(h('button', {
+      class: 'tln-num-btn', text: '+', title: 'Tăng 200ms',
+      onclick: (e) => { e.preventDefault(); e.stopPropagation(); applyGap(settings.gapMs + 200); },
+    }));
+    gapLine.appendChild(h('span', { class: 'tln-set-unit', text: 'ms' }));
+    rowGap.appendChild(gapLine);
+    rowGap.appendChild(quick);
+    rowGap.appendChild(h('div', { class: 'tln-set-hint', text: 'Thời gian chờ giữa 2 tin khi tự gửi. Để 1000–1500ms cho an toàn, đừng quá thấp để tránh bị chặn spam.' }));
+    wrap.appendChild(rowGap);
+
+    // 3) Vị trí bảng gợi ý
+    const rowPos = h('div', { class: 'tln-set-row' });
+    rowPos.appendChild(h('label', { class: 'tln-set-label', text: 'Vị trí bảng gợi ý' }));
+    const posSel = h('select', { class: 'tln-select' });
+    [{ v: 'above', t: 'Trên ô soạn tin' }, { v: 'below', t: 'Dưới ô soạn tin' }, { v: 'free', t: 'Chỗ đã kéo (tự do)' }]
+      .forEach((o) => {
+        const opt = h('option', { value: o.v, text: o.t });
+        if (settings.place === o.v) opt.selected = true;
+        posSel.appendChild(opt);
+      });
+    posSel.addEventListener('change', () => {
+      settings.place = posSel.value;
+      if (settings.place !== 'free') clearSuggestCustomPos();
+      saveSettings();
+      if (picker.open) positionSuggest();
+    });
+    rowPos.appendChild(posSel);
+    wrap.appendChild(rowPos);
+
+    // 4) Các công tắc
+    const mkSwitch = (label, checked, onChange, hint) => {
+      const row = h('div', { class: 'tln-set-row' });
+      const lab = h('label', { class: 'tln-switch' });
+      const chk = h('input', { type: 'checkbox' });
+      chk.checked = !!checked;
+      chk.addEventListener('change', () => onChange(chk.checked));
+      lab.appendChild(chk);
+      lab.appendChild(h('span', { text: label }));
+      row.appendChild(lab);
+      if (hint) row.appendChild(h('div', { class: 'tln-set-hint', text: hint }));
+      wrap.appendChild(row);
+      return row;
+    };
+
+    mkSwitch('Chèn ngay khi gõ xong câu tắt + dấu cách', settings.autoExpand, (v) => {
+      settings.autoExpand = v; saveSettings();
+    });
+    mkSwitch('Ẩn bảng "/" gốc của Pancake khi bảng gợi ý mở', settings.hideNative, (v) => {
+      settings.hideNative = v; saveSettings();
+      if (!v) hideNativePopup(false);
+      else if (picker.open) hideNativePopup(true);
+    });
+
+    box.appendChild(wrap);
+    return box;
+  }
+
   function render() {
     const oldBody = panel.querySelector('.tln-body');
     const scrollTop = oldBody ? oldBody.scrollTop : 0;
@@ -1998,6 +2167,10 @@
       text: isEditMode ? '✏️ Chỉnh sửa' : '⚡ Làm việc',
       title: 'Chuyển chế độ Làm việc / Chỉnh sửa',
       onclick: () => { isEditMode = !isEditMode; render(); },
+    }));
+    headerRight.appendChild(h('button', {
+      class: 'tln-x' + (showSettings ? ' on' : ''), text: '⚙', title: 'Cài đặt (chế độ gửi nhiều tin, giãn cách, vị trí bảng gợi ý…)',
+      onclick: () => { showSettings = !showSettings; render(); },
     }));
     headerRight.appendChild(h('button', {
       class: 'tln-x', text: '✕', title: 'Đóng (Alt+Shift+S để mở lại)',
@@ -2043,102 +2216,21 @@
     }
     panel.appendChild(body);
 
-    // Footer
-    const footer = h('div', { class: 'tln-footer' });
-    footer.appendChild(h('span', { text: 'Gõ ' }));
-    footer.appendChild(h('b', { text: '//câu_tắt' }));
-    footer.appendChild(h('span', { text: ' (HAI gạch chéo) + chữ tắt trong ô soạn tin → Enter/Tab (hoặc cách ra) để chèn câu — Enter lần nữa để gửi.' }));
-    footer.appendChild(h('br'));
-
-    // Cách gửi câu nhiều tin
-    const chainWrap = h('label', { class: 'tln-auto' });
-    chainWrap.appendChild(h('span', { text: 'Câu nhiều tin:' }));
-    const chainSel = h('select', { class: 'tln-select' });
-    [{ v: 'auto', t: 'Tự gửi liên tiếp (Enter 1 lần)' }, { v: 'manual', t: 'Thủ công (Enter từng tin)' }]
-      .forEach((o) => {
-        const opt = h('option', { value: o.v, text: o.t });
-        if (settings.chain === o.v) opt.selected = true;
-        chainSel.appendChild(opt);
+    // Footer (ngắn gọn) hoặc bảng Cài đặt
+    if (showSettings) {
+      panel.appendChild(buildSettingsPanel());
+    } else {
+      const footer = h('div', { class: 'tln-footer' });
+      footer.appendChild(h('span', { text: 'Gõ ' }));
+      footer.appendChild(h('b', { text: '//câu_tắt' }));
+      footer.appendChild(h('span', { text: ' trong ô soạn tin → Enter để chèn. Câu nhiều tin: Enter 1 lần là tự gửi tiếp (giãn cách ' + settings.gapMs + 'ms).' }));
+      const gear = h('button', {
+        class: 'tln-gear', text: '⚙ Cài đặt',
+        onclick: () => { showSettings = true; render(); },
       });
-    chainSel.addEventListener('change', () => {
-      settings.chain = chainSel.value === 'manual' ? 'manual' : 'auto';
-      saveSettings();
-      flushWaitBadge();
-      showToast(settings.chain === 'manual'
-        ? 'Chế độ thủ công: mỗi tin bạn Enter một lần'
-        : 'Chế độ tự động: Enter tin đầu là gửi tiếp hết');
-    });
-    chainWrap.appendChild(chainSel);
-    footer.appendChild(chainWrap);
-
-    // Giãn cách giữa 2 tin
-    const gapWrap = h('label', { class: 'tln-auto' });
-    gapWrap.appendChild(h('span', { text: 'Giãn cách:' }));
-    const gapInput = h('input', {
-      class: 'tln-num', type: 'number', min: '300', max: '10000', step: '100',
-      value: String(settings.gapMs),
-    });
-    gapInput.addEventListener('change', () => {
-      const v = Math.max(300, Math.min(10000, Number(gapInput.value) || 1200));
-      gapInput.value = String(v);
-      settings.gapMs = v;
-      saveSettings();
-    });
-    gapWrap.appendChild(gapInput);
-    gapWrap.appendChild(h('span', { text: 'ms/tin' }));
-    footer.appendChild(gapWrap);
-
-    // Vị trí bảng gợi ý
-    const posWrap = h('label', { class: 'tln-auto' });
-    posWrap.appendChild(h('span', { text: 'Bảng gợi ý:' }));
-    const posSel = h('select', { class: 'tln-select' });
-    const posOptions = [
-      { v: 'above', t: 'Trên ô soạn tin' },
-      { v: 'below', t: 'Dưới ô soạn tin' },
-      { v: 'free', t: 'Chỗ đã kéo (tự do)' },
-    ];
-    posOptions.forEach((o) => {
-      const opt = h('option', { value: o.v, text: o.t });
-      if (settings.place === o.v) opt.selected = true;
-      posSel.appendChild(opt);
-    });
-    posSel.addEventListener('change', () => {
-      settings.place = posSel.value;
-      if (settings.place !== 'free') clearSuggestCustomPos();
-      saveSettings();
-      if (picker.open) positionSuggest();
-      showToast('Vị trí bảng gợi ý: ' + posSel.options[posSel.selectedIndex].text.toLowerCase());
-    });
-    posWrap.appendChild(posSel);
-    footer.appendChild(posWrap);
-
-    // Ẩn bảng câu nhanh "/" gốc của Pancake khi bảng của script mở
-    const nativeWrap = h('label', { class: 'tln-auto' });
-    const nativeChk = h('input', { type: 'checkbox' });
-    nativeChk.checked = !!settings.hideNative;
-    nativeChk.addEventListener('change', () => {
-      settings.hideNative = nativeChk.checked;
-      saveSettings();
-      if (!settings.hideNative) hideNativePopup(false);
-      else if (picker.open) hideNativePopup(true);
-      showToast(settings.hideNative ? 'Đã ẩn bảng "/" gốc khi đang mở bảng gợi ý' : 'Không ẩn bảng "/" gốc nữa');
-    });
-    nativeWrap.appendChild(nativeChk);
-    nativeWrap.appendChild(h('span', { text: 'Ẩn bảng "/" gốc của Pancake khi bảng gợi ý mở' }));
-    footer.appendChild(nativeWrap);
-
-    const autoWrap = h('label', { class: 'tln-auto' });
-    const autoChk = h('input', { type: 'checkbox' });
-    autoChk.checked = !!settings.autoExpand;
-    autoChk.addEventListener('change', () => {
-      settings.autoExpand = autoChk.checked;
-      saveSettings();
-      showToast(settings.autoExpand ? 'Đã bật chèn ngay khi cách ra' : 'Đã tắt chèn ngay khi cách ra');
-    });
-    autoWrap.appendChild(autoChk);
-    autoWrap.appendChild(h('span', { text: 'Chèn ngay khi gõ xong câu tắt + dấu cách' }));
-    footer.appendChild(autoWrap);
-    panel.appendChild(footer);
+      footer.appendChild(gear);
+      panel.appendChild(footer);
+    }
 
     body.scrollTop = scrollTop;
     if (searchFocus) {

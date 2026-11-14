@@ -1,6 +1,6 @@
 # TRALOINHANH — Trả lời nhanh cho Sale (câu tắt `/cn` + bong bóng kéo thả)
 
-File: `scripts/traloinhanh.user.js` (v6.4.0) — Tampermonkey, chạy trên trang chat Pancake
+File: `scripts/traloinhanh.user.js` (v6.4.1) — Tampermonkey, chạy trên trang chat Pancake
 (`pancake.vn`, `pages.fm`, `pancake.ph/id/in/biz`, `socialos.vip`).
 
 **Đây là bản nâng cấp của script “Hỗ trợ trả lời Sale (Draggable Bubble - v5.5)”.**
@@ -43,11 +43,11 @@ chỉ cần mở script cũ trong Tampermonkey → dán đè toàn bộ nội du
 
    1. Tin 1 được điền vào ô chat.
    2. Bạn **Enter MỘT LẦN** (gửi tin 1) → app gửi xong, script **tự điền + tự gửi tiếp** tin 2, tin 3…
-      cách nhau **“Giãn cách”** (mặc định **1200 ms/tin**, chỉnh ở cuối panel).
+      cách nhau **“Giãn cách mỗi tin”** (mặc định **1200 ms/tin**) — chỉnh ở **⚙ Cài đặt** (xem dưới).
 
    Cạnh ô soạn tin có nhãn tím **“3 tin — Enter (gửi tin 1) là script tự gửi tiếp cả 3 tin”** →
    khi chạy đổi thành **“Đang tự gửi 2/3 tin…”**; bấm **✕** trên nhãn = **DỪNG** ngay.
-   Muốn kiểu cũ (mỗi tin Enter một lần): panel → **“Câu nhiều tin: Thủ công (Enter từng tin)”**.
+   Muốn kiểu cũ (mỗi tin Enter một lần): **⚙ Cài đặt** → **“Câu nhiều tin: Thủ công (Enter từng tin)”**.
    Script không điền oan khi bạn tự xoá nội dung; xuống dòng đơn trong một tin vẫn giữ nguyên (không tách tin).
 1. **Gõ câu tắt trong ô soạn tin** của Pancake (ô `textarea#replyBoxComposer`):
    - Gõ **`//`** (hai gạch chéo) → hiện danh sách câu tắt gợi ý ngay cạnh ô soạn tin.
@@ -103,3 +103,16 @@ và luôn có công tắc để tắt. Nếu bảng gốc vẫn hiện, dùng c�
   bắn Enter vô hạn.
 - Mọi thao tác chèn/gửi vẫn đi qua sự kiện thật trên ô soạn tin (`input`, `click`, `keydown/keyup`),
   nên tin hiện trong lịch sử chat y như bạn tự gửi.
+
+## Chỉnh delay giữa các tin ở đâu? (v6.4.1)
+
+Bấm **⚙ Cài đặt** — nằm ở **góc phải tiêu đề panel** (hoặc nút “⚙ Cài đặt” ở đáy panel).
+Trong đó có mục **“Giãn cách mỗi tin”**:
+
+- Gõ số trực tiếp vào ô (**ms**), hoặc bấm **− / +** (mỗi lần 200 ms), hoặc bấm chip nhanh **0.5s / 1s / 1.2s / 2s / 3s**.
+- Giới hạn 300 – 30000 ms; đặt xong là **lưu ngay** (giữ qua F5).
+- Khuyến nghị 1000–1500 ms để không bị Facebook coi là spam; đừng để quá thấp.
+
+> Bản v6.4.0 bị lỗi CSS: rule dành cho checkbox (`.tln-auto input {width:12px;height:12px}`) đè lên ô số
+> nên ô “Giãn cách” bị co còn 12×12px, gần như không bấm/gõ được → đã sửa ở v6.4.1
+> (chỉ checkbox mới nhỏ; ô số cao 22px, rộng 66px) và tách toàn bộ cài đặt ra khỏi đáy panel.
