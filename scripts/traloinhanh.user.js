@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Hỗ trợ trả lời Sale (Draggable Bubble - v5.5)
 // @namespace    http://tampermonkey.net/
-// @version      6.2.0
+// @version      6.3.0
 // @description  Trợ lý trả lời nhanh cho Sale: gõ câu tắt dạng /cn trong ô soạn tin Pancake → câu trả lời tự nhảy vào ô, Enter là gửi. Bong bóng nổi kéo thả, quản lý danh mục & câu tắt ngay trên trang.
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -42,6 +42,10 @@
  *     gõ "//cn" → hiện danh sách gợi ý ngay trên ô nhập → Enter/Tab (hoặc bấm gợi ý)
  *     → câu trả lời được CHÈN vào đúng vị trí con trỏ, giữ nguyên chữ đang gõ dở;
  *     bấm Enter lần nữa là gửi (script không tự gửi, không tự Enter).
+ * - v6.3.0: BỎ thông báo toast khi chọn/chèn câu (chỉ còn cảnh báo lỗi), và mỗi câu tắt có thể
+ *   gồm NHIỀU TIN: các tin cách nhau bằng 1 DÒNG TRỐNG trong ô nội dung. Khi dùng, tin 1 được
+ *   điền ngay; bạn Enter (hoặc bấm nút Gửi) → app gửi tin 1, ô trống → script tự điền tin 2,
+ *   chờ bạn Enter tiếp… Nhãn "Tin 1/3" hiện cạnh ô soạn tin (✕ để bỏ các tin còn lại).
  * - v6.2.0: CHỈ kích hoạt khi câu tắt bắt đầu bằng "//" (một gạch "/" vẫn là bảng câu nhanh
  *   gốc của Pancake), và DANH SÁCH VỀ TRẮNG — bỏ hết câu mẫu/câu đã lưu của bản cũ để
  *   người dùng tự thêm câu của mình (dữ liệu cũ được in ra console để sao lưu nếu cần).
@@ -58,7 +62,7 @@
 
   /* ============================ HẰNG SỐ ============================ */
 
-  const APP_VERSION = '6.2.0';
+  const APP_VERSION = '6.3.0';
   const KEY_DATA = 'tln_data_v2';          // v6.2.0: dữ liệu trắng (người dùng tự thêm), kích hoạt bằng "//"
   const KEY_DATA_OLD = 'tln_data_v1';      // dữ liệu của v6.0/6.1 (bị bỏ khi nâng cấp)
   const CLEAR_FLAG = 'tln_cleared_v2';     // đánh dấu đã dọn dữ liệu mẫu một lần
@@ -115,6 +119,11 @@
         else if (k === 'style') el.style.cssText = v;
         else if (k === 'text') el.textContent = v;
         else if (k === 'draggable') el.draggable = !!v;
+        else if (k === 'value') {
+          // textarea: setAttribute('value') KHÔNG có tác dụng → phải gán .value
+          if (tagOf(el) === 'textarea') el.value = v;
+          else el.setAttribute('value', v);
+        }
         else if (/^on[a-z]+$/.test(k) && typeof v === 'function') el.addEventListener(k.slice(2), v);
         else el.setAttribute(k, v);
       }
@@ -151,6 +160,20 @@
     } catch (e) { /* ignore */ }
   }
 
+  /**
+   * Tách nội dung 1 câu tắt thành NHIỀU TIN (v6.3.0).
+   * Mỗi dòng trống (1 hoặc nhiều dòng trống) = ranh giới giữa 2 tin; xuống dòng đơn trong
+   * cùng một tin được giữ nguyên (Pancake vẫn gửi được tin nhiều dòng).
+   *   "Dạ em chào ạ\n\nDạ bên em freeship…"  →  ["Dạ em chào ạ", "Dạ bên em freeship…"]
+   */
+  function splitMessages(text) {
+    return String(text == null ? '' : text)
+      .replace(/\r\n?/g, '\n')
+      .split(/\n[ \t]*\n+/)
+      .map((t) => t.trim())
+      .filter((t) => t.length > 0);
+  }
+
   /** Chuẩn hóa dữ liệu: bỏ label (v5.5), bảo đảm mọi câu đều có shortcut hợp lệ & không trùng. */
   function normalizeData(data) {
     if (!Array.isArray(data)) return [];
@@ -182,7 +205,16 @@
             };
           })
           .filter((it) => it && String(it.text).trim())
-          .map((it) => ({ shortcut: uniqueShortcut(it.shortcut, it._seed), text: String(it.text).trim() })),
+          .map((it) => {
+            const raw = String(it.text).replace(/\r\n?/g, '\n').trim();
+            const parts = splitMessages(raw);
+            // 1 tin → giữ nguyên cả đoạn (kể cả xuống dòng đơn); nhiều tin → mỗi tin 1 phần
+            return {
+              shortcut: uniqueShortcut(it.shortcut, it._seed),
+              text: parts.length === 1 ? raw : parts.join('\n\n'),
+              parts,
+            };
+          }),
       }));
   }
 
@@ -564,6 +596,23 @@
     }
     .tln-item-box { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px; }
     .tln-item-text { font-size: 12px; color: #334155; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+    .tln-item-parts { font-size: 10px; color: #7c3aed; font-weight: 700; margin-top: 2px; }
+    .tln-sg-parts { flex-shrink: 0; font-size: 10px; font-weight: 700; color: #7c3aed; background: #ede9fe; border: 1px solid #ddd6fe; border-radius: 5px; padding: 1px 4px; margin-top: 1px; }
+    /* Khi đang có câu chờ gửi tiếp: ô soạn tin sáng nhẹ + nhãn đếm tin */
+    .tln-waiting { box-shadow: 0 0 0 2px #8b5cf6 inset !important; }
+    #tln-waiting {
+      position: fixed; display: none; align-items: center; gap: 6px;
+      background: #7c3aed; color: #fff; font-size: 10.5px; font-weight: 700;
+      padding: 3px 8px; border-radius: 12px; box-shadow: 0 3px 10px rgba(0,0,0,.2);
+      pointer-events: auto; z-index: 2147483647; white-space: nowrap; user-select: none;
+    }
+    #tln-waiting.show { display: flex; }
+    #tln-waiting button {
+      width: 15px; height: 15px; border-radius: 50%; border: none; cursor: pointer;
+      background: rgba(255,255,255,.25); color: #fff; font-size: 10px; line-height: 1;
+      display: flex; align-items: center; justify-content: center; padding: 0;
+    }
+    #tln-waiting button:hover { background: rgba(255,255,255,.45); }
     .tln-item-actions { display: flex; align-items: center; gap: 2px; flex-shrink: 0; }
 
     .tln-icon {
@@ -719,9 +768,10 @@
   /* ============================ TOAST ============================ */
 
   let toastTimer = null;
-  function showToast(msg, isErr) {
+  /** variant: 'error' | 'info' — dùng cho thông báo cần thiết (vd đang chờ gửi tiếp) */
+  function showToast(msg, variant) {
     toast.textContent = msg;
-    toast.classList.toggle('err', !!isErr);
+    toast.classList.toggle('err', variant === 'error');
     toast.style.display = 'block';
     if (isOpenPanel) updatePanelPosition();
     else positionToastNearButton();
@@ -733,6 +783,56 @@
     const r = btn.getBoundingClientRect();
     toast.style.left = clamp(r.left - 120, 8, Math.max(8, window.innerWidth - 250)) + 'px';
     toast.style.top = clamp(r.top - 40, 8, window.innerHeight - 40) + 'px';
+  }
+
+  /* ============================ NHÃN "CÒN N TIN CHỜ GỬI" ============================ */
+
+  const waitBadge = h('div', { id: 'tln-waiting' });
+  const waitText = h('span', { text: '' });
+  const waitCancel = h('button', { text: '✕', title: 'Bỏ các tin còn lại (không điền nữa)' });
+  waitBadge.appendChild(h('span', { text: '⏳' }));
+  waitBadge.appendChild(waitText);
+  waitBadge.appendChild(waitCancel);
+  shadow.appendChild(waitBadge);
+  waitBadge.addEventListener('mousedown', (e) => e.stopPropagation());
+  waitCancel.addEventListener('click', (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    clearPending();
+  });
+
+  function flushWaitBadge() {
+    if (!pendingSend) {
+      waitBadge.classList.remove('show');
+      waitText.textContent = '';
+      highlightWaitingInput(false);
+      return;
+    }
+    const total = pendingSend.parts.length;
+    const cur = Math.min(pendingSend.index, total); // tin đang nằm trong ô soạn tin
+    const remaining = total - cur;
+    waitText.textContent = remaining > 0
+      ? 'Tin ' + cur + '/' + total + ' — Enter để gửi, script tự điền ' + remaining + ' tin tiếp theo'
+      : 'Tin ' + total + '/' + total + ' — tin cuối, Enter để gửi';
+    waitBadge.classList.add('show');
+    positionWaitBadge();
+    highlightWaitingInput(true);
+  }
+
+  function positionWaitBadge() {
+    const el = pendingSend && pendingSend.el;
+    if (!el || !el.isConnected) return;
+    const r = el.getBoundingClientRect();
+    const w = waitBadge.offsetWidth || 200;
+    const h2 = waitBadge.offsetHeight || 20;
+    waitBadge.style.left = clamp(r.right - w, 6, Math.max(6, window.innerWidth - w - 6)) + 'px';
+    waitBadge.style.top = clamp(r.top - h2 - 4, 6, Math.max(6, window.innerHeight - h2 - 6)) + 'px';
+  }
+
+  function highlightWaitingInput(on) {
+    const el = pendingSend && pendingSend.el;
+    if (!el) return;
+    try { el.classList.toggle('tln-waiting', !!on); } catch (e) { /* ignore */ }
   }
 
   /* ============================ VỊ TRÍ BONG BÓNG & PANEL ============================ */
@@ -931,6 +1031,154 @@
     return { kind: 'editable', el, token: info.token, start: info.start, end: info.end, caret: offs.start };
   }
 
+  /* ============================ NHIỀU TIN CHO 1 CÂU TẮT (chờ gửi tiếp) ============================ */
+
+  // Một câu tắt có thể gồm 2–3 tin. Tin 1 được chèn ngay; các tin sau ở trạng thái "chờ".
+  // Khi bạn GỬI tin trước (Enter, hoặc bấm nút Gửi) → ô soạn tin trống → script tự điền tin
+  // kế tiếp và chờ bạn Enter tiếp. Không bao giờ điền oan khi bạn tự xoá nội dung:
+  // chỉ điền khi đã có Enter/nút Gửi, hoặc ô mất focus (dấu hiệu tin đã được gửi).
+  let pendingSend = null; // { parts, index, el, confirmed, filledAt, deadline }
+  let pendingTimer = null;
+
+  const PENDING_POLL_MS = 120;
+  const PENDING_MAX_MS = 20000; // chờ tối đa 20s cho app gửi xong tin trước
+
+  function composerText(el) {
+    if (!el || !el.isConnected) return '';
+    const tag = tagOf(el);
+    if (tag === 'input' || tag === 'textarea') return String(el.value || '');
+    const plain = (el.innerText != null ? el.innerText : el.textContent) || '';
+    return plain.replace(/\u200b/g, '');
+  }
+
+  function composerIsEmpty(el) {
+    if (!el || !el.isConnected) return false;
+    if (composerText(el).trim() !== '') return false;
+    // contenteditable còn ảnh đang chờ gửi → coi như chưa gửi
+    if (tagOf(el) !== 'input' && tagOf(el) !== 'textarea') {
+      if (/<img|data:image/i.test(el.innerHTML || '')) return false;
+    }
+    return true;
+  }
+
+  function fillNextPart() {
+    if (!pendingSend) return;
+    const el = pendingSend.el;
+    const next = pendingSend.parts[pendingSend.index];
+    if (next == null) { clearPending(); return; }
+    pendingSend.index += 1;
+    pendingSend.confirmed = false;
+    pendingSend.filledAt = Date.now();
+    replaceRangeIn(el, 0, 0, next);
+    try { el.focus({ preventScroll: true }); } catch (e) { /* ignore */ }
+    try {
+      const tag = tagOf(el);
+      if (tag === 'input' || tag === 'textarea') {
+        const end = String(el.value || '').length;
+        el.setSelectionRange(end, end);
+      }
+    } catch (e) { /* ignore */ }
+    if (pendingSend.index >= pendingSend.parts.length) {
+      // đây là tin cuối → không cần chờ nữa, nhưng vẫn giữ trạng thái "chờ" để biết
+      pendingSend.done = true;
+      flushWaitBadge();
+    } else {
+      flushWaitBadge();
+    }
+  }
+
+  /** Vòng kiểm tra ô soạn tin: rỗng & đã gửi → điền tin kế tiếp. */
+  function ensurePendingLoop() {
+    if (pendingTimer || !pendingSend) return;
+    pendingSend.deadline = pendingSend.deadline || (Date.now() + PENDING_MAX_MS);
+    const tick = () => {
+      pendingTimer = null;
+      if (!pendingSend) return;
+      const el = pendingSend.el;
+      if (!el || !el.isConnected) { clearPending(); return; }
+
+      const empty = composerIsEmpty(el);
+      // "đã gửi" = bạn vừa Enter/bấm Gửi, hoặc ô soạn tin đã mất focus (app gửi xong)
+      const sent = pendingSend.confirmed || document.activeElement !== el;
+
+      if (empty && sent) {
+        if (pendingSend.index < pendingSend.parts.length) {
+          fillNextPart();                     // còn tin → điền tin kế tiếp
+        } else {
+          clearPending();                     // tin cuối đã gửi xong
+          return;
+        }
+      } else if (empty && !pendingSend.confirmed && Date.now() - (pendingSend.filledAt || 0) > 400) {
+        clearPending();                       // ô trống mà không hề Enter → người dùng tự xoá
+        return;
+      }
+
+      if (pendingSend && Date.now() < pendingSend.deadline) {
+        pendingTimer = setTimeout(tick, PENDING_POLL_MS);
+      } else if (pendingSend) {
+        clearPending();
+      }
+    };
+    pendingTimer = setTimeout(tick, PENDING_POLL_MS);
+  }
+
+  function clearPending(keepHighlight) {
+    if (pendingTimer) { clearTimeout(pendingTimer); pendingTimer = null; }
+    if (!keepHighlight) highlightWaitingInput(false);
+    pendingSend = null;
+    flushWaitBadge();
+  }
+
+  /**
+   * Chèn tin đầu tiên của câu tắt + (nếu nhiều tin) đặt chờ tin kế tiếp.
+   * Không hiện toast khi chọn câu (theo yêu cầu).
+   */
+  function applyShortcut(item, targetEl, range) {
+    const parts = (Array.isArray(item.parts) && item.parts.length)
+      ? item.parts.slice()
+      : splitMessages(item.text || '');
+    if (!parts.length) return false;
+
+    const el = targetEl && targetEl.isConnected ? targetEl : pickTargetInput();
+    if (!el) {
+      copyText(parts[0]);
+      return false;
+    }
+
+    let start = range ? range.start : null;
+    let end = range ? range.end : null;
+
+    // Không có token: nếu ô đang chỉ chứa đúng "//xx" (vừa gõ dở) thì thay cả nội dung
+    if (start == null) {
+      const cur = composerText(el);
+      if (/^\s*\/\/[^\s/]*\s*$/.test(cur)) { start = 0; end = cur.length; }
+    }
+
+    let ok;
+    if (start != null && (tagOf(el) === 'input' || tagOf(el) === 'textarea' || range)) {
+      ok = replaceRangeIn(el, start, end, parts[0]) >= 0;
+    } else {
+      ok = insertAtCaret(el, parts[0]);
+    }
+    if (!ok) return false;
+
+    try { el.focus({ preventScroll: true }); } catch (e) { /* ignore */ }
+
+    if (parts.length > 1) {
+      pendingSend = {
+        parts, index: 1, el,
+        confirmed: false,
+        filledAt: Date.now(),
+        deadline: Date.now() + PENDING_MAX_MS,
+      };
+      flushWaitBadge();
+      ensurePendingLoop();
+    } else {
+      clearPending();
+    }
+    return true;
+  }
+
   /* ============================ BẢNG GỢI Ý ============================ */
 
   /** Kéo bảng gợi ý ra chỗ khác (lưu lại) — bấm đúp vào tiêu đề để về vị trí tự động. */
@@ -1019,6 +1267,13 @@
       row.appendChild(h('span', { class: 'tln-chip', text: '//' + rec.key, title: 'Gõ //' + rec.key }));
 
       row.appendChild(h('span', { class: 'tln-sg-text', text: rec.item.text }));
+      const nParts = (rec.item.parts || []).length;
+      if (nParts > 1) {
+        row.appendChild(h('span', {
+          class: 'tln-sg-parts', text: nParts + ' tin',
+          title: 'Enter gửi tin 1, script tự điền tin 2…',
+        }));
+      }
       list.appendChild(row);
     });
     suggest.appendChild(list);
@@ -1145,20 +1400,34 @@
     expandShortcut(info, rec);
   }
 
-  /** Chèn nội dung câu vào đúng chỗ đang gõ token, thay luôn token. */
+  /** Chèn nội dung câu vào đúng chỗ đang gõ token (thay luôn token "//xx"). */
   function expandShortcut(info, rec, suffix) {
     const el = info.el;
     if (!el || !el.isConnected) { hideSuggest(); return; }
-    const caretAfter = replaceRangeIn(el, info.start, info.end, rec.item.text + (suffix || ''));
     hideSuggest();
-    if (caretAfter < 0) {
-      showToast('Không chèn được vào ô nhập', true);
+    const ok = applyShortcut(rec.item, el, { start: info.start, end: info.end });
+    if (!ok) {
+      showToast('Không chèn được vào ô nhập', 'error');
       return;
     }
+    // Gõ "//cn " (auto-expand) → giữ lại khoảng trắng sau tin — chỉ khi câu chỉ có 1 tin
+    const isMulti = (rec.item.parts || []).length > 1;
+    if (suffix && !isMulti) {
+      try {
+        const tag = tagOf(el);
+        if (tag === 'input' || tag === 'textarea') {
+          const pos = el.selectionStart;
+          const v = el.value || '';
+          el.value = v.slice(0, pos) + suffix + v.slice(pos);
+          el.setSelectionRange(pos + 1, pos + 1);
+        }
+      } catch (e) { /* ignore */ }
+    }
     try {
-      if (tagOf(el) === 'input' || tagOf(el) === 'textarea') el.setSelectionRange(caretAfter, caretAfter);
+      const tag = tagOf(el);
+      if (tag === 'input' || tag === 'textarea') el.setSelectionRange(el.selectionStart, el.selectionStart);
     } catch (e) { /* ignore */ }
-    showToast('Đã chèn câu //' + rec.key + ' — Enter để gửi');
+    // KHÔNG hiện toast khi chọn câu (theo yêu cầu)
   }
 
   /* ============================ BẮT SỰ KIỆN BÀN PHÍM ============================ */
@@ -1213,6 +1482,13 @@
       return;
     }
 
+    // Enter = gửi tin hiện tại → nếu câu tắt còn tin sau, chờ ô trống rồi tự điền tin kế tiếp
+    if (key === 'Enter' && pendingSend) {
+      pendingSend.confirmed = true;
+      pendingSend.deadline = Date.now() + PENDING_MAX_MS;
+      ensurePendingLoop();
+    }
+
     // Gợi ý đã đóng / chưa kịp mở: nếu token hiện tại khớp CHÍNH XÁC thì vẫn chèn
     const info = tokenAt(target);
     if (!info) return;
@@ -1230,6 +1506,8 @@
     if (isOurs(el)) return;
     if (!isEditableEl(el)) return;
     lastActiveInput = el;
+
+
     if (isSuggestScope(el)) refreshSuggest(el);
   }
   document.addEventListener('input', onInput, true);
@@ -1239,6 +1517,25 @@
     if (isOurs(el) || !isSuggestScope(el)) return;
     if (['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'Home', 'End', 'Backspace', 'Delete'].indexOf(e.key) > -1) {
       refreshSuggest(el);
+    }
+  }, true);
+
+  // Bấm nút GỬI của Pancake cũng coi như "đã gửi" → điền tin kế tiếp
+  document.addEventListener('click', (e) => {
+    if (!pendingSend) return;
+    if (isOurs(e.target)) return;
+    let node = e.target;
+    let hit = false;
+    for (let i = 0; i < 4 && node && node.nodeType === 1; i++) {
+      const cls = String(node.className || '') + ' ' + String(node.id || '');
+      const hint = (node.getAttribute && (node.getAttribute('title') || node.getAttribute('aria-label') || '')) || '';
+      if (/send|gui\b/i.test(cls) || /gửi|send/i.test(hint)) { hit = true; break; }
+      node = node.parentElement;
+    }
+    if (hit) {
+      pendingSend.confirmed = true;
+      pendingSend.deadline = Date.now() + PENDING_MAX_MS;
+      ensurePendingLoop();
     }
   }, true);
 
@@ -1259,11 +1556,16 @@
     }, 120);
   }, true);
 
-  // Ghi nhớ ô nhập đang dùng
+  // Ghi nhớ ô nhập đang dùng (đổi sang ô khác thì huỷ phần tin đang chờ)
   function trackInput(e) {
     const el = e.target;
     if (isOurs(el)) return;
-    if (isEditableEl(el)) lastActiveInput = el;
+    if (isEditableEl(el)) {
+      if (pendingSend && el !== pendingSend.el) clearPending();
+      lastActiveInput = el;
+      // đang gõ ở ô khác (ô tìm kiếm, ô lọc…) → đóng bảng gợi ý ngay
+      if (!isSuggestScope(el)) hideSuggest();
+    }
   }
   document.addEventListener('focusin', trackInput, true);
   document.addEventListener('mousedown', trackInput, true);
@@ -1273,8 +1575,18 @@
     currentPos = applyBtnPosition(currentPos.top, currentPos.left);
     if (isOpenPanel) updatePanelPosition();
     if (picker.open) positionSuggest();
+    if (pendingSend) positionWaitBadge();
   });
-  document.addEventListener('scroll', () => { if (picker.open) positionSuggest(); }, true);
+  document.addEventListener('scroll', () => {
+    if (picker.open) positionSuggest();
+    if (pendingSend) positionWaitBadge();
+  }, true);
+
+  // Ô soạn tin bị gỡ khỏi DOM (đổi chat) → huỷ phần chờ
+  setInterval(() => {
+    if (pendingSend && (!pendingSend.el || !pendingSend.el.isConnected)) clearPending();
+    else if (pendingSend) positionWaitBadge();
+  }, 1500);
 
   /* ============================ RENDER PANEL ============================ */
 
@@ -1301,6 +1613,13 @@
 
     const box = h('div', { class: 'tln-item-box' });
     box.appendChild(h('span', { class: 'tln-item-text', text: item.text, title: item.text }));
+    const partsN = (item.parts || []).length;
+    if (partsN > 1) {
+      box.appendChild(h('span', {
+        class: 'tln-item-parts',
+        text: partsN + ' tin — Enter gửi tin 1, tự điền tin 2…',
+      }));
+    }
     row.appendChild(box);
 
     const actions = h('div', { class: 'tln-item-actions' });
@@ -1353,24 +1672,20 @@
     } else {
       actions.appendChild(h('button', {
         class: 'tln-icon', text: '📋', title: 'Sao chép câu',
-        onclick: (e) => { e.stopPropagation(); copyText(item.text); showToast('Đã sao chép câu /' + key); },
+        onclick: (e) => { e.stopPropagation(); copyText(item.text); },
       }));
-      row.addEventListener('click', () => insertFromPanel(item, key));
+      row.addEventListener('click', () => insertFromPanel(item));
     }
 
     row.appendChild(actions);
     return row;
   }
 
-  function insertFromPanel(item, key) {
+  function insertFromPanel(item) {
     const target = pickTargetInput();
-    if (target && insertAtCaret(target, item.text)) {
-      try { target.focus({ preventScroll: true }); } catch (e) { /* ignore */ }
-      showToast('Đã chèn //' + key + ' vào ô trả lời — Enter để gửi');
-    } else {
-      copyText(item.text);
-      showToast('Đã sao chép /' + key + ' (chưa chọn ô nhập)');
-    }
+    if (target && applyShortcut(item, target, null)) return;
+    // Không có ô nhập → sao chép tin đầu tiên
+    copyText((item.parts && item.parts[0]) || item.text);
   }
 
   function pickTargetInput() {
@@ -1479,7 +1794,7 @@
     const matched = [];
     (cat.items || []).forEach((item, itemIdx) => {
       if (term) {
-        const hay = (normShortcut(item.shortcut) + ' ' + (item.text || '')).toLowerCase();
+        const hay = (normShortcut(item.shortcut) + ' ' + (item.text || '') + ' ' + (item.parts || []).join(' ')).toLowerCase();
         if (hay.indexOf(term) === -1) return;
       }
       matched.push({ item, cat, catIdx, itemIdx, key: normShortcut(item.shortcut) });
@@ -1751,10 +2066,11 @@
         },
         {
           key: 'text',
-          label: 'NỘI DUNG CÂU TRẢ LỜI',
-          value: item.text || '',
-          placeholder: 'Nội dung đầy đủ sẽ được chèn vào ô soạn tin…',
+          label: 'NỘI DUNG — mỗi DÒNG TRỐNG ngăn cách 1 TIN',
+          value: (item.parts && item.parts.length > 1) ? item.parts.join('\n\n') : (item.text || ''),
+          placeholder: 'Tin 1: Dạ em chào anh/chị ạ!\n\nTin 2: Bên em đang freeship toàn quốc…\n\nTin 3: Anh/chị chốt giúp em nhé!',
           multiline: true,
+          hint: '1 tin = 1 lần gửi. Enter gửi tin 1 rồi script tự điền tin 2 vào ô chat, chờ bạn Enter tiếp.',
         },
       ],
       onSubmit: (v, fail) => {
@@ -1764,17 +2080,22 @@
         if (shortcutTaken(key, isEdit ? { catIdx: opts.catIdx, itemIdx: opts.itemIdx } : null)) {
           return fail('Câu tắt “//' + key + '” đã được dùng ở câu khác.', 'shortcut');
         }
-        if (!v.text) return fail('Chưa nhập nội dung câu trả lời.', 'text');
+        const parts = splitMessages(v.text);
+        if (!parts.length) return fail('Chưa nhập nội dung câu trả lời.', 'text');
+        // 1 tin → giữ nguyên đoạn (kể cả xuống dòng đơn); nhiều tin → mỗi tin 1 phần
+        const text = parts.length === 1
+          ? String(v.text).replace(/\r\n?/g, '\n').trim()
+          : parts.join('\n\n');
+        const entry = { shortcut: key, text, parts };
 
         if (isEdit) {
-          categories[opts.catIdx].items[opts.itemIdx] = { shortcut: key, text: v.text };
+          categories[opts.catIdx].items[opts.itemIdx] = entry;
         } else {
-          categories[opts.catIdx].items.push({ shortcut: key, text: v.text });
+          categories[opts.catIdx].items.push(entry);
           openCats.add(categories[opts.catIdx].id);
         }
         saveData();
         render();
-        showToast((isEdit ? 'Đã lưu câu //' : 'Đã thêm câu //') + key);
       },
     });
   }
@@ -1820,6 +2141,8 @@
       hideSuggest();
     }
   }, true);
+
+  flushWaitBadge(); // hiện lại nhãn "còn tin chờ gửi" nếu có
 
   /* ============================ KHỞI ĐỘNG ============================ */
 

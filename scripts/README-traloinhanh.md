@@ -1,6 +1,6 @@
 # TRALOINHANH — Trả lời nhanh cho Sale (câu tắt `/cn` + bong bóng kéo thả)
 
-File: `scripts/traloinhanh.user.js` (v6.2.0) — Tampermonkey, chạy trên trang chat Pancake
+File: `scripts/traloinhanh.user.js` (v6.3.0) — Tampermonkey, chạy trên trang chat Pancake
 (`pancake.vn`, `pages.fm`, `pancake.ph/id/in/biz`, `socialos.vip`).
 
 **Đây là bản nâng cấp của script “Hỗ trợ trả lời Sale (Draggable Bubble - v5.5)”.**
@@ -19,18 +19,36 @@ chỉ cần mở script cũ trong Tampermonkey → dán đè toàn bộ nội du
 | Thêm/sửa bằng `prompt()` của trình duyệt | Form trong panel, chặn **trùng câu tắt**, tự chuẩn hóa (bỏ dấu, lowercase, bỏ `/`) |
 | — | Ô **tìm kiếm** câu tắt/nội dung, nút 📋 sao chép từng câu, phím tắt `Alt+Shift+S` |
 | — | Lần chạy đầu của v6.2.0 **dọn sạch** dữ liệu cũ (`tln_data_v1`, `sqr_data_v5`) và in bản sao ra console |
+| Có thông báo “Đã chèn câu…” mỗi lần chọn câu | **Không còn toast** khi chọn/chèn câu (chỉ giữ cảnh báo lỗi) |
+| 1 câu = 1 tin | **1 câu tắt = nhiều tin**: Enter gửi tin 1 → script tự điền tin 2 → Enter tiếp… |
 | — | **Không còn che bảng "/" gốc của Pancake**: bảng gợi ý của script tự ẩn bảng gốc khi mở, và **kéo được** (lưu vị trí) nếu vẫn muốn dời đi chỗ khác |
 
 ## Sử dụng
 
 0. **Thêm câu tắt của bạn**: bấm bong bóng 💬 → “✏️ Chỉnh sửa” → “+ Thêm danh mục mới” →
-   trong danh mục bấm “+ Thêm câu tắt cho danh mục này” → nhập **câu tắt** (vd `cn`) + **nội dung câu trả lời**.
+   trong danh mục bấm “+ Thêm câu tắt cho danh mục này” → nhập **câu tắt** (vd `cn`) + **nội dung**.
    Danh sách mặc định **trống** (bản v6.2.0 đã xoá hết câu mẫu & câu cũ một lần khi nâng cấp).
+
+   **Một câu tắt gửi nhiều tin liên tiếp:** trong ô nội dung, ngăn các tin bằng **một dòng trống**, ví dụ
+
+   ```
+   Dạ em chào anh/chị ạ!
+
+   Bên em đang freeship toàn quốc.
+
+   Anh/chị chốt giúp em nhé!
+   ```
+
+   = 3 tin. Khi dùng `//cau_tat`: tin 1 được điền vào ô chat → bạn **Enter** để gửi → script tự điền
+   tin 2 (chờ bạn Enter) → … hết tin thì thôi. Cạnh ô soạn tin có nhãn **“Tin 1/3 — Enter để gửi…”**;
+   bấm **✕** trên nhãn để bỏ các tin còn lại. Script **không tự gửi** và **không điền oan** khi bạn tự xoá nội dung.
+   (Xuống dòng đơn trong cùng một tin vẫn được giữ nguyên — không tách tin.)
 1. **Gõ câu tắt trong ô soạn tin** của Pancake (ô `textarea#replyBoxComposer`):
    - Gõ **`//`** (hai gạch chéo) → hiện danh sách câu tắt gợi ý ngay cạnh ô soạn tin.
    - Gõ tiếp chữ (vd `//cn`) → lọc dần, gợi ý khớp đầu câu tắt được ưu tiên.
-   - **Enter / Tab** (hoặc bấm vào gợi ý): chèn **nguyên văn câu trả lời** vào đúng vị trí con trỏ,
+   - **Enter / Tab** (hoặc bấm vào gợi ý): chèn **tin đầu tiên** vào đúng vị trí con trỏ,
      xóa luôn phần `//cn`, đặt con trỏ ở cuối câu → **bấm Enter lần nữa là gửi** (script không tự gửi).
+     Câu có nhiều tin thì sau khi gửi, tin kế tiếp tự được điền (xem mục 0).
    - **Một gạch `/` thì script KHÔNG làm gì** — đó vẫn là bảng câu nhanh "/" gốc của Pancake.
    - `//` phải đứng đầu ô hoặc sau khoảng trắng/ký tự mở: `abc//cn`, `https://x//y`, `///cn` → không kích hoạt.
    - **↑ ↓** đổi lựa chọn, **Esc** đóng gợi ý. Gõ đúng câu tắt rồi **cách ra** cũng chèn luôn
