@@ -1,6 +1,6 @@
 # TRALOINHANH — Trả lời nhanh cho Sale (câu tắt `/cn` + bong bóng kéo thả)
 
-File: `scripts/traloinhanh.user.js` (v6.5.0) — Tampermonkey, chạy trên trang chat Pancake
+File: `scripts/traloinhanh.user.js` (v6.6.0) — Tampermonkey, chạy trên trang chat Pancake
 (`pancake.vn`, `pages.fm`, `pancake.ph/id/in/biz`, `socialos.vip`).
 
 **Đây là bản nâng cấp của script “Hỗ trợ trả lời Sale (Draggable Bubble - v5.5)”.**
@@ -90,6 +90,18 @@ Riêng bảng câu nhanh "/" **gốc của Pancake**: repo chưa bắt được 
 `html*.txt`, cũng không thấy class trong `_app`), nên script **không đoán class** — chỉ dùng CSS `:has()`
 nhắm theo đúng **câu chữ** của bảng (`:has(.suggestion-element)`, `:has(.shortcut-tag)`, `:has(#qr_autocomplete)`)
 và luôn có công tắc để tắt. Nếu bảng gốc vẫn hiện, dùng cách **kéo bảng của script** sang chỗ khác.
+
+## Cơ chế tự gửi (v6.6.0 — MutationObserver, không polling)
+
+1. **Observer trên ô soạn tin** (`.reply-box__text-area`/`textarea#replyBoxComposer`): thấy ô trống
+   hoặc app bắn sự kiện `input` (xoá ô sau khi gửi) → tin trước đã đi.
+2. **Observer trên vùng danh sách tin nhắn**: thấy **bong bóng tin mới** xuất hiện → tin trước đã
+   gửi **thành công** → điền + bắn tin kế tiếp **ngay trong cùng nhịp** (đo thực tế 1–5 ms).
+3. **Observer trên body**: ô soạn tin bị gỡ (đổi chat) → huỷ chuỗi, không điền sang chat khác.
+4. Không còn `setInterval`/polling. Chỉ có timer cho: giãn cách bạn đặt trong ⚙ Cài đặt,
+   thử lại khi nút Gửi không ăn (350 ms → 900 ms, tối đa 3 lần), và chốt an toàn 20 s.
+5. **Chống mất tin**: sau khi bấm Gửi, nếu app chưa bắn `input` và chưa có bong bóng mới thì script
+   chờ tối đa **500 ms** rồi mới điền tiếp (server chậm vẫn không mất tin).
 
 ## Cách script gửi các tin tiếp theo (không cần bạn Enter)
 

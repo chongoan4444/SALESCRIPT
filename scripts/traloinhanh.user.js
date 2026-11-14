@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Hỗ trợ trả lời Sale (Draggable Bubble - v5.5)
 // @namespace    http://tampermonkey.net/
-// @version      6.5.0
+// @version      6.6.0
 // @description  Trợ lý trả lời nhanh cho Sale: gõ câu tắt dạng /cn trong ô soạn tin Pancake → câu trả lời tự nhảy vào ô, Enter là gửi. Bong bóng nổi kéo thả, quản lý danh mục & câu tắt ngay trên trang.
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -42,6 +42,14 @@
  *     gõ "//cn" → hiện danh sách gợi ý ngay trên ô nhập → Enter/Tab (hoặc bấm gợi ý)
  *     → câu trả lời được CHÈN vào đúng vị trí con trỏ, giữ nguyên chữ đang gõ dở;
  *     bấm Enter lần nữa là gửi (script không tự gửi, không tự Enter).
+ * - v6.6.0: Chuyển sang **MutationObserver** (bỏ hoàn toàn setInterval/polling cho chuỗi gửi):
+ *   1) observer trên ô soạn tin → thấy nó trống / app bắn 'input' = tin trước đã đi;
+ *   2) observer trên vùng danh sách tin nhắn → thấy BONG BÓNG TIN MỚI xuất hiện = gửi thành công;
+ *   3) observer trên body → ô soạn tin bị gỡ (đổi chat) thì huỷ chuỗi.
+ *   Gặp tín hiệu là bắn tin kế tiếp ngay trong cùng nhịp (~2–5ms), không cộng delay.
+ *   Cơ chế xác nhận: sau khi bấm Gửi, nếu app chưa bắn 'input' và chưa có bong bóng mới thì chờ
+ *   tối đa 500ms rồi mới điền tiếp (tránh mất tin khi server chậm); nếu ô còn nguyên chữ thì
+ *   thử lại (350ms → 900ms, tối đa 3 lần) rồi dừng an toàn.
  * - v6.5.0: Giãn cách cho phép **0ms** (mặc định vẫn 1200ms): 0ms = gửi ngay khi tin trước vừa
  *   đi khỏi ô soạn tin, vòng kiểm tra 25ms nên gần như tức thì (đo thực tế ~30ms/tin).
  *   Chip nhanh: ⚡0ms · 0.1s · 0.2s · 0.3s · 0.5s · 1s; nút −/+ bước 50ms; min 0, max 30000ms.
@@ -71,7 +79,7 @@
 
   /* ============================ HẰNG SỐ ============================ */
 
-  const APP_VERSION = '6.5.0';
+  const APP_VERSION = '6.6.0';
   const KEY_DATA = 'tln_data_v2';          // v6.2.0: dữ liệu trắng (người dùng tự thêm), kích hoạt bằng "//"
   const KEY_DATA_OLD = 'tln_data_v1';      // dữ liệu của v6.0/6.1 (bị bỏ khi nâng cấp)
   const CLEAR_FLAG = 'tln_cleared_v2';     // đánh dấu đã dọn dữ liệu mẫu một lần
@@ -1102,21 +1110,24 @@
     return { kind: 'editable', el, token: info.token, start: info.start, end: info.end, caret: offs.start };
   }
 
-  /* ============================ NHIỀU TIN CHO 1 CÂU TẮT (tự gửi liên tiếp) ============================ */
+  /* ============================ NHIỀU TIN CHO 1 CÂU TẮT (MutationObserver, tự gửi liên tiếp) ============================ */
 
-  // Một câu tắt có thể gồm 2–5 tin. Mặc định (v6.4.0): bạn chèn câu, bấm Enter MỘT LẦN để gửi
-  // tin đầu — script tự điền + tự gửi tiếp các tin còn lại, cách nhau `settings.gapMs`.
-  //  • Cách gửi từng tin: bấm đúng nút Gửi của Pancake trong khung soạn tin (tìm theo title/
-  //    class chứa "gửi"/"send"); không thấy nút thì phát phím Enter tổng hợp lên ô soạn tin.
-  //  • Không nhảy tin khi tin trước CHƯA đi khỏi ô soạn tin (tránh gửi sót/chèn đè).
-  //  • Nếu nút Gửi không tìm thấy và Enter không ăn sau 2 lần thử → dừng, để bạn Enter tay.
-  //  • Chế độ "Thủ công" (settings.chain='manual') = kiểu cũ: mỗi tin bạn Enter một lần.
-  let pendingSend = null; // { parts, index, el, running, stop, waitSince, tries, deadline, sentCount }
-  let pendingTimer = null;
+  // Một câu tắt có thể gồm 2–5 tin. Bạn chèn câu, bấm Enter MỘT LẦN (gửi tin 1) — từ đó script
+  // dùng MutationObserver theo dõi:
+  //   • ô soạn tin (value/childList) → thấy tin trước ĐÃ ĐI (ô trống)  → điền + gửi tin kế tiếp
+  //   • vùng danh sách tin nhắn của trang → thấy BONG BÓNG TIN MỚI xuất hiện (gửi thành công)
+  //     → cũng coi là "tin trước đã gửi xong" → điền + gửi tiếp ngay (không cần chờ ô trống)
+  // Không polling; chỉ có timer: giãn cách `settings.gapMs` (0 = bắn ngay) và chốt an toàn
+  // khi tin không đi được (thử lại tối đa 3 lần rồi dừng, để lại tin kế tiếp trong ô).
+  let pendingSend = null; // { parts, index, el, running, stop, gapUntil, tries, sendTry, deadline }
+  let pendingTimer = null;      // hẹn giờ cho giãn cách / thử lại
+  let pendingDebounce = null;   // gộp nhiều mutation trong cùng 1 nhịp
 
-  const PENDING_POLL_MS = 25;          // nhịp kiểm tra ô soạn tin (nhanh để không cộng thêm delay)
-  const PENDING_GAP_MAX_MS = 20000;
-  const ENTER_RETRY_GAP_MS = 1500;
+  const PENDING_DEBOUNCE_MS = 20;   // gộp mutation (nhanh nhưng không bắn 2 lần)
+  const PENDING_GAP_MAX_MS = 20000; // chốt an toàn: chờ tối đa 20s cho 1 tin
+  const ENTER_RETRY_GAP_MS = 900;
+  const FIRST_RETRY_MS = 350;      // lần thử lại đầu tiên (nhanh)
+  const SOFT_CONFIRM_MS = 500;     // nếu app không bắn 'input'/'bong bóng' trong 500ms thì coi như đã gửi
 
   function composerText(el) {
     if (!el || !el.isConnected) return '';
@@ -1218,6 +1229,9 @@
     pendingSend.tries = 0;
     pendingSend.sendTry = 0;
     pendingSend.filledAt = Date.now();
+    pendingSend.justFilled = true;
+    pendingSend.needSend = true;
+    setTimeout(() => { if (pendingSend) pendingSend.justFilled = false; }, 0);
     replaceRangeIn(el, 0, 0, next);
     try { el.focus({ preventScroll: true }); } catch (e) { /* ignore */ }
     try {
@@ -1230,89 +1244,197 @@
     return true;
   }
 
-  /**
-   * Vòng điều khiển chuỗi nhiều tin (chỉ chạy sau khi người dùng Enter/Gửi tin đầu):
-   *  • tự động:  tin trước đi khỏi ô soạn tin → chờ đủ "Giãn cách" → điền tin kế tiếp → TỰ GỬI
-   *  • thủ công: điền tin kế tiếp rồi chờ người dùng Enter
-   */
-  function ensurePendingLoop() {
-    if (pendingTimer || !pendingSend) return;
-    const tick = () => {
+  /* ---- Theo dõi bằng MutationObserver ---- */
+
+  const composerObserver = new MutationObserver(() => onPendingSignal('composer'));
+  const threadObserver = new MutationObserver(() => {
+    if (!pendingSend || !pendingSend.running) return;
+    advancePending(true); // có bong bóng tin mới = tin trước đã gửi thành công
+  });
+
+  function watchComposerEl(el) {
+    try { composerObserver.disconnect(); } catch (e) { /* ignore */ }
+    if (!el || el.nodeType !== 1) return;
+    try {
+      composerObserver.observe(el, {
+        childList: true, subtree: true, characterData: true, attributes: true, attributeFilter: ['value'],
+      });
+    } catch (e) { /* ignore */ }
+  }
+
+  /** Vùng danh sách tin nhắn của trang — chỉ dùng để biết "đã có tin mới được gửi". */
+  function watchThread() {
+    try { threadObserver.disconnect(); } catch (e) { /* ignore */ }
+    let target = null;
+    try { target = document.getElementById(PANCAKE_COMPOSER_ID); } catch (e) { target = null; }
+    // khung cha chứa cả ô soạn tin và danh sách tin nhắn
+    let node = target;
+    for (let i = 0; i < 8 && node && node.parentElement; i++) node = node.parentElement;
+    if (!node) node = document.body;
+    try {
+      threadObserver.observe(node, { childList: true, subtree: true });
+    } catch (e) { /* ignore */ }
+  }
+
+  function onPendingSignal() {
+    if (!pendingSend || !pendingSend.running) return;
+    if (pendingDebounce) return;
+    pendingDebounce = setTimeout(() => {
+      pendingDebounce = null;
+      advancePending(false);
+    }, PENDING_DEBOUNCE_MS);
+  }
+
+  /** Đã đến giờ gửi tin đang nằm trong ô (giãn cách = 0 → gửi ngay). */
+  function canSendNow() {
+    return !pendingSend.gapUntil || Date.now() >= pendingSend.gapUntil;
+  }
+
+  /** Sau khi ra lệnh gửi: kiểm tra nhanh nhiều nhịp để bắn tiếp ngay khi tin trước đi. */
+  function scheduleSendFollowUp() {
+    [50, 200, 600, 1200].forEach((ms) => {
+      setTimeout(() => {
+        if (!pendingSend || !pendingSend.running) return;
+        if (pendingTimer) return;               // đã có lịch khác đang chờ
+        advancePending(true);
+      }, ms);
+    });
+  }
+
+  function schedulePendingCheck(delay) {
+    if (pendingTimer) clearTimeout(pendingTimer);
+    pendingTimer = setTimeout(() => {
       pendingTimer = null;
-      if (!pendingSend || !pendingSend.running) return;
-      const el = pendingSend.el;
-      if (!el || !el.isConnected) { clearPending(); return; }
-      if (pendingSend.stop) { finishPending('Đã dừng gửi các tin còn lại.'); return; }
-
-      const manual = settings.chain === 'manual';
-      const empty = composerIsEmpty(el);
-
-      if (empty) {
-        // tin trước đã gửi xong
-        pendingSend.waitSince = 0;
-        pendingSend.tries = 0;
-        pendingSend.sendTry = 0;
-
-        if (pendingSend.index < pendingSend.parts.length) {
-          fillNextPart();
-          if (manual) {
-            pendingSend.waitSince = Date.now();   // chờ người dùng Enter
-          } else if (settings.gapMs <= 0) {
-            // 0ms → gửi ngay trong cùng nhịp, không chờ
-            pendingSend.pendingAuto = false;
-            pendingSend.fillAt = 0;
-            flushWaitBadge();
-            triggerSend(el);
-            pendingSend.waitSince = Date.now();
-            pendingSend.deadline = Date.now() + PENDING_GAP_MAX_MS;
-          } else {
-            pendingSend.pendingAuto = true;       // sẽ tự gửi sau "Giãn cách"
-            pendingSend.autoAt = Date.now() + settings.gapMs;
-          }
-          if (!pendingSend) return;
-          if (settings.gapMs > 0 || manual) flushWaitBadge();
-        } else {
-          finishPending(null);                    // hết tin
-          return;
-        }
-      } else if (!manual) {
-        if (pendingSend.pendingAuto) {
-          if (Date.now() >= pendingSend.autoAt) {
-            pendingSend.pendingAuto = false;
-            triggerSend(el);                      // bấm nút Gửi (hoặc phím Enter)
-            pendingSend.waitSince = Date.now();
-            pendingSend.deadline = Date.now() + PENDING_GAP_MAX_MS;
-          }
-        } else {
-          // đã ra lệnh gửi mà ô vẫn còn chữ → thử lại (đổi ứng viên nút Gửi)
-          if (!pendingSend.waitSince) pendingSend.waitSince = Date.now();
-          const waited = Date.now() - pendingSend.waitSince;
-          if (waited > ENTER_RETRY_GAP_MS) {
-            if (pendingSend.tries < 3) {
-              pendingSend.tries += 1;
-              pendingSend.sendTry = (pendingSend.sendTry || 0) + 1;
-              pendingSend.waitSince = Date.now();
-              triggerSend(el);
-            } else {
-              finishPending('Không bấm được nút Gửi — tin kế tiếp đã điền sẵn, bạn bấm Enter/Gửi để tiếp tục.');
-              return;
-            }
-          } else if (Date.now() > (pendingSend.deadline || 0)) {
-            finishPending('Đã dừng (chờ quá lâu).');
-            return;
-          }
-        }
+      if (!pendingSend) return;
+      if (pendingSend.running) {
+        if (!canSendNow()) { schedulePendingCheck(Math.max(0, pendingSend.gapUntil - Date.now())); return; }
+        advancePending(true);   // đến giờ → gửi tin đang chờ (kể cả khi app không đổi DOM)
       }
-      // chế độ thủ công: ô đang có chữ → chờ người dùng Enter, không timeout
+    }, Math.max(0, delay || 0));
+  }
 
-      if (pendingSend) pendingTimer = setTimeout(tick, PENDING_POLL_MS);
-    };
-    pendingTimer = setTimeout(tick, PENDING_POLL_MS);
+  /** Bắt đầu chuỗi tự gửi (người dùng vừa Enter / bấm nút Gửi cho tin đầu tiên). */
+  function startPendingChain() {
+    if (!pendingSend || pendingSend.running) return;
+    pendingSend.running = true;
+    pendingSend.waitSince = Date.now();
+    pendingSend.tries = 0;
+    pendingSend.sendTry = 0;
+    pendingSend.deadline = Date.now() + PENDING_GAP_MAX_MS;
+    pendingSend.awaitConfirm = false;   // tin đầu do CHÍNH người dùng gửi → biết chắc đã gửi
+    flushWaitBadge();
+    watchComposerEl(pendingSend.el);
+    watchThread();
+    // tin đầu do CHÍNH người dùng gửi → biết chắc đã gửi, nên điền tin kế tiếp ngay
+    // (tự động: điền + bắn tiếp; thủ công: điền rồi chờ người dùng Enter)
+    advancePending(true);
+    if (pendingSend && settings.chain === 'manual') {
+      pendingSend.waitSince = Date.now();
+      schedulePendingCheck(ENTER_RETRY_GAP_MS); // chỉ để không kẹt nếu người dùng không Enter
+    }
+  }
+
+  /**
+   * Bộ máy chính. Gọi khi: (a) MutationObserver thấy thay đổi, (b) đến giờ giãn cách,
+   * (c) người dùng Enter/Gửi tin đầu.
+   * @param {boolean} trusted  true = biết chắc tin trước đã gửi (bong bóng mới / tới giờ hẹn)
+   */
+  function advancePending(trusted) {
+    if (!pendingSend || !pendingSend.running || pendingSend.stop) {
+      if (pendingSend && pendingSend.stop) finishPending('Đã dừng gửi các tin còn lại.');
+      return;
+    }
+    const el = pendingSend.el;
+    if (!el || !el.isConnected) { clearPending(); return; }
+
+    const manual = settings.chain === 'manual';
+    const empty = composerIsEmpty(el);
+
+    // Tin trước CHƯA được server nhận (ô trống nhưng app không bắn 'input' / chưa có bong bóng mới):
+    // chờ thêm, không điền tin kế tiếp ngay → tránh mất tin.
+    const unconfirmed = empty && pendingSend.awaitConfirm && !trusted;
+    if (unconfirmed && Date.now() < (pendingSend.deadline || 0)) {
+      const since = pendingSend.sentAt || 0;
+      if (Date.now() - since < SOFT_CONFIRM_MS) {
+        schedulePendingCheck(Math.max(20, SOFT_CONFIRM_MS - (Date.now() - since)));
+        return;
+      }
+      // quá 500ms không có tín hiệu gì → chấp nhận (nhiều bản Pancake không bắn 'input' khi gửi)
+    }
+    pendingSend.awaitConfirm = false;
+
+    if (!empty) {
+      if (manual) return;                 // thủ công: chờ người dùng Enter
+      if (!canSendNow()) {                // chưa tới giờ giãn cách
+        pendingSend.needSend = true;      // để khi tới giờ là bấm gửi
+        schedulePendingCheck(pendingSend.gapUntil - Date.now());
+        return;
+      }
+      // Đã điền tin mới nhưng chưa bấm gửi (giãn cách đã hết) → bấm gửi ngay
+      if (pendingSend.needSend) {
+        pendingSend.needSend = false;
+        pendingSend.awaitConfirm = pendingSend.index < pendingSend.parts.length;
+        pendingSend.sentAt = Date.now();
+        pendingSend.waitSince = Date.now();
+        triggerSend(el);
+        scheduleSendFollowUp();
+        return;
+      }
+      // ô còn chữ: tin trước chưa đi, hoặc vừa bấm gửi mà chưa ăn
+      if (!pendingSend.waitSince) pendingSend.waitSince = Date.now();
+      const waited = Date.now() - pendingSend.waitSince;
+      const retryGap = pendingSend.tries === 0 ? FIRST_RETRY_MS : ENTER_RETRY_GAP_MS;
+      if (waited > retryGap) {
+        if (pendingSend.tries < 3) {
+          pendingSend.tries += 1;
+          pendingSend.sendTry = (pendingSend.sendTry || 0) + 1;
+          pendingSend.waitSince = Date.now();
+          triggerSend(el);                // thử lại (đổi ứng viên nút Gửi → phím Enter)
+          schedulePendingCheck(retryGap);
+        } else {
+          finishPending('Không bấm được nút Gửi — tin kế tiếp đã điền sẵn, bạn bấm Enter/Gửi để tiếp tục.');
+        }
+        return;
+      }
+      schedulePendingCheck(retryGap - waited);
+      return;
+    }
+
+    // Ô đã trống → tin trước đã gửi. Điền tin kế tiếp rồi gửi.
+    if (pendingSend.index >= pendingSend.parts.length) { finishPending(null); return; }
+    fillNextPart();
+    if (!pendingSend) return;
+
+    if (manual) {                          // thủ công: chỉ điền, chờ người dùng Enter
+      pendingSend.waitSince = Date.now();
+      flushWaitBadge();
+      return;
+    }
+
+    pendingSend.waitSince = Date.now();
+    pendingSend.deadline = Date.now() + PENDING_GAP_MAX_MS;
+    pendingSend.gapUntil = settings.gapMs > 0 ? Date.now() + settings.gapMs : 0;
+    flushWaitBadge();
+
+    if (!pendingSend.gapUntil) {
+      pendingSend.needSend = false;
+      pendingSend.awaitConfirm = pendingSend.index < pendingSend.parts.length; // còn tin sau → cần xác nhận
+      pendingSend.sentAt = Date.now();
+      triggerSend(el);                     // 0ms → bắn ngay, không chờ nhịp nào
+      pendingSend.waitSince = Date.now();
+      scheduleSendFollowUp();
+    } else {
+      pendingSend.needSend = true;
+      schedulePendingCheck(pendingSend.gapUntil - Date.now());
+    }
   }
 
   /** Kết thúc chuỗi (gửi hết / dừng / lỗi). */
   function finishPending(msg) {
     if (pendingTimer) { clearTimeout(pendingTimer); pendingTimer = null; }
+    if (pendingDebounce) { clearTimeout(pendingDebounce); pendingDebounce = null; }
+    try { composerObserver.disconnect(); } catch (e) { /* ignore */ }
+    try { threadObserver.disconnect(); } catch (e) { /* ignore */ }
     highlightWaitingInput(false);
     pendingSend = null;
     flushWaitBadge();
@@ -1367,8 +1489,11 @@
         stop: false,
         waitSince: 0,
         tries: 0,
+        sendTry: 0,
+        gapUntil: 0,
         deadline: 0,
       };
+      watchComposerEl(el);
       flushWaitBadge();
     } else {
       clearPending();
@@ -1683,13 +1808,7 @@
     //  • chế độ tự động → app gửi tin 1 xong là script tự điền + tự gửi tiếp (không cần Enter nữa)
     //  • chế độ thủ công → chỉ điền tin kế tiếp, chờ bạn Enter
     if (key === 'Enter' && pendingSend && !pendingSend.running) {
-      pendingSend.running = true;
-      pendingSend.waitSince = Date.now();
-      pendingSend.tries = 0;
-      pendingSend.sendTry = 0;
-      pendingSend.deadline = Date.now() + PENDING_GAP_MAX_MS;
-      flushWaitBadge();
-      ensurePendingLoop();
+      startPendingChain();
     }
 
     // Gợi ý đã đóng / chưa kịp mở: nếu token hiện tại khớp CHÍNH XÁC thì vẫn chèn
@@ -1710,6 +1829,17 @@
     if (!isEditableEl(el)) return;
     lastActiveInput = el;
 
+
+    // Chuỗi đang chạy mà ô vừa bị app xoá trắng (không phải script vừa điền) → coi như tin trước đã gửi
+    if (pendingSend && pendingSend.el === el) {
+      pendingSend.justFilled = false;
+      if (composerIsEmpty(el)) {
+        pendingSend.awaitConfirm = false;   // app đã xoá ô + bắn input = tin trước đã gửi
+        if (pendingSend.running) onPendingSignal();
+      } else {
+        pendingSend.awaitConfirm = false;   // người dùng đang gõ → huỷ chờ xác nhận
+      }
+    }
 
     // Câu nhiều tin CHỜ SẴN (chưa Enter lần đầu), người dùng xoá sạch & không gõ gì thêm → bỏ chờ.
     // Nếu chế độ tự động đang chạy thì KHÔNG huỷ (app vừa gửi tin → ô trống là điều kiện để điền tiếp).
@@ -1746,15 +1876,7 @@
           && (/\bsend\b|send-|icon-send|gửi|paper-?plane/i.test(hay))) { hit = true; break; }
       node = node.parentElement;
     }
-    if (hit) {
-      pendingSend.running = true;
-      pendingSend.waitSince = Date.now();
-      pendingSend.tries = 0;
-      pendingSend.sendTry = 0;
-      pendingSend.deadline = Date.now() + PENDING_GAP_MAX_MS;
-      flushWaitBadge();
-      ensurePendingLoop();
-    }
+    if (hit) startPendingChain();
   }, true);
 
   // Bấm chuột trong ô soạn tin (đổi vị trí con trỏ) → tính lại token tại con trỏ mới
@@ -1800,11 +1922,13 @@
     if (pendingSend) positionWaitBadge();
   }, true);
 
-  // Ô soạn tin bị gỡ khỏi DOM (đổi chat) → huỷ phần chờ
-  setInterval(() => {
-    if (pendingSend && (!pendingSend.el || !pendingSend.el.isConnected)) clearPending();
-    else if (pendingSend) positionWaitBadge();
-  }, 1500);
+  // Ô soạn tin bị gỡ khỏi DOM (đổi chat) → huỷ chuỗi; nhãn "chờ gửi" bám theo ô soạn tin.
+  const detachObserver = new MutationObserver(() => {
+    if (!pendingSend) return;
+    if (!pendingSend.el || !pendingSend.el.isConnected) { clearPending(); return; }
+    positionWaitBadge();
+  });
+  try { detachObserver.observe(document.body, { childList: true, subtree: true }); } catch (e) { /* ignore */ }
 
   /* ============================ RENDER PANEL ============================ */
 
