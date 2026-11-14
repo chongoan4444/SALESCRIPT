@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Hỗ trợ trả lời Sale (Draggable Bubble - v5.5)
 // @namespace    http://tampermonkey.net/
-// @version      6.3.0
+// @version      6.4.0
 // @description  Trợ lý trả lời nhanh cho Sale: gõ câu tắt dạng /cn trong ô soạn tin Pancake → câu trả lời tự nhảy vào ô, Enter là gửi. Bong bóng nổi kéo thả, quản lý danh mục & câu tắt ngay trên trang.
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -42,6 +42,12 @@
  *     gõ "//cn" → hiện danh sách gợi ý ngay trên ô nhập → Enter/Tab (hoặc bấm gợi ý)
  *     → câu trả lời được CHÈN vào đúng vị trí con trỏ, giữ nguyên chữ đang gõ dở;
  *     bấm Enter lần nữa là gửi (script không tự gửi, không tự Enter).
+ * - v6.4.0: Câu nhiều tin KHÔNG cần Enter từng tin nữa: bạn Enter MỘT LẦN (gửi tin 1) là script
+ *   tự điền + tự gửi tiếp các tin còn lại, cách nhau "Giãn cách" (mặc định 1200ms, chỉnh trong
+ *   panel). Cách gửi: bấm đúng nút Gửi của Pancake trong khung soạn tin (tìm theo title/class
+ *   chứa "gửi"/"send"), không thấy thì phát phím Enter tổng hợp; nếu vẫn không ăn thì dừng an toàn
+ *   và để các tin còn lại cho bạn Enter tay. Nút ✕ cạnh ô soạn tin = DỪNG ngay.
+ *   Muốn kiểu cũ (Enter từng tin) → panel: "Câu nhiều tin: Thủ công".
  * - v6.3.0: BỎ thông báo toast khi chọn/chèn câu (chỉ còn cảnh báo lỗi), và mỗi câu tắt có thể
  *   gồm NHIỀU TIN: các tin cách nhau bằng 1 DÒNG TRỐNG trong ô nội dung. Khi dùng, tin 1 được
  *   điền ngay; bạn Enter (hoặc bấm nút Gửi) → app gửi tin 1, ô trống → script tự điền tin 2,
@@ -62,7 +68,7 @@
 
   /* ============================ HẰNG SỐ ============================ */
 
-  const APP_VERSION = '6.3.0';
+  const APP_VERSION = '6.4.0';
   const KEY_DATA = 'tln_data_v2';          // v6.2.0: dữ liệu trắng (người dùng tự thêm), kích hoạt bằng "//"
   const KEY_DATA_OLD = 'tln_data_v1';      // dữ liệu của v6.0/6.1 (bị bỏ khi nâng cấp)
   const CLEAR_FLAG = 'tln_cleared_v2';     // đánh dấu đã dọn dữ liệu mẫu một lần
@@ -642,6 +648,10 @@
     .tln-footer b { color: #1d4ed8; }
     .tln-auto { display: flex; align-items: center; gap: 5px; cursor: pointer; margin-top: 4px; font-size: 10.5px; }
     .tln-auto input { width: 12px; height: 12px; cursor: pointer; margin: 0; }
+    .tln-num {
+      width: 58px; font-size: 10.5px; color: #334155; border: 1px solid #cbd5e1; border-radius: 5px;
+      padding: 1px 4px; background: #fff; outline: none;
+    }
     .tln-select {
       font-size: 10.5px; color: #334155; border: 1px solid #cbd5e1; border-radius: 5px;
       padding: 1px 4px; background: #fff; cursor: pointer; outline: none; max-width: 148px;
@@ -742,6 +752,11 @@
       place: ['above', 'below', 'free'].indexOf(s.place) > -1 ? s.place : 'above',
       // ẩn bảng câu nhanh "/" gốc của Pancake khi bảng của script đang mở (đỡ bị che)
       hideNative: s.hideNative !== false,
+      // v6.4.0: 'auto' = Enter 1 lần rồi script tự đẩy hết các tin còn lại
+      //          'manual' = mỗi tin bạn Enter một lần (kiểu cũ)
+      chain: s.chain === 'manual' ? 'manual' : 'auto',
+      // giãn cách giữa 2 tin khi tự đẩy (ms) — tránh bị Facebook chặn spam
+      gapMs: Math.max(300, Math.min(10000, Number(s.gapMs) || 1200)),
     };
   }
   function saveSettings() {
@@ -789,7 +804,7 @@
 
   const waitBadge = h('div', { id: 'tln-waiting' });
   const waitText = h('span', { text: '' });
-  const waitCancel = h('button', { text: '✕', title: 'Bỏ các tin còn lại (không điền nữa)' });
+  const waitCancel = h('button', { text: '✕', title: 'Dừng tự gửi / bỏ các tin còn lại' });
   waitBadge.appendChild(h('span', { text: '⏳' }));
   waitBadge.appendChild(waitText);
   waitBadge.appendChild(waitCancel);
@@ -798,7 +813,12 @@
   waitCancel.addEventListener('click', (e) => {
     e.preventDefault();
     e.stopPropagation();
-    clearPending();
+    if (pendingSend && pendingSend.running) {
+      pendingSend.stop = true;              // vòng lặp sẽ dừng ngay nhịp kế tiếp
+      waitText.textContent = 'Đang dừng…';
+    } else {
+      clearPending();
+    }
   });
 
   function flushWaitBadge() {
@@ -808,12 +828,17 @@
       highlightWaitingInput(false);
       return;
     }
-    const total = pendingSend.parts.length;
-    const cur = Math.min(pendingSend.index, total); // tin đang nằm trong ô soạn tin
-    const remaining = total - cur;
-    waitText.textContent = remaining > 0
-      ? 'Tin ' + cur + '/' + total + ' — Enter để gửi, script tự điền ' + remaining + ' tin tiếp theo'
-      : 'Tin ' + total + '/' + total + ' — tin cuối, Enter để gửi';
+    const total = partsTotal();
+    const cur = Math.min(pendingSend.index, total);
+    let label;
+    if (settings.chain === 'manual') {
+      label = 'Tin ' + cur + '/' + total + ' — Enter để gửi tin này';
+    } else if (!pendingSend.running) {
+      label = total + ' tin — Enter (gửi tin 1) là script tự gửi tiếp cả ' + total + ' tin';
+    } else {
+      label = 'Đang tự gửi ' + Math.min(cur, total) + '/' + total + ' tin…';
+    }
+    waitText.textContent = label;
     waitBadge.classList.add('show');
     positionWaitBadge();
     highlightWaitingInput(true);
@@ -1031,17 +1056,21 @@
     return { kind: 'editable', el, token: info.token, start: info.start, end: info.end, caret: offs.start };
   }
 
-  /* ============================ NHIỀU TIN CHO 1 CÂU TẮT (chờ gửi tiếp) ============================ */
+  /* ============================ NHIỀU TIN CHO 1 CÂU TẮT (tự gửi liên tiếp) ============================ */
 
-  // Một câu tắt có thể gồm 2–3 tin. Tin 1 được chèn ngay; các tin sau ở trạng thái "chờ".
-  // Khi bạn GỬI tin trước (Enter, hoặc bấm nút Gửi) → ô soạn tin trống → script tự điền tin
-  // kế tiếp và chờ bạn Enter tiếp. Không bao giờ điền oan khi bạn tự xoá nội dung:
-  // chỉ điền khi đã có Enter/nút Gửi, hoặc ô mất focus (dấu hiệu tin đã được gửi).
-  let pendingSend = null; // { parts, index, el, confirmed, filledAt, deadline }
+  // Một câu tắt có thể gồm 2–5 tin. Mặc định (v6.4.0): bạn chèn câu, bấm Enter MỘT LẦN để gửi
+  // tin đầu — script tự điền + tự gửi tiếp các tin còn lại, cách nhau `settings.gapMs`.
+  //  • Cách gửi từng tin: bấm đúng nút Gửi của Pancake trong khung soạn tin (tìm theo title/
+  //    class chứa "gửi"/"send"); không thấy nút thì phát phím Enter tổng hợp lên ô soạn tin.
+  //  • Không nhảy tin khi tin trước CHƯA đi khỏi ô soạn tin (tránh gửi sót/chèn đè).
+  //  • Nếu nút Gửi không tìm thấy và Enter không ăn sau 2 lần thử → dừng, để bạn Enter tay.
+  //  • Chế độ "Thủ công" (settings.chain='manual') = kiểu cũ: mỗi tin bạn Enter một lần.
+  let pendingSend = null; // { parts, index, el, running, stop, waitSince, tries, deadline, sentCount }
   let pendingTimer = null;
 
   const PENDING_POLL_MS = 120;
-  const PENDING_MAX_MS = 20000; // chờ tối đa 20s cho app gửi xong tin trước
+  const PENDING_GAP_MAX_MS = 15000;
+  const ENTER_RETRY_GAP_MS = 1800;
 
   function composerText(el) {
     if (!el || !el.isConnected) return '';
@@ -1054,83 +1083,193 @@
   function composerIsEmpty(el) {
     if (!el || !el.isConnected) return false;
     if (composerText(el).trim() !== '') return false;
-    // contenteditable còn ảnh đang chờ gửi → coi như chưa gửi
     if (tagOf(el) !== 'input' && tagOf(el) !== 'textarea') {
       if (/<img|data:image/i.test(el.innerHTML || '')) return false;
     }
     return true;
   }
 
+  /** Ứng viên nút GỬI của Pancake trong khung soạn tin (repo không có class/id của nút này). */
+  function findSendCandidates(el) {
+    const out = [];
+    if (!el || !el.isConnected) return out;
+    let scope = null;
+    try { scope = el.closest('.reply-box-container'); } catch (e) { scope = null; }
+    if (!scope) {
+      scope = el.parentElement;
+      for (let i = 0; i < 6 && scope && scope.parentElement; i++) scope = scope.parentElement;
+    }
+    if (!scope) return out;
+
+    const nodes = scope.querySelectorAll('button, [role="button"], span, div, i, a, svg');
+    const bad = /(photo|image|file|attach|emoji|sticker|product|order|invoice|upload|gift|quick|note|tag|trash|delete|clear|deselect|record|voice|call|video|badge)/i;
+    let best = null;
+    for (let i = 0; i < nodes.length; i++) {
+      const node = nodes[i];
+      const cls = String(node.className && node.className.baseVal != null ? node.className.baseVal : node.className || '');
+      const id = String(node.id || '');
+      const title = String((node.getAttribute && (node.getAttribute('title') || node.getAttribute('aria-label') || node.getAttribute('data-tip') || node.getAttribute('data-original-title'))) || '');
+      const hay = cls + ' ' + id + ' ' + title;
+      if (bad.test(hay)) continue;
+      if (/\bsend\b|send-|send_|icon-send|\bgui\b|gửi|paper-?plane/i.test(hay)) best = node;
+    }
+    if (!best) return out;
+
+    // chính phần tử đó trước, rồi lần lượt tổ tiên (một số app gắn handler ở khung cha)
+    out.push(best);
+    let cur = best;
+    for (let i = 0; i < 4 && cur.parentElement && cur.parentElement !== scope; i++) {
+      cur = cur.parentElement;
+      out.push(cur);
+    }
+    return out;
+  }
+
+  function fireEnter(el) {
+    try { el.focus({ preventScroll: true }); } catch (e) { /* ignore */ }
+    const mk = (type) => new KeyboardEvent(type, {
+      key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true, cancelable: true,
+    });
+    el.dispatchEvent(mk('keydown'));
+    el.dispatchEvent(mk('keypress'));
+    el.dispatchEvent(mk('keyup'));
+  }
+
+  /** Gửi tin ĐANG nằm trong ô soạn tin (bấm nút Gửi, hoặc phát phím Enter). */
+  function triggerSend(el) {
+    const cands = findSendCandidates(el);
+    const idx = (pendingSend && pendingSend.sendTry) || 0;
+    if (cands.length && idx < cands.length) {
+      const btn = cands[idx];
+      try {
+        const r = btn.getBoundingClientRect();
+        const opts = {
+          bubbles: true, cancelable: true, view: window,
+          clientX: r.left + r.width / 2, clientY: r.top + r.height / 2,
+        };
+        btn.dispatchEvent(new MouseEvent('mousedown', opts));
+        btn.dispatchEvent(new MouseEvent('mouseup', opts));
+        btn.dispatchEvent(new MouseEvent('click', opts));
+        return 'button';
+      } catch (e) { /* thử Enter */ }
+    }
+    fireEnter(el);
+    return 'enter';
+  }
+
+  function partsTotal() {
+    return pendingSend ? pendingSend.parts.length : 0;
+  }
+
+  /** Điền tin kế tiếp vào ô soạn tin (không gửi). */
   function fillNextPart() {
-    if (!pendingSend) return;
+    if (!pendingSend) return false;
     const el = pendingSend.el;
     const next = pendingSend.parts[pendingSend.index];
-    if (next == null) { clearPending(); return; }
+    if (next == null) return false;
     pendingSend.index += 1;
-    pendingSend.confirmed = false;
+    pendingSend.waitSince = 0;
+    pendingSend.tries = 0;
+    pendingSend.sendTry = 0;
     pendingSend.filledAt = Date.now();
     replaceRangeIn(el, 0, 0, next);
     try { el.focus({ preventScroll: true }); } catch (e) { /* ignore */ }
     try {
       const tag = tagOf(el);
       if (tag === 'input' || tag === 'textarea') {
-        const end = String(el.value || '').length;
-        el.setSelectionRange(end, end);
+        const endCaret = String(el.value || '').length;
+        el.setSelectionRange(endCaret, endCaret);
       }
     } catch (e) { /* ignore */ }
-    if (pendingSend.index >= pendingSend.parts.length) {
-      // đây là tin cuối → không cần chờ nữa, nhưng vẫn giữ trạng thái "chờ" để biết
-      pendingSend.done = true;
-      flushWaitBadge();
-    } else {
-      flushWaitBadge();
-    }
+    return true;
   }
 
-  /** Vòng kiểm tra ô soạn tin: rỗng & đã gửi → điền tin kế tiếp. */
+  /**
+   * Vòng điều khiển chuỗi nhiều tin (chỉ chạy sau khi người dùng Enter/Gửi tin đầu):
+   *  • tự động:  tin trước đi khỏi ô soạn tin → chờ đủ "Giãn cách" → điền tin kế tiếp → TỰ GỬI
+   *  • thủ công: điền tin kế tiếp rồi chờ người dùng Enter
+   */
   function ensurePendingLoop() {
     if (pendingTimer || !pendingSend) return;
-    pendingSend.deadline = pendingSend.deadline || (Date.now() + PENDING_MAX_MS);
     const tick = () => {
       pendingTimer = null;
-      if (!pendingSend) return;
+      if (!pendingSend || !pendingSend.running) return;
       const el = pendingSend.el;
       if (!el || !el.isConnected) { clearPending(); return; }
+      if (pendingSend.stop) { finishPending('Đã dừng gửi các tin còn lại.'); return; }
 
+      const manual = settings.chain === 'manual';
       const empty = composerIsEmpty(el);
-      // "đã gửi" = bạn vừa Enter/bấm Gửi, hoặc ô soạn tin đã mất focus (app gửi xong)
-      const sent = pendingSend.confirmed || document.activeElement !== el;
 
-      if (empty && sent) {
+      if (empty) {
+        // tin trước đã gửi xong
+        pendingSend.waitSince = 0;
+        pendingSend.tries = 0;
+        pendingSend.sendTry = 0;
+
         if (pendingSend.index < pendingSend.parts.length) {
-          fillNextPart();                     // còn tin → điền tin kế tiếp
+          fillNextPart();
+          if (manual) {
+            pendingSend.waitSince = Date.now();   // chờ người dùng Enter
+          } else {
+            pendingSend.pendingAuto = true;       // sẽ tự gửi sau "Giãn cách"
+            pendingSend.autoAt = Date.now() + settings.gapMs;
+          }
+          flushWaitBadge();
         } else {
-          clearPending();                     // tin cuối đã gửi xong
+          finishPending(null);                    // hết tin
           return;
         }
-      } else if (empty && !pendingSend.confirmed && Date.now() - (pendingSend.filledAt || 0) > 400) {
-        clearPending();                       // ô trống mà không hề Enter → người dùng tự xoá
-        return;
+      } else if (!manual) {
+        if (pendingSend.pendingAuto) {
+          if (Date.now() >= pendingSend.autoAt) {
+            pendingSend.pendingAuto = false;
+            triggerSend(el);                      // bấm nút Gửi (hoặc phím Enter)
+            pendingSend.waitSince = Date.now();
+            pendingSend.deadline = Date.now() + PENDING_GAP_MAX_MS;
+          }
+        } else {
+          // đã ra lệnh gửi mà ô vẫn còn chữ → thử lại (đổi ứng viên nút Gửi)
+          if (!pendingSend.waitSince) pendingSend.waitSince = Date.now();
+          const waited = Date.now() - pendingSend.waitSince;
+          if (waited > ENTER_RETRY_GAP_MS) {
+            if (pendingSend.tries < 3) {
+              pendingSend.tries += 1;
+              pendingSend.sendTry = (pendingSend.sendTry || 0) + 1;
+              pendingSend.waitSince = Date.now();
+              triggerSend(el);
+            } else {
+              finishPending('Không bấm được nút Gửi — tin kế tiếp đã điền sẵn, bạn bấm Enter/Gửi để tiếp tục.');
+              return;
+            }
+          } else if (Date.now() > (pendingSend.deadline || 0)) {
+            finishPending('Đã dừng (chờ quá lâu).');
+            return;
+          }
+        }
       }
+      // chế độ thủ công: ô đang có chữ → chờ người dùng Enter, không timeout
 
-      if (pendingSend && Date.now() < pendingSend.deadline) {
-        pendingTimer = setTimeout(tick, PENDING_POLL_MS);
-      } else if (pendingSend) {
-        clearPending();
-      }
+      if (pendingSend) pendingTimer = setTimeout(tick, PENDING_POLL_MS);
     };
     pendingTimer = setTimeout(tick, PENDING_POLL_MS);
   }
 
-  function clearPending(keepHighlight) {
+  /** Kết thúc chuỗi (gửi hết / dừng / lỗi). */
+  function finishPending(msg) {
     if (pendingTimer) { clearTimeout(pendingTimer); pendingTimer = null; }
-    if (!keepHighlight) highlightWaitingInput(false);
+    highlightWaitingInput(false);
     pendingSend = null;
     flushWaitBadge();
+    if (msg) showToast(msg, 'info');
+  }
+
+  function clearPending() {
+    finishPending(null);
   }
 
   /**
-   * Chèn tin đầu tiên của câu tắt + (nếu nhiều tin) đặt chờ tin kế tiếp.
+   * Chèn tin đầu tiên của câu tắt; nếu có nhiều tin thì đặt chờ + tự gửi tiếp (chế độ auto).
    * Không hiện toast khi chọn câu (theo yêu cầu).
    */
   function applyShortcut(item, targetEl, range) {
@@ -1166,13 +1305,16 @@
 
     if (parts.length > 1) {
       pendingSend = {
-        parts, index: 1, el,
-        confirmed: false,
-        filledAt: Date.now(),
-        deadline: Date.now() + PENDING_MAX_MS,
+        parts,
+        index: 1,
+        el,
+        running: false,      // bật khi bạn Enter lần đầu (gửi tin 1)
+        stop: false,
+        waitSince: 0,
+        tries: 0,
+        deadline: 0,
       };
       flushWaitBadge();
-      ensurePendingLoop();
     } else {
       clearPending();
     }
@@ -1482,10 +1624,16 @@
       return;
     }
 
-    // Enter = gửi tin hiện tại → nếu câu tắt còn tin sau, chờ ô trống rồi tự điền tin kế tiếp
-    if (key === 'Enter' && pendingSend) {
-      pendingSend.confirmed = true;
-      pendingSend.deadline = Date.now() + PENDING_MAX_MS;
+    // Enter = GỬI TIN ĐẦU. Nếu câu tắt còn tin sau:
+    //  • chế độ tự động → app gửi tin 1 xong là script tự điền + tự gửi tiếp (không cần Enter nữa)
+    //  • chế độ thủ công → chỉ điền tin kế tiếp, chờ bạn Enter
+    if (key === 'Enter' && pendingSend && !pendingSend.running) {
+      pendingSend.running = true;
+      pendingSend.waitSince = Date.now();
+      pendingSend.tries = 0;
+      pendingSend.sendTry = 0;
+      pendingSend.deadline = Date.now() + PENDING_GAP_MAX_MS;
+      flushWaitBadge();
       ensurePendingLoop();
     }
 
@@ -1508,6 +1656,14 @@
     lastActiveInput = el;
 
 
+    // Câu nhiều tin CHỜ SẴN (chưa Enter lần đầu), người dùng xoá sạch & không gõ gì thêm → bỏ chờ.
+    // Nếu chế độ tự động đang chạy thì KHÔNG huỷ (app vừa gửi tin → ô trống là điều kiện để điền tiếp).
+    if (pendingSend && pendingSend.el === el && !pendingSend.running && composerIsEmpty(el)) {
+      setTimeout(() => {
+        if (pendingSend && pendingSend.el === el && !pendingSend.running && composerIsEmpty(el)) clearPending();
+      }, 400);
+    }
+
     if (isSuggestScope(el)) refreshSuggest(el);
   }
   document.addEventListener('input', onInput, true);
@@ -1520,21 +1676,28 @@
     }
   }, true);
 
-  // Bấm nút GỬI của Pancake cũng coi như "đã gửi" → điền tin kế tiếp
+  // Bấm nút GỬI của Pancake (thay cho Enter) cũng bắt đầu chuỗi tự gửi
   document.addEventListener('click', (e) => {
-    if (!pendingSend) return;
+    if (!pendingSend || pendingSend.running) return;
     if (isOurs(e.target)) return;
     let node = e.target;
     let hit = false;
     for (let i = 0; i < 4 && node && node.nodeType === 1; i++) {
-      const cls = String(node.className || '') + ' ' + String(node.id || '');
+      const cls = String(node.className && node.className.baseVal != null ? node.className.baseVal : node.className || '');
       const hint = (node.getAttribute && (node.getAttribute('title') || node.getAttribute('aria-label') || '')) || '';
-      if (/send|gui\b/i.test(cls) || /gửi|send/i.test(hint)) { hit = true; break; }
+      // bỏ qua nút phụ (ảnh, file, emoji, sản phẩm…) — chỉ nhận nút gửi
+      const hay = cls + ' ' + String(node.id || '') + ' ' + hint;
+      if (!/(photo|image|file|attach|emoji|sticker|product|invoice|upload|select|badge)/i.test(hay)
+          && (/\bsend\b|send-|icon-send|gửi|paper-?plane/i.test(hay))) { hit = true; break; }
       node = node.parentElement;
     }
     if (hit) {
-      pendingSend.confirmed = true;
-      pendingSend.deadline = Date.now() + PENDING_MAX_MS;
+      pendingSend.running = true;
+      pendingSend.waitSince = Date.now();
+      pendingSend.tries = 0;
+      pendingSend.sendTry = 0;
+      pendingSend.deadline = Date.now() + PENDING_GAP_MAX_MS;
+      flushWaitBadge();
       ensurePendingLoop();
     }
   }, true);
@@ -1886,6 +2049,44 @@
     footer.appendChild(h('b', { text: '//câu_tắt' }));
     footer.appendChild(h('span', { text: ' (HAI gạch chéo) + chữ tắt trong ô soạn tin → Enter/Tab (hoặc cách ra) để chèn câu — Enter lần nữa để gửi.' }));
     footer.appendChild(h('br'));
+
+    // Cách gửi câu nhiều tin
+    const chainWrap = h('label', { class: 'tln-auto' });
+    chainWrap.appendChild(h('span', { text: 'Câu nhiều tin:' }));
+    const chainSel = h('select', { class: 'tln-select' });
+    [{ v: 'auto', t: 'Tự gửi liên tiếp (Enter 1 lần)' }, { v: 'manual', t: 'Thủ công (Enter từng tin)' }]
+      .forEach((o) => {
+        const opt = h('option', { value: o.v, text: o.t });
+        if (settings.chain === o.v) opt.selected = true;
+        chainSel.appendChild(opt);
+      });
+    chainSel.addEventListener('change', () => {
+      settings.chain = chainSel.value === 'manual' ? 'manual' : 'auto';
+      saveSettings();
+      flushWaitBadge();
+      showToast(settings.chain === 'manual'
+        ? 'Chế độ thủ công: mỗi tin bạn Enter một lần'
+        : 'Chế độ tự động: Enter tin đầu là gửi tiếp hết');
+    });
+    chainWrap.appendChild(chainSel);
+    footer.appendChild(chainWrap);
+
+    // Giãn cách giữa 2 tin
+    const gapWrap = h('label', { class: 'tln-auto' });
+    gapWrap.appendChild(h('span', { text: 'Giãn cách:' }));
+    const gapInput = h('input', {
+      class: 'tln-num', type: 'number', min: '300', max: '10000', step: '100',
+      value: String(settings.gapMs),
+    });
+    gapInput.addEventListener('change', () => {
+      const v = Math.max(300, Math.min(10000, Number(gapInput.value) || 1200));
+      gapInput.value = String(v);
+      settings.gapMs = v;
+      saveSettings();
+    });
+    gapWrap.appendChild(gapInput);
+    gapWrap.appendChild(h('span', { text: 'ms/tin' }));
+    footer.appendChild(gapWrap);
 
     // Vị trí bảng gợi ý
     const posWrap = h('label', { class: 'tln-auto' });

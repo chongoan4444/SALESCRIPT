@@ -1,6 +1,6 @@
 # TRALOINHANH — Trả lời nhanh cho Sale (câu tắt `/cn` + bong bóng kéo thả)
 
-File: `scripts/traloinhanh.user.js` (v6.3.0) — Tampermonkey, chạy trên trang chat Pancake
+File: `scripts/traloinhanh.user.js` (v6.4.0) — Tampermonkey, chạy trên trang chat Pancake
 (`pancake.vn`, `pages.fm`, `pancake.ph/id/in/biz`, `socialos.vip`).
 
 **Đây là bản nâng cấp của script “Hỗ trợ trả lời Sale (Draggable Bubble - v5.5)”.**
@@ -20,7 +20,7 @@ chỉ cần mở script cũ trong Tampermonkey → dán đè toàn bộ nội du
 | — | Ô **tìm kiếm** câu tắt/nội dung, nút 📋 sao chép từng câu, phím tắt `Alt+Shift+S` |
 | — | Lần chạy đầu của v6.2.0 **dọn sạch** dữ liệu cũ (`tln_data_v1`, `sqr_data_v5`) và in bản sao ra console |
 | Có thông báo “Đã chèn câu…” mỗi lần chọn câu | **Không còn toast** khi chọn/chèn câu (chỉ giữ cảnh báo lỗi) |
-| 1 câu = 1 tin | **1 câu tắt = nhiều tin**: Enter gửi tin 1 → script tự điền tin 2 → Enter tiếp… |
+| 1 câu = 1 tin | **1 câu tắt = nhiều tin**: Enter **một lần** là script tự điền + tự gửi tiếp các tin còn lại |
 | — | **Không còn che bảng "/" gốc của Pancake**: bảng gợi ý của script tự ẩn bảng gốc khi mở, và **kéo được** (lưu vị trí) nếu vẫn muốn dời đi chỗ khác |
 
 ## Sử dụng
@@ -39,16 +39,22 @@ chỉ cần mở script cũ trong Tampermonkey → dán đè toàn bộ nội du
    Anh/chị chốt giúp em nhé!
    ```
 
-   = 3 tin. Khi dùng `//cau_tat`: tin 1 được điền vào ô chat → bạn **Enter** để gửi → script tự điền
-   tin 2 (chờ bạn Enter) → … hết tin thì thôi. Cạnh ô soạn tin có nhãn **“Tin 1/3 — Enter để gửi…”**;
-   bấm **✕** trên nhãn để bỏ các tin còn lại. Script **không tự gửi** và **không điền oan** khi bạn tự xoá nội dung.
-   (Xuống dòng đơn trong cùng một tin vẫn được giữ nguyên — không tách tin.)
+   = 3 tin. Khi dùng `//cau_tat`:
+
+   1. Tin 1 được điền vào ô chat.
+   2. Bạn **Enter MỘT LẦN** (gửi tin 1) → app gửi xong, script **tự điền + tự gửi tiếp** tin 2, tin 3…
+      cách nhau **“Giãn cách”** (mặc định **1200 ms/tin**, chỉnh ở cuối panel).
+
+   Cạnh ô soạn tin có nhãn tím **“3 tin — Enter (gửi tin 1) là script tự gửi tiếp cả 3 tin”** →
+   khi chạy đổi thành **“Đang tự gửi 2/3 tin…”**; bấm **✕** trên nhãn = **DỪNG** ngay.
+   Muốn kiểu cũ (mỗi tin Enter một lần): panel → **“Câu nhiều tin: Thủ công (Enter từng tin)”**.
+   Script không điền oan khi bạn tự xoá nội dung; xuống dòng đơn trong một tin vẫn giữ nguyên (không tách tin).
 1. **Gõ câu tắt trong ô soạn tin** của Pancake (ô `textarea#replyBoxComposer`):
    - Gõ **`//`** (hai gạch chéo) → hiện danh sách câu tắt gợi ý ngay cạnh ô soạn tin.
    - Gõ tiếp chữ (vd `//cn`) → lọc dần, gợi ý khớp đầu câu tắt được ưu tiên.
    - **Enter / Tab** (hoặc bấm vào gợi ý): chèn **tin đầu tiên** vào đúng vị trí con trỏ,
      xóa luôn phần `//cn`, đặt con trỏ ở cuối câu → **bấm Enter lần nữa là gửi** (script không tự gửi).
-     Câu có nhiều tin thì sau khi gửi, tin kế tiếp tự được điền (xem mục 0).
+     Câu có nhiều tin: Enter lần đầu là gửi tin 1, các tin sau **tự gửi tiếp** (xem mục 0).
    - **Một gạch `/` thì script KHÔNG làm gì** — đó vẫn là bảng câu nhanh "/" gốc của Pancake.
    - `//` phải đứng đầu ô hoặc sau khoảng trắng/ký tự mở: `abc//cn`, `https://x//y`, `///cn` → không kích hoạt.
    - **↑ ↓** đổi lựa chọn, **Esc** đóng gợi ý. Gõ đúng câu tắt rồi **cách ra** cũng chèn luôn
@@ -84,3 +90,16 @@ Riêng bảng câu nhanh "/" **gốc của Pancake**: repo chưa bắt được 
 `html*.txt`, cũng không thấy class trong `_app`), nên script **không đoán class** — chỉ dùng CSS `:has()`
 nhắm theo đúng **câu chữ** của bảng (`:has(.suggestion-element)`, `:has(.shortcut-tag)`, `:has(#qr_autocomplete)`)
 và luôn có công tắc để tắt. Nếu bảng gốc vẫn hiện, dùng cách **kéo bảng của script** sang chỗ khác.
+
+## Cách script gửi các tin tiếp theo (không cần bạn Enter)
+
+- Ưu tiên **bấm đúng nút Gửi của Pancake** trong khung soạn tin: script tìm trong
+  `.reply-box-container` phần tử có `title`/`class`/`id` chứa `send`/`gửi` (bỏ qua nút ảnh, file,
+  emoji, sản phẩm…). Repo **không chứa class/id của nút Gửi** (`html3.txt` chỉ có
+  `.reply-box-actions-container` + các `.new-reply-box-btn`), nên đây là cách nhận diện theo thuộc tính.
+- Không tìm thấy nút → phát **phím Enter tổng hợp** lên ô soạn tin.
+- Vẫn không ăn (ô còn nguyên chữ) → thử lại tối đa 3 lần (mỗi lần đổi ứng viên nút Gửi), sau đó
+  **dừng an toàn**: tin kế tiếp vẫn được điền sẵn trong ô chat để bạn Enter/Gửi tay — không bao giờ
+  bắn Enter vô hạn.
+- Mọi thao tác chèn/gửi vẫn đi qua sự kiện thật trên ô soạn tin (`input`, `click`, `keydown/keyup`),
+  nên tin hiện trong lịch sử chat y như bạn tự gửi.
